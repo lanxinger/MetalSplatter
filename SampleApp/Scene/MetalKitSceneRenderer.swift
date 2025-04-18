@@ -8,6 +8,26 @@ import SampleBoxRenderer
 import simd
 import SwiftUI
 
+// Helper function for linear interpolation
+private func lerp<T: FloatingPoint>(_ a: T, _ b: T, _ t: T) -> T {
+    return a + (b - a) * t
+}
+
+// Helper function for Angle interpolation
+private func lerp(_ a: Angle, _ b: Angle, _ t: Double) -> Angle {
+    .radians(lerp(a.radians, b.radians, t))
+}
+
+// Helper function for SIMD2<Float> interpolation
+private func lerp(_ a: SIMD2<Float>, _ b: SIMD2<Float>, _ t: Float) -> SIMD2<Float> {
+    return a + (b - a) * t
+}
+
+// Simple ease-in-out easing function
+private func smoothStep<T: FloatingPoint>(_ t: T) -> T {
+    return t * t * (3 - 2 * t)
+}
+
 class MetalKitSceneRenderer: NSObject, MTKViewDelegate {
     private static let log =
         Logger(subsystem: Bundle.main.bundleIdentifier!,
@@ -24,8 +44,23 @@ class MetalKitSceneRenderer: NSObject, MTKViewDelegate {
 
     var lastRotationUpdateTimestamp: Date? = nil
     var rotation: Angle = .zero
+    var zoom: Float = 1.0
+    private var userIsInteracting = false
+    // Add vertical rotation (pitch)
+    var verticalRotation: Float = 0.0
+    // Add translation for panning
+    var translation: SIMD2<Float> = .zero
 
     var drawableSize: CGSize = .zero
+
+    // Animation State for Reset
+    private var isAnimatingReset: Bool = false
+    private var animationStartTime: Date? = nil
+    private let animationDuration: TimeInterval = 0.3 // seconds
+    private var startRotation: Angle = .zero
+    private var startVerticalRotation: Float = 0.0
+    private var startZoom: Float = 1.0
+    private var startTranslation: SIMD2<Float> = .zero
 
     init?(_ metalKitView: MTKView) {
         self.device = metalKitView.device!
@@ -66,13 +101,17 @@ class MetalKitSceneRenderer: NSObject, MTKViewDelegate {
     }
 
     private var viewport: ModelRendererViewportDescriptor {
-        let projectionMatrix = matrix_perspective_right_hand(fovyRadians: Float(Constants.fovy.radians),
+        let projectionMatrix = matrix_perspective_right_hand(fovyRadians: Float(Constants.fovy.radians) / zoom,
                                                              aspectRatio: Float(drawableSize.width / drawableSize.height),
                                                              nearZ: 0.1,
                                                              farZ: 100.0)
 
         let rotationMatrix = matrix4x4_rotation(radians: Float(rotation.radians),
                                                 axis: Constants.rotationAxis)
+        // Add vertical rotation (pitch) around X axis
+        let verticalMatrix = matrix4x4_rotation(radians: verticalRotation, axis: SIMD3<Float>(1, 0, 0))
+        // Add translation for panning
+        let panMatrix = matrix4x4_translation(translation.x, translation.y, 0)
         let translationMatrix = matrix4x4_translation(0.0, 0.0, Constants.modelCenterZ)
         // Turn common 3D GS PLY files rightside-up. This isn't generally meaningful, it just
         // happens to be a useful default for the most common datasets at the moment.
@@ -82,11 +121,12 @@ class MetalKitSceneRenderer: NSObject, MTKViewDelegate {
 
         return ModelRendererViewportDescriptor(viewport: viewport,
                                                projectionMatrix: projectionMatrix,
-                                               viewMatrix: translationMatrix * rotationMatrix * commonUpCalibration,
+                                               viewMatrix: translationMatrix * panMatrix * rotationMatrix * verticalMatrix * commonUpCalibration,
                                                screenSize: SIMD2(x: Int(drawableSize.width), y: Int(drawableSize.height)))
     }
 
     private func updateRotation() {
+        guard !userIsInteracting else { return }
         let now = Date()
         defer {
             lastRotationUpdateTimestamp = now
@@ -112,7 +152,38 @@ class MetalKitSceneRenderer: NSObject, MTKViewDelegate {
             semaphore.signal()
         }
 
-        updateRotation()
+        // --- Handle Reset Animation ---
+        if isAnimatingReset {
+            guard let startTime = animationStartTime else {
+                // Should not happen, but safety check
+                isAnimatingReset = false
+                return
+            }
+            let timeElapsed = Date().timeIntervalSince(startTime)
+            let progress = min(timeElapsed / animationDuration, 1.0)
+            let t = smoothStep(Float(progress)) // Eased progress
+
+            // Interpolate view properties
+            rotation = lerp(startRotation, .zero, Double(t))
+            verticalRotation = lerp(startVerticalRotation, 0.0, t)
+            zoom = lerp(startZoom, 1.0, t)
+            translation = lerp(startTranslation, .zero, t)
+
+            if progress >= 1.0 {
+                // Animation finished
+                isAnimatingReset = false
+                animationStartTime = nil
+                userIsInteracting = false // Allow auto-rotate again
+                lastRotationUpdateTimestamp = nil // Reset timestamp for smooth auto-rotate start
+            } else {
+                // Request next frame
+                metalKitView.setNeedsDisplay()
+            }
+        } else {
+             // Only update auto-rotation if not animating reset and not interacting
+            updateRotation()
+        }
+        // --- End Animation Handling ---
 
         do {
             try modelRenderer.render(viewports: [viewport],
@@ -134,6 +205,55 @@ class MetalKitSceneRenderer: NSObject, MTKViewDelegate {
     func mtkView(_ view: MTKView, drawableSizeWillChange size: CGSize) {
         drawableSize = size
     }
+
+    // MARK: - User Interaction API
+    #if os(iOS)
+    func setUserRotation(_ newRotation: Angle, vertical: Float) {
+        userIsInteracting = true
+        rotation = newRotation
+        verticalRotation = vertical
+        metalKitView.setNeedsDisplay()
+    }
+    func setUserZoom(_ newZoom: Float) {
+        userIsInteracting = true
+        zoom = newZoom
+        metalKitView.setNeedsDisplay()
+    }
+    func setUserTranslation(_ newTranslation: SIMD2<Float>) {
+        userIsInteracting = true
+        translation = newTranslation
+        metalKitView.setNeedsDisplay()
+    }
+    func resetView() {
+        // Start animation instead of setting directly
+        guard !isAnimatingReset else { return } // Don't restart if already animating
+
+        isAnimatingReset = true
+        animationStartTime = Date()
+        userIsInteracting = true // Prevent auto-rotate during animation
+
+        // Store starting state
+        startRotation = rotation
+        startVerticalRotation = verticalRotation
+        startZoom = zoom
+        startTranslation = translation
+
+        // No need to set final values here, draw() will handle it.
+        // No need for metalKitView.setNeedsDisplay() here, draw() will trigger redraws.
+    }
+
+    /// Call this when user gestures (drag, pinch) end.
+    func endUserInteraction() {
+        // If user interacts during reset animation, cancel the animation
+        if isAnimatingReset {
+            isAnimatingReset = false
+            animationStartTime = nil
+        }
+        userIsInteracting = false
+        // Reset timestamp to avoid jump in auto-rotation after interaction
+        lastRotationUpdateTimestamp = nil
+    }
+    #endif
 }
 
 #endif // os(iOS) || os(macOS)
