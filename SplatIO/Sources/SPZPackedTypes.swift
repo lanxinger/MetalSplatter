@@ -1,5 +1,8 @@
 import Foundation
 import simd
+#if canImport(Metal)
+import Metal
+#endif
 
 /**
  * Represents the header structure for SPZ format files
@@ -361,7 +364,13 @@ struct PackedGaussians {
         header.numPoints = UInt32(numPoints)
         header.shDegree = UInt8(shDegree)
         header.fractionalBits = UInt8(fractionalBits)
-        header.flags = (antialiased ? 0x1 : 0x0)
+        // Set the antialiased flag if needed
+        header.flags = (antialiased ? PackedGaussiansHeader.FlagAntialiased : 0x0)
+        
+        // Set the usesFloat16 flag if positions are stored in float16 format
+        if positions.count == numPoints * 3 * 2 {
+            header.flags |= PackedGaussiansHeader.FlagUsesFloat16
+        }
         
         var data = header.serialize()
         
@@ -540,7 +549,7 @@ struct PackedGaussians {
         result.numPoints = numPoints
         result.shDegree = Int(header.shDegree)
         result.fractionalBits = Int(header.fractionalBits)
-        result.antialiased = (header.flags & 0x1) != 0
+        result.antialiased = (header.flags & PackedGaussiansHeader.FlagAntialiased) != 0
         
         // Extract component data (safely handling truncated files)
         // For each component, check if we have enough data and adjust if needed
@@ -613,9 +622,17 @@ struct PackedGaussians {
 }
 
 /**
- * Utility function to convert a 16-bit half-precision float to a 32-bit float
+ * Utility function to convert a 16-bit half-precision float to a 32-bit float.
+ * Uses Metal for hardware-accelerated conversion when available,
+ * with a software fallback implementation for all platforms.
  */
 func float16ToFloat32(_ half: UInt16) -> Float {
+    #if canImport(Metal) && !targetEnvironment(simulator)
+    // Use Foundation's built-in Float16 type which leverages hardware acceleration when available
+    let tempHalf = Float16(bitPattern: half)
+    return Float(tempHalf)
+    #else
+    // Software fallback implementation for platforms without Metal
     let sign = (half & 0x8000) != 0
     let exponent = Int((half & 0x7C00) >> 10)
     let mantissa = Int(half & 0x03FF)
@@ -639,4 +656,5 @@ func float16ToFloat32(_ half: UInt16) -> Float {
     
     // Normalized
     return signMul * pow(2.0, Float(exponent - 15)) * (1.0 + Float(mantissa) / 1024.0)
+    #endif
 }

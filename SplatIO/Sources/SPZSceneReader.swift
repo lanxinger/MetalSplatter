@@ -2,6 +2,10 @@ import Foundation
 import Compression
 import simd
 
+#if canImport(Metal)
+import Metal
+#endif
+
 /**
  * Reader for SPZ format Gaussian splat scenes.
  * SPZ is a compact binary format for Gaussian splats with support for:
@@ -163,7 +167,7 @@ public class SPZSceneReader: SplatSceneReader {
     // MARK: - Private helpers
     
     private func unpackGaussians(_ packedGaussians: PackedGaussians) -> [SplatScenePoint] {
-        // Implementation based on the original C++ code
+        // Implementation based on the original C++ code with SIMD optimizations
         var results = [SplatScenePoint]()
         
         // Add safety checks, similar to the C++ implementation
@@ -206,168 +210,65 @@ public class SPZSceneReader: SplatSceneReader {
             return results
         }
         
-        // Preallocate the array
-        results.reserveCapacity(safeNumPoints)
-        
         // Determine data layout based on format
         let positionStride = packedGaussians.usesFloat16 ? 6 : 9 // bytes per position
+        let shStride = 3 // RGB components per SH coefficient
         
-        // RGB components per SH coefficient
-        let shStride = 3
-        
-        // Process in smaller batches for better memory management
+        // Process in smaller batches for better memory management and parallelization
         let chunkSize = 10000
-        for chunk in stride(from: 0, to: safeNumPoints, by: chunkSize) {
-            let endIdx = min(chunk + chunkSize, safeNumPoints)
-            
-            for i in chunk..<endIdx {
-                // Skip points that would be out of bounds
-                let posOffset = i * positionStride
-                let colorOffset = i * 3
-                let scaleOffset = i * 3
-                let rotOffset = i * 3
-                let shOffset = i * shDim * shStride
-                
-                // Check if all essential components are in bounds
-                guard i < packedGaussians.alphas.count &&
-                      colorOffset + 2 < packedGaussians.colors.count &&
-                      scaleOffset + 2 < packedGaussians.scales.count &&
-                      rotOffset + 2 < packedGaussians.rotations.count &&
-                      posOffset + (positionStride - 1) < packedGaussians.positions.count else {
-                    continue
+        let chunks = stride(from: 0, to: safeNumPoints, by: chunkSize).map { startIdx -> Range<Int> in
+            let endIdx = min(startIdx + chunkSize, safeNumPoints)
+            return startIdx..<endIdx
+        }
+        
+        // Use concurrent processing for large datasets
+        let useParallelProcessing = safeNumPoints > 100000
+        let processingQueue = DispatchQueue(label: "com.metalsplatter.spzprocessing", 
+                                          qos: .userInitiated, 
+                                          attributes: .concurrent)
+        
+        // Create a container for results that will be populated concurrently
+        var chunkResults = Array<[SplatScenePoint]?>(repeating: nil, count: chunks.count)
+        
+        let processingGroup = DispatchGroup()
+        
+        for (chunkIndex, chunkRange) in chunks.enumerated() {
+            if useParallelProcessing {
+                // Process each chunk on a background queue
+                processingGroup.enter()
+                processingQueue.async {
+                    chunkResults[chunkIndex] = self.processPointChunk(packedGaussians: packedGaussians,
+                                                                   range: chunkRange,
+                                                                   positionStride: positionStride,
+                                                                   shDim: shDim,
+                                                                   shStride: shStride)
+                    processingGroup.leave()
                 }
+            } else {
+                // Process sequentially for smaller datasets
+                chunkResults[chunkIndex] = self.processPointChunk(packedGaussians: packedGaussians,
+                                                               range: chunkRange,
+                                                               positionStride: positionStride,
+                                                               shDim: shDim,
+                                                               shStride: shStride)
                 
-                // Extract position using proper decoding based on the format
-                var position = SIMD3<Float>(0, 0, 0)
-                
-                if packedGaussians.usesFloat16 {
-                    // Decode float16 positions
-                    if posOffset + 5 < packedGaussians.positions.count {
-                        for j in 0..<3 {
-                            let byteOffset = posOffset + j * 2
-                            let halfValue = packedGaussians.positions.withUnsafeBytes { ptr -> UInt16 in
-                                let basePtr = ptr.baseAddress!.advanced(by: byteOffset)
-                                return basePtr.assumingMemoryBound(to: UInt16.self).pointee
-                            }
-                            position[j] = float16ToFloat32(halfValue)
-                        }
-                    }
-                } else {
-                    // Decode fixed-point positions
-                    let scale = 1.0 / Float(1 << packedGaussians.fractionalBits)
-                    
-                    if posOffset + 8 < packedGaussians.positions.count {
-                        for j in 0..<3 {
-                            let byteOffset = posOffset + j * 3
-                            var fixed32: Int32 = Int32(packedGaussians.positions[byteOffset])
-                            fixed32 |= Int32(packedGaussians.positions[byteOffset + 1]) << 8
-                            fixed32 |= Int32(packedGaussians.positions[byteOffset + 2]) << 16
-                            
-                            // Apply sign extension for negative values
-                            if (fixed32 & 0x800000) != 0 {
-                                fixed32 |= Int32(bitPattern: 0xFF000000)
-                            }
-                            
-                            position[j] = Float(fixed32) * scale
-                        }
-                    } else {
-                        // Use a fallback position if we can't decode properly
-                        position = SIMD3<Float>(
-                            Float(i % 100) * 0.1,
-                            Float(i / 100 % 100) * 0.1,
-                            Float(i / 10000) * 0.1
-                        )
-                    }
+                // Progress reporting for sequential processing
+                if chunkRange.lowerBound > 0 && chunkRange.lowerBound % 100000 == 0 {
+                    print("SPZSceneReader: Unpacked \(chunkRange.lowerBound) points...")
                 }
-                
-                // Extract scale using proper decoding (scale = value/16 - 10)
-                var scale = SIMD3<Float>(-5, -5, -5) // Default to a small scale
-                if scaleOffset + 2 < packedGaussians.scales.count {
-                    scale = SIMD3<Float>(
-                        Float(packedGaussians.scales[scaleOffset]) / 16.0 - 10.0,
-                        Float(packedGaussians.scales[scaleOffset + 1]) / 16.0 - 10.0,
-                        Float(packedGaussians.scales[scaleOffset + 2]) / 16.0 - 10.0
-                    )
-                }
-                
-                // Extract rotation (quaternion from 3 bytes)
-                var rotation = simd_quatf(ix: 0, iy: 0, iz: 0, r: 1) // Default identity quaternion
-                if rotOffset + 2 < packedGaussians.rotations.count {
-                    // Convert from [-1,1] range (stored as [0,255])
-                    let x = Float(packedGaussians.rotations[rotOffset]) / 127.5 - 1.0
-                    let y = Float(packedGaussians.rotations[rotOffset + 1]) / 127.5 - 1.0
-                    let z = Float(packedGaussians.rotations[rotOffset + 2]) / 127.5 - 1.0
-                    
-                    // Calculate w component to ensure unit quaternion
-                    let xyzSquaredSum = x*x + y*y + z*z
-                    let w = xyzSquaredSum < 1.0 ? sqrt(1.0 - xyzSquaredSum) : 0.0
-                    
-                    rotation = simd_quatf(ix: x, iy: y, iz: z, r: w)
-                }
-                
-                // Extract alpha (apply logit transformation)
-                let alpha: Float
-                if i < packedGaussians.alphas.count {
-                    alpha = logit(Float(packedGaussians.alphas[i]) / 255.0)
-                } else {
-                    alpha = 0.0 // Default fully transparent
-                }
-                
-                // Extract colors and SH coefficients
-                var sphericalHarmonics = [SIMD3<Float>()]
-                
-                // First extract the DC term (from colors or first SH coefficient)
-                if colorOffset + 2 < packedGaussians.colors.count {
-                    // In the original C++ implementation, colors are stored as SH DC components
-                    // with a specific color scale factor of 0.15f
-                    // The C++ code does: packed.colors[i] = toUint8(g.colors[i] * (colorScale * 255.0f) + (0.5f * 255.0f));
-                    // When unpacking: result.color[i] = ((color[i] / 255.0f) - 0.5f) / colorScale;
-                    
-                    // SH DC coefficient scale factor from original C++ implementation
-                    let colorScale: Float = 0.15
-                    
-                    // Map from [0, 255] to [0, 1], subtract 0.5, then divide by colorScale
-                    // This exactly matches the C++ implementation
-                    let r = (Float(packedGaussians.colors[colorOffset]) / 255.0 - 0.5) / colorScale
-                    let g = (Float(packedGaussians.colors[colorOffset + 1]) / 255.0 - 0.5) / colorScale
-                    let b = (Float(packedGaussians.colors[colorOffset + 2]) / 255.0 - 0.5) / colorScale
-                    
-                    sphericalHarmonics[0] = SIMD3<Float>(r, g, b)
-                }
-                
-                // Extract additional SH coefficients if present and needed
-                if shDim > 1 && shOffset + (shDim-1)*3 < packedGaussians.sh.count {
-                    // We already have the DC term (first coefficient), so start from the second
-                    for j in 1..<min(shDim, 15) { // Limit to 15 max coefficients per channel
-                        let idx = shOffset + j * 3
-                        if idx + 2 < packedGaussians.sh.count {
-                            // SH coefficients are unquantized using the formula from C++ implementation:
-                            // float unquantizeSH(uint8_t x) { return (static_cast<float>(x) - 128.0f) / 128.0f; }
-                            let sh_r = (Float(packedGaussians.sh[idx]) - 128.0) / 128.0
-                            let sh_g = (Float(packedGaussians.sh[idx + 1]) - 128.0) / 128.0
-                            let sh_b = (Float(packedGaussians.sh[idx + 2]) - 128.0) / 128.0
-                            
-                            sphericalHarmonics.append(SIMD3<Float>(sh_r, sh_g, sh_b))
-                        }
-                    }
-                }
-                
-                // Create the point with properly decoded values
-                let point = SplatScenePoint(
-                    position: position,
-                    color: .sphericalHarmonic(sphericalHarmonics),
-                    opacity: .logitFloat(alpha),
-                    scale: .exponent(scale),
-                    rotation: rotation
-                )
-                
-                // Add to results
-                results.append(point)
             }
-            
-            // Progress reporting
-            if chunk > 0 && chunk % 100000 == 0 {
-                print("SPZSceneReader: Unpacked \(chunk) points...")
+        }
+        
+        // Wait for all parallel processing to complete
+        if useParallelProcessing {
+            processingGroup.wait()
+        }
+        
+        // Combine results from all chunks
+        results.reserveCapacity(safeNumPoints)
+        for chunkResult in chunkResults {
+            if let points = chunkResult {
+                results.append(contentsOf: points)
             }
         }
         
@@ -375,7 +276,172 @@ public class SPZSceneReader: SplatSceneReader {
         return results
     }
     
+    // Process a chunk of points using SIMD operations for better performance
+    private func processPointChunk(packedGaussians: PackedGaussians, 
+                                 range: Range<Int>,
+                                 positionStride: Int,
+                                 shDim: Int,
+                                 shStride: Int) -> [SplatScenePoint] {
+        var chunkResults = [SplatScenePoint]()
+        chunkResults.reserveCapacity(range.count)
+        
+        // Color scale factor from original C++ implementation
+        let colorScale: Float = 0.15
+        
+        for i in range {
+            // Calculate offsets
+            let posOffset = i * positionStride
+            let colorOffset = i * 3
+            let scaleOffset = i * 3
+            let rotOffset = i * 3
+            let shOffset = i * shDim * shStride
+            
+            // Check if all essential components are in bounds
+            guard i < packedGaussians.alphas.count &&
+                  colorOffset + 2 < packedGaussians.colors.count &&
+                  scaleOffset + 2 < packedGaussians.scales.count &&
+                  rotOffset + 2 < packedGaussians.rotations.count &&
+                  posOffset + (positionStride - 1) < packedGaussians.positions.count else {
+                continue
+            }
+            
+            // Extract position using proper decoding based on the format
+            var position = SIMD3<Float>(0, 0, 0)
+            
+            if packedGaussians.usesFloat16 {
+                // Decode float16 positions using the optimized converter
+                if posOffset + 5 < packedGaussians.positions.count {
+                    // Extract position data for this point (6 bytes total - 3 components × 2 bytes)
+                    let posData = Array(packedGaussians.positions[posOffset..<(posOffset+6)])
+                    // Use the optimized FloatConversion utility which uses SIMD operations
+                    let convertedVals = FloatConversion.convertFloat16PositionsToFloat32(posData, count: 1)
+                    if !convertedVals.isEmpty {
+                        position = convertedVals[0]
+                    }
+                }
+            } else {
+                // Decode fixed-point positions
+                let scale = 1.0 / Float(1 << packedGaussians.fractionalBits)
+                
+                if posOffset + 8 < packedGaussians.positions.count {
+                    // Process all three position components
+                    for j in 0..<3 {
+                        let byteOffset = posOffset + j * 3
+                        var fixed32: Int32 = Int32(packedGaussians.positions[byteOffset])
+                        fixed32 |= Int32(packedGaussians.positions[byteOffset + 1]) << 8
+                        fixed32 |= Int32(packedGaussians.positions[byteOffset + 2]) << 16
+                        
+                        // Apply sign extension for negative values
+                        if (fixed32 & 0x800000) != 0 {
+                            fixed32 |= Int32(bitPattern: 0xFF000000)
+                        }
+                        
+                        position[j] = Float(fixed32) * scale
+                    }
+                } else {
+                    // Use a fallback position if we can't decode properly
+                    position = SIMD3<Float>(
+                        Float(i % 100) * 0.1,
+                        Float(i / 100 % 100) * 0.1,
+                        Float(i / 10000) * 0.1
+                    )
+                }
+            }
+            
+            // Extract scale using SIMD operations
+            var scale = SIMD3<Float>(-5, -5, -5) // Default to a small scale
+            if scaleOffset + 2 < packedGaussians.scales.count {
+                // Convert all scale values in one operation
+                let scaleBytes = SIMD3<Float>(
+                    Float(packedGaussians.scales[scaleOffset]),
+                    Float(packedGaussians.scales[scaleOffset + 1]),
+                    Float(packedGaussians.scales[scaleOffset + 2])
+                )
+                scale = scaleBytes / 16.0 - 10.0
+            }
+            
+            // Extract rotation (quaternion from 3 bytes)
+            var rotation = simd_quatf(ix: 0, iy: 0, iz: 0, r: 1) // Default identity quaternion
+            if rotOffset + 2 < packedGaussians.rotations.count {
+                // Convert all rotation components using SIMD
+                let rotBytes = SIMD3<Float>(
+                    Float(packedGaussians.rotations[rotOffset]),
+                    Float(packedGaussians.rotations[rotOffset + 1]),
+                    Float(packedGaussians.rotations[rotOffset + 2])
+                )
+                let xyz = rotBytes / 127.5 - 1.0
+                
+                // Calculate w component to ensure unit quaternion
+                let xyzSquaredSum = xyz.x*xyz.x + xyz.y*xyz.y + xyz.z*xyz.z
+                let w = xyzSquaredSum < 1.0 ? sqrt(1.0 - xyzSquaredSum) : 0.0
+                
+                rotation = simd_quatf(ix: xyz.x, iy: xyz.y, iz: xyz.z, r: w)
+            }
+            
+            // Extract alpha (apply logit transformation)
+            let alpha: Float
+            if i < packedGaussians.alphas.count {
+                alpha = logit(Float(packedGaussians.alphas[i]) / 255.0)
+            } else {
+                alpha = 0.0 // Default fully transparent
+            }
+            
+            // Extract colors and SH coefficients using SIMD operations
+            var sphericalHarmonics = [SIMD3<Float>()]
+            
+            // First extract the DC term (from colors or first SH coefficient)
+            if colorOffset + 2 < packedGaussians.colors.count {
+                // Extract all color components at once
+                let colorBytes = SIMD3<Float>(
+                    Float(packedGaussians.colors[colorOffset]),
+                    Float(packedGaussians.colors[colorOffset + 1]),
+                    Float(packedGaussians.colors[colorOffset + 2])
+                )
+                
+                // Apply the full transformation in one SIMD operation
+                let colorVector = (colorBytes / 255.0 - 0.5) / colorScale
+                sphericalHarmonics[0] = colorVector
+            }
+            
+            // Extract additional SH coefficients if present and needed
+            if shDim > 1 && shOffset + (shDim-1)*3 < packedGaussians.sh.count {
+                // We already have the DC term (first coefficient), so start from the second
+                for j in 1..<min(shDim, 15) { // Limit to 15 max coefficients per channel
+                    let idx = shOffset + j * 3
+                    if idx + 2 < packedGaussians.sh.count {
+                        // Process all three SH components at once
+                        let shBytes = SIMD3<Float>(
+                            Float(packedGaussians.sh[idx]),
+                            Float(packedGaussians.sh[idx + 1]),
+                            Float(packedGaussians.sh[idx + 2])
+                        )
+                        
+                        // Use SIMD to unquantize all components at once
+                        let shCoeffs = (shBytes - 128.0) / 128.0
+                        sphericalHarmonics.append(shCoeffs)
+                    }
+                }
+            }
+            
+            // Create the point with properly decoded values
+            let point = SplatScenePoint(
+                position: position,
+                color: .sphericalHarmonic(sphericalHarmonics),
+                opacity: .logitFloat(alpha),
+                scale: .exponent(scale),
+                rotation: rotation
+            )
+            
+            // Add to results
+            chunkResults.append(point)
+        }
+        
+        return chunkResults
+    }
+    
     // Helper function to convert sigmoid to logit
+
+    
     private func logit(_ x: Float) -> Float {
         let safe_x = max(0.0001, min(0.9999, x)) // Clamp to avoid log(0) or log(1)
         return log(safe_x / (1.0 - safe_x))
