@@ -34,8 +34,14 @@ public struct SplatMemoryBuffer {
 
     /** Replace the content of points with the content read from the given SplatSceneReader. */
     mutating public func read(from reader: SplatSceneReader) async throws {
-        points = try await withCheckedThrowingContinuation { continuation in
-            reader.read(to: BufferReader(continuation: continuation))
+        // Try to use the direct readScene() method first if available
+        do {
+            points = try reader.readScene()
+        } catch {
+            // Fall back to the delegate-based approach if direct reading fails
+            points = try await withCheckedThrowingContinuation { continuation in
+                reader.read(to: BufferReader(continuation: continuation))
+            }
         }
     }
 }

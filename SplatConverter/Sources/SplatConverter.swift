@@ -194,6 +194,7 @@ enum SplatOutputFileFormat: ExpressibleByArgument {
         switch format {
         case .dotSplat: self = .dotSplat
         case .ply: self = .binaryPLY
+        case .spz: self = .dotSplat  // Default to dotSplat when converting from SPZ
         case .none: return nil
         }
     }

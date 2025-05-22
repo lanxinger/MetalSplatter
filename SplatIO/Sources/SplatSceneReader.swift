@@ -8,5 +8,9 @@ public protocol SplatSceneReaderDelegate: AnyObject {
 }
 
 public protocol SplatSceneReader {
+    /// Read a scene directly into an array of points
+    func readScene() throws -> [SplatScenePoint]
+    
+    /// For backward compatibility - implementations can be added via extension
     func read(to delegate: SplatSceneReaderDelegate)
 }
