@@ -316,7 +316,12 @@ public class SPZSceneReader: SplatSceneReader {
                     // Use the optimized FloatConversion utility which uses SIMD operations
                     let convertedVals = FloatConversion.convertFloat16PositionsToFloat32(posData, count: 1)
                     if !convertedVals.isEmpty {
-                        position = convertedVals[0]
+                        // Fix the Y coordinate to handle upside-down display
+                        position = SIMD3<Float>(
+                            convertedVals[0].x,
+                            -convertedVals[0].y, // Flip Y coordinate
+                            convertedVals[0].z
+                        )
                     }
                 }
             } else {
@@ -336,13 +341,18 @@ public class SPZSceneReader: SplatSceneReader {
                             fixed32 |= Int32(bitPattern: 0xFF000000)
                         }
                         
-                        position[j] = Float(fixed32) * scale
+                        // Apply the coordinate transform - need to flip Y axis
+                        if j == 1 { // Y coordinate
+                            position[j] = -Float(fixed32) * scale // Flip the Y coordinate
+                        } else {
+                            position[j] = Float(fixed32) * scale
+                        }
                     }
                 } else {
                     // Use a fallback position if we can't decode properly
                     position = SIMD3<Float>(
                         Float(i % 100) * 0.1,
-                        Float(i / 100 % 100) * 0.1,
+                        -Float(i / 100 % 100) * 0.1, // Flip Y coordinate in fallback position
                         Float(i / 10000) * 0.1
                     )
                 }
