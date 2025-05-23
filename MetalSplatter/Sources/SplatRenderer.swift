@@ -25,6 +25,11 @@ public class SplatRenderer {
         static let maxIndexedSplatCount = 1024
 
         static let tileSize = MTLSize(width: 32, height: 32, depth: 1)
+        
+        // LOD system constants
+        static let maxRenderDistance: Float = 100.0
+        static let lodDistanceThresholds: [Float] = [10.0, 25.0, 50.0]
+        static let lodSkipFactors: [Int] = [1, 2, 4, 8] // Skip every Nth splat based on distance
     }
 
     private static let log =
@@ -32,6 +37,8 @@ public class SplatRenderer {
                category: "SplatRenderer")
     
     private var computeDepthsPipelineState: MTLComputePipelineState?
+    private var computeDistancesPipelineState: MTLComputePipelineState?
+    private var frustumCullPipelineState: MTLComputePipelineState?
     
     public struct ViewportDescriptor {
         public var viewport: MTLViewport
@@ -144,6 +151,14 @@ public class SplatRenderer {
 
     public var onSortStart: (() -> Void)?
     public var onSortComplete: ((TimeInterval) -> Void)?
+    public var onRenderStart: (() -> Void)?
+    public var onRenderComplete: ((TimeInterval) -> Void)?
+    
+    // Performance tracking
+    private var frameStartTime: CFAbsoluteTime = 0
+    private var lastFrameTime: TimeInterval = 0
+    public var averageFrameTime: TimeInterval = 0
+    private var frameCount: Int = 0
 
     private let library: MTLLibrary
     // Single-stage pipeline
@@ -217,6 +232,23 @@ public class SplatRenderer {
             library = try device.makeDefaultLibrary(bundle: Bundle.module)
         } catch {
             fatalError("Unable to initialize SplatRenderer: \(error)")
+        }
+        
+        // Initialize compute pipeline for distance calculation
+        do {
+            let computeFunction = library.makeFunction(name: "computeSplatDistances")
+            computeDistancesPipelineState = try device.makeComputePipelineState(function: computeFunction!)
+        } catch {
+            Self.log.error("Failed to create compute pipeline state: \(error)")
+        }
+        
+        // Initialize frustum culling pipeline
+        do {
+            if let frustumFunction = library.makeFunction(name: "frustumCullSplats") {
+                frustumCullPipelineState = try device.makeComputePipelineState(function: frustumFunction)
+            }
+        } catch {
+            Self.log.error("Failed to create frustum culling pipeline state: \(error)")
         }
     }
 
@@ -605,20 +637,43 @@ public class SplatRenderer {
                     return
                 }
 
-                // Compute distances on CPU then copy to distanceBuffer.
-                let distancePtr = distanceBuffer.contents().bindMemory(to: Float.self, capacity: splatCount)
-                if Constants.sortByDistance {
-                    for i in 0 ..< splatCount {
-                        let splatPos = splatBuffer.values[i].position.simd
-                        distancePtr[i] = (splatPos - cameraWorldPosition).lengthSquared
-                    }
-                } else {
-                    for i in 0 ..< splatCount {
-                        let splatPos = splatBuffer.values[i].position.simd
-                        distancePtr[i] = dot(splatPos, cameraWorldForward)
-                    }
+                // Create command queue for compute and MPSArgSort.
+                guard let commandQueue = device.makeCommandQueue() else {
+                    Self.log.error("Failed to create command queue for compute and MPSArgSort.")
+                    self.sorting = false
+                    return
                 }
-            
+                
+                // Create command buffer for distance computation
+                guard let commandBuffer = commandQueue.makeCommandBuffer(),
+                      let computeEncoder = commandBuffer.makeComputeCommandEncoder(),
+                      let computePipelineState = computeDistancesPipelineState else {
+                    Self.log.error("Failed to create compute command buffer or encoder.")
+                    self.sorting = false
+                    return
+                }
+                
+                // Set up compute shader parameters
+                var cameraPos = cameraWorldPosition
+                var cameraFwd = cameraWorldForward
+                var sortByDist = Constants.sortByDistance
+                var count = UInt32(splatCount)
+                
+                computeEncoder.setComputePipelineState(computePipelineState)
+                computeEncoder.setBuffer(splatBuffer.buffer, offset: 0, index: 0)
+                computeEncoder.setBuffer(distanceBuffer, offset: 0, index: 1)
+                computeEncoder.setBytes(&cameraPos, length: MemoryLayout<SIMD3<Float>>.size, index: 2)
+                computeEncoder.setBytes(&cameraFwd, length: MemoryLayout<SIMD3<Float>>.size, index: 3)
+                computeEncoder.setBytes(&sortByDist, length: MemoryLayout<Bool>.size, index: 4)
+                computeEncoder.setBytes(&count, length: MemoryLayout<UInt32>.size, index: 5)
+                
+                let threadsPerThreadgroup = MTLSize(width: 256, height: 1, depth: 1)
+                let threadgroups = MTLSize(width: (splatCount + 255) / 256, height: 1, depth: 1)
+                
+                computeEncoder.dispatchThreadgroups(threadgroups, threadsPerThreadgroup: threadsPerThreadgroup)
+                computeEncoder.endEncoding()
+                commandBuffer.commit()
+                commandBuffer.waitUntilCompleted()
 
                 // Allocate a GPU buffer for the ArgSort output indices
                 guard let indexOutputBuffer = device.makeBuffer(
@@ -626,13 +681,6 @@ public class SplatRenderer {
                     options: .storageModeShared
                 ) else {
                     Self.log.error("Failed to create output indices buffer.")
-                    self.sorting = false
-                    return
-                }
-
-                // Create command queue for MPSArgSort.
-                guard let commandQueue = device.makeCommandQueue() else {
-                    Self.log.error("Failed to create command queue for MPSArgSort.")
                     self.sorting = false
                     return
                 }

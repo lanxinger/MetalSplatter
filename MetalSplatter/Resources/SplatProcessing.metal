@@ -81,25 +81,28 @@ FragmentIn splatVertex(Splat splat,
     float4 viewPosition4 = uniforms.viewMatrix * float4(splat.position, 1);
     float3 viewPosition3 = viewPosition4.xyz;
 
+    // Early exit for splats behind camera
+    if (viewPosition3.z >= 0.0) {
+        out.position = float4(1, 1, 0, 1);
+        return out;
+    }
+
+    float4 projectedCenter = uniforms.projectionMatrix * viewPosition4;
+    
+    // Early exit for splats outside frustum (optimized bounds check)
+    float bounds = 1.2 * projectedCenter.w;
+    if (projectedCenter.z > projectedCenter.w ||
+        any(abs(projectedCenter.xy) > bounds)) {
+        out.position = float4(1, 1, 0, 1);
+        return out;
+    }
+
     float3 cov2D = calcCovariance2D(viewPosition3, splat.covA, splat.covB,
                                     uniforms.viewMatrix, uniforms.projectionMatrix, uniforms.screenSize);
 
     float2 axis1;
     float2 axis2;
     decomposeCovariance(cov2D, axis1, axis2);
-
-    float4 projectedCenter = uniforms.projectionMatrix * viewPosition4;
-
-    float bounds = 1.2 * projectedCenter.w;
-    if (projectedCenter.z < 0.0 ||
-        projectedCenter.z > projectedCenter.w ||
-        projectedCenter.x < -bounds ||
-        projectedCenter.x > bounds ||
-        projectedCenter.y < -bounds ||
-        projectedCenter.y > bounds) {
-        out.position = float4(1, 1, 0, 1);
-        return out;
-    }
 
     const half2 relativeCoordinatesArray[] = { { -1, -1 }, { -1, 1 }, { 1, -1 }, { 1, 1 } };
     half2 relativeCoordinates = relativeCoordinatesArray[relativeVertexIndex];

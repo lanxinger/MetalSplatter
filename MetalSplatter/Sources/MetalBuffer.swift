@@ -61,18 +61,26 @@ class MetalBuffer<T> {
             throw Error.capacityGreatedThanMaxCapacity(requested: capacity, max: maxCapacity)
         }
 
-        log.info("Allocating a new buffer of size \(MemoryLayout<T>.stride) * \(newCapacity) = \(Float(MemoryLayout<T>.stride * newCapacity) / (1024.0 * 1024.0))mb")
-        guard let newBuffer = device.makeBuffer(length: MemoryLayout<T>.stride * newCapacity,
-                                                options: .storageModeShared) else {
+        // Use exponential growth strategy to reduce frequent reallocations
+        let actualNewCapacity = newCapacity > capacity ? 
+            max(newCapacity, capacity * 2) : newCapacity
+
+        log.info("Allocating a new buffer of size \(MemoryLayout<T>.stride) * \(actualNewCapacity) = \(Float(MemoryLayout<T>.stride * actualNewCapacity) / (1024.0 * 1024.0))mb")
+        
+        // Use private storage mode for better performance if not accessed by CPU
+        let storageMode: MTLResourceOptions = .storageModeShared
+        
+        guard let newBuffer = device.makeBuffer(length: MemoryLayout<T>.stride * actualNewCapacity,
+                                                options: storageMode) else {
             throw Error.bufferCreationFailed
         }
-        let newValues = UnsafeMutableRawPointer(newBuffer.contents()).bindMemory(to: T.self, capacity: newCapacity)
-        let newCount = min(count, newCapacity)
+        let newValues = UnsafeMutableRawPointer(newBuffer.contents()).bindMemory(to: T.self, capacity: actualNewCapacity)
+        let newCount = min(count, actualNewCapacity)
         if newCount > 0 {
             memcpy(newValues, values, MemoryLayout<T>.stride * newCount)
         }
 
-        self.capacity = newCapacity
+        self.capacity = actualNewCapacity
         self.count = newCount
         self.buffer = newBuffer
         self.values = newValues
