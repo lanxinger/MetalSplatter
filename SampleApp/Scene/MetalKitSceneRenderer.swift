@@ -127,6 +127,7 @@ class MetalKitSceneRenderer: NSObject, MTKViewDelegate {
 
     private func updateRotation() {
         guard !userIsInteracting else { return }
+        guard Constants.rotationPerSecond.degrees != 0 else { return }
         let now = Date()
         defer {
             lastRotationUpdateTimestamp = now

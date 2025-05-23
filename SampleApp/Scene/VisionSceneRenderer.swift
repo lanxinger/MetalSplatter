@@ -117,6 +117,8 @@ class VisionSceneRenderer {
     }
 
     private func updateRotation() {
+        guard Constants.rotationPerSecond.degrees != 0 else { return }
+        
         let now = Date()
         defer {
             lastRotationUpdateTimestamp = now
@@ -196,4 +198,3 @@ class VisionSceneRenderer {
 }
 
 #endif // os(visionOS)
-
