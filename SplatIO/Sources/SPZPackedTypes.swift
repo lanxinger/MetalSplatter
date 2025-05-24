@@ -627,12 +627,7 @@ struct PackedGaussians {
  * with a software fallback implementation for all platforms.
  */
 func float16ToFloat32(_ half: UInt16) -> Float {
-    #if canImport(Metal) && !targetEnvironment(simulator)
-    // Use Foundation's built-in Float16 type which leverages hardware acceleration when available
-    let tempHalf = Float16(bitPattern: half)
-    return Float(tempHalf)
-    #else
-    // Software fallback implementation for platforms without Metal
+    // Software implementation for cross-platform compatibility
     let sign = (half & 0x8000) != 0
     let exponent = Int((half & 0x7C00) >> 10)
     let mantissa = Int(half & 0x03FF)
@@ -656,5 +651,4 @@ func float16ToFloat32(_ half: UInt16) -> Float {
     
     // Normalized
     return signMul * pow(2.0, Float(exponent - 15)) * (1.0 + Float(mantissa) / 1024.0)
-    #endif
 }

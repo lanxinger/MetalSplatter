@@ -30,6 +30,15 @@ public class AutodetectSceneReader: SplatSceneReader {
                 print("AutodetectSceneReader: Failed to create SPZSceneReader: \(error)")
                 throw Error.cannotDetermineFormat
             }
+        case .sogs:
+            print("AutodetectSceneReader: Loading as SOGS")
+            do {
+                reader = try SplatSOGSSceneReader(url)
+                print("AutodetectSceneReader: Successfully created SplatSOGSSceneReader")
+            } catch {
+                print("AutodetectSceneReader: Failed to create SplatSOGSSceneReader: \(error)")
+                throw Error.cannotDetermineFormat
+            }
         case .none:
             print("AutodetectSceneReader: Unknown format")
             throw Error.cannotDetermineFormat

@@ -7,21 +7,16 @@ import Metal
 
 /**
  * Utility class for high-performance float16 conversions
- * Uses hardware acceleration when available (Metal/SIMD)
+ * Uses software implementation for compatibility
  */
 enum FloatConversion {
     
     /**
      * Converts a single half-precision float (UInt16) to a 32-bit float
-     * Uses hardware-accelerated conversion when available
+     * Uses software implementation for cross-platform compatibility
      */
     static func float16ToFloat32(_ half: UInt16) -> Float {
-        #if canImport(Metal) && !targetEnvironment(simulator)
-        // Use Foundation's built-in Float16 type
-        let tempHalf = Float16(bitPattern: half)
-        return Float(tempHalf)
-        #else
-        // Software fallback implementation for platforms without Metal
+        // Software implementation for cross-platform compatibility
         let sign = (half & 0x8000) != 0
         let exponent = Int((half & 0x7C00) >> 10)
         let mantissa = Int(half & 0x03FF)
@@ -45,7 +40,6 @@ enum FloatConversion {
         
         // Normalized
         return signMul * pow(2.0, Float(exponent - 15)) * (1.0 + Float(mantissa) / 1024.0)
-        #endif
     }
     
     /**

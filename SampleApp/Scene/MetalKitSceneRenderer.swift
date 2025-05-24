@@ -178,7 +178,11 @@ class MetalKitSceneRenderer: NSObject, MTKViewDelegate {
                 lastRotationUpdateTimestamp = nil // Reset timestamp for smooth auto-rotate start
             } else {
                 // Request next frame
+                #if os(macOS)
+                metalKitView.setNeedsDisplay(metalKitView.bounds)
+                #else
                 metalKitView.setNeedsDisplay()
+                #endif
             }
         } else {
              // Only update auto-rotation if not animating reset and not interacting
@@ -213,17 +217,29 @@ class MetalKitSceneRenderer: NSObject, MTKViewDelegate {
         userIsInteracting = true
         rotation = newRotation
         verticalRotation = vertical
+        #if os(macOS)
+        metalKitView.setNeedsDisplay(metalKitView.bounds)
+        #else
         metalKitView.setNeedsDisplay()
+        #endif
     }
     func setUserZoom(_ newZoom: Float) {
         userIsInteracting = true
         zoom = newZoom
+        #if os(macOS)
+        metalKitView.setNeedsDisplay(metalKitView.bounds)
+        #else
         metalKitView.setNeedsDisplay()
+        #endif
     }
     func setUserTranslation(_ newTranslation: SIMD2<Float>) {
         userIsInteracting = true
         translation = newTranslation
+        #if os(macOS)
+        metalKitView.setNeedsDisplay(metalKitView.bounds)
+        #else
         metalKitView.setNeedsDisplay()
+        #endif
     }
     func resetView() {
         // Start animation instead of setting directly
