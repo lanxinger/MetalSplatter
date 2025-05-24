@@ -142,7 +142,7 @@ public struct WebPDecoder {
             let unpremultipliedB = UInt8(min(255.0, Float(b) / alpha))
             return SIMD4<UInt8>(unpremultipliedR, unpremultipliedG, unpremultipliedB, a)
         } else {
-            return SIMD4<UInt8>(r, g, b, a)
+        return SIMD4<UInt8>(r, g, b, a)
         }
     }
     

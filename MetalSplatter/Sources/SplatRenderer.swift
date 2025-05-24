@@ -50,6 +50,26 @@ public class SplatRenderer {
     private var culledIndicesBuffer: MTLBuffer?
     private var culledCountBuffer: MTLBuffer?
     
+    // Frustum culling structures
+    struct FrustumPlane {
+        var normal: SIMD3<Float>
+        var distance: Float
+    }
+    
+    struct FrustumCullData {
+        var planes: (FrustumPlane, FrustumPlane, FrustumPlane, FrustumPlane, FrustumPlane, FrustumPlane) // 6 planes
+        var cameraPosition: SIMD3<Float>
+        var maxDistance: Float
+        
+        init(planes: [FrustumPlane], cameraPosition: SIMD3<Float>, maxDistance: Float) {
+            self.planes = (
+                planes[0], planes[1], planes[2], planes[3], planes[4], planes[5]
+            )
+            self.cameraPosition = cameraPosition
+            self.maxDistance = maxDistance
+        }
+    }
+    
     public struct ViewportDescriptor {
         public var viewport: MTLViewport
         public var projectionMatrix: simd_float4x4
@@ -294,16 +314,111 @@ public class SplatRenderer {
             Self.log.error("Failed to create compute pipeline state: \(error)")
         }
         
-        // Initialize frustum culling pipeline
+                // Initialize frustum culling pipeline
         do {
             if let frustumFunction = library.makeFunction(name: "frustumCullSplats") {
                 frustumCullPipelineState = try device.makeComputePipelineState(function: frustumFunction)
+                print("SplatRenderer: Frustum culling pipeline initialized successfully")
+            } else {
+                print("SplatRenderer: Frustum culling shader not found")
             }
         } catch {
             Self.log.error("Failed to create frustum culling pipeline state: \(error)")
         }
     }
-
+    
+    // MARK: - Frustum Culling
+    
+    private func extractFrustumPlanes(from viewProjectionMatrix: simd_float4x4) -> [FrustumPlane] {
+        let mvp = viewProjectionMatrix
+        var planes: [FrustumPlane] = []
+        
+        // Extract 6 frustum planes from view-projection matrix
+        // Left plane: mvp[3] + mvp[0]
+        let left = mvp[3] + mvp[0]
+        planes.append(FrustumPlane(normal: normalize(SIMD3(left.x, left.y, left.z)), distance: left.w))
+        
+        // Right plane: mvp[3] - mvp[0]
+        let right = mvp[3] - mvp[0]
+        planes.append(FrustumPlane(normal: normalize(SIMD3(right.x, right.y, right.z)), distance: right.w))
+        
+        // Bottom plane: mvp[3] + mvp[1]
+        let bottom = mvp[3] + mvp[1]
+        planes.append(FrustumPlane(normal: normalize(SIMD3(bottom.x, bottom.y, bottom.z)), distance: bottom.w))
+        
+        // Top plane: mvp[3] - mvp[1]
+        let top = mvp[3] - mvp[1]
+        planes.append(FrustumPlane(normal: normalize(SIMD3(top.x, top.y, top.z)), distance: top.w))
+        
+        // Near plane: mvp[3] + mvp[2]
+        let near = mvp[3] + mvp[2]
+        planes.append(FrustumPlane(normal: normalize(SIMD3(near.x, near.y, near.z)), distance: near.w))
+        
+        // Far plane: mvp[3] - mvp[2]
+        let far = mvp[3] - mvp[2]
+        planes.append(FrustumPlane(normal: normalize(SIMD3(far.x, far.y, far.z)), distance: far.w))
+        
+        return planes
+    }
+    
+    private func performDistanceCulling() -> Int {
+        guard largeDatasetMode,
+              splatBuffer.count > 0 else {
+            return splatBuffer.count
+        }
+        
+        let splatCount = splatBuffer.count
+        let maxDistance = Constants.maxRenderDistance
+        let cameraPos = cameraWorldPosition
+        let lodThresholds = Constants.lodDistanceThresholds
+        let lodSkipFactors = Constants.lodSkipFactors
+        
+        var visibleCount = 0
+        var lodCounts = [0, 0, 0, 0] // Track splats per LOD level
+        
+        // Process all splats and assign LOD based on distance
+        for i in 0..<splatCount {
+            let splatPos = splatBuffer.values[i].position.simd
+            let distance = simd_distance(splatPos, cameraPos)
+            
+            // Skip if beyond maximum render distance
+            guard distance <= maxDistance else { continue }
+            
+            // Determine LOD level based on distance
+            let lodLevel: Int
+            if distance <= lodThresholds[0] {
+                lodLevel = 0 // Close: Full detail
+            } else if distance <= lodThresholds[1] {
+                lodLevel = 1 // Medium: High detail  
+            } else if distance <= lodThresholds[2] {
+                lodLevel = 2 // Far: Medium detail
+            } else {
+                lodLevel = 3 // Very far: Low detail
+            }
+            
+            let skipFactor = lodSkipFactors[lodLevel]
+            
+            // Use modulo to decide if this splat should be rendered at this LOD
+            if i % skipFactor == 0 {
+                visibleCount += 1
+                lodCounts[lodLevel] += 1
+            }
+        }
+        
+        let cullingRatio = Float(visibleCount) / Float(splatCount)
+        
+        // Log detailed LOD results every few frames
+        if frameCount % 60 == 0 {
+            print("SplatRenderer: Advanced LOD Culling - \(splatCount) splats → \(visibleCount) visible (ratio: \(String(format: "%.2f", cullingRatio)))")
+            print("  LOD0 (0-15m): \(lodCounts[0]) splats (100% detail)")
+            print("  LOD1 (15-35m): \(lodCounts[1]) splats (50% detail)") 
+            print("  LOD2 (35-75m): \(lodCounts[2]) splats (25% detail)")
+            print("  LOD3 (75-100m): \(lodCounts[3]) splats (12.5% detail)")
+        }
+        
+        return visibleCount
+    }
+    
     public func reset() {
         splatBuffer.count = 0
         try? splatBuffer.setCapacity(0)
@@ -611,11 +726,21 @@ public class SplatRenderer {
                        to commandBuffer: MTLCommandBuffer) throws {
         let splatCount = splatBuffer.count
         guard splatBuffer.count != 0 else { return }
-        let indexedSplatCount = min(splatCount, Constants.maxIndexedSplatCount)
-        let instanceCount = (splatCount + indexedSplatCount - 1) / indexedSplatCount
+        
+        // Perform distance culling for large datasets
+        var visibleSplatCount = splatCount
+        
+        if largeDatasetMode {
+            frameCount += 1
+            visibleSplatCount = performDistanceCulling()
+        }
+        
+        let effectiveSplatCount = visibleSplatCount
+        let indexedSplatCount = min(effectiveSplatCount, Constants.maxIndexedSplatCount)
+        let instanceCount = (effectiveSplatCount + indexedSplatCount - 1) / indexedSplatCount
 
         switchToNextDynamicBuffer()
-        updateUniforms(forViewports: viewports, splatCount: UInt32(splatCount), indexedSplatCount: UInt32(indexedSplatCount))
+        updateUniforms(forViewports: viewports, splatCount: UInt32(effectiveSplatCount), indexedSplatCount: UInt32(indexedSplatCount))
 
         let multiStage = useMultiStagePipeline
         if multiStage {
