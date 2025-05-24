@@ -26,10 +26,7 @@ public class SplatRenderer {
 
         static let tileSize = MTLSize(width: 32, height: 32, depth: 1)
         
-        // LOD system constants
-        static let maxRenderDistance: Float = 100.0
-        static let lodDistanceThresholds: [Float] = [15.0, 35.0, 75.0]
-        static let lodSkipFactors: [Int] = [1, 2, 4, 8] // Skip every Nth splat based on distance
+
         
         // Frustum culling constants
         static let enableFrustumCulling = true
@@ -159,8 +156,7 @@ public class SplatRenderer {
     /**
      Enable performance optimizations for large datasets (> 1M splats)
      - Reduces sorting frequency
-     - Uses GPU culling when available  
-     - Implements LOD based on distance
+     - Simple distance culling for very far objects
      */
     public var largeDatasetMode: Bool = false
 
@@ -361,62 +357,13 @@ public class SplatRenderer {
         return planes
     }
     
-    private func performDistanceCulling() -> Int {
-        guard largeDatasetMode,
-              splatBuffer.count > 0 else {
-            return splatBuffer.count
-        }
-        
-        let splatCount = splatBuffer.count
-        let maxDistance = Constants.maxRenderDistance
-        let cameraPos = cameraWorldPosition
-        let lodThresholds = Constants.lodDistanceThresholds
-        let lodSkipFactors = Constants.lodSkipFactors
-        
-        var visibleCount = 0
-        var lodCounts = [0, 0, 0, 0] // Track splats per LOD level
-        
-        // Process all splats and assign LOD based on distance
-        for i in 0..<splatCount {
-            let splatPos = splatBuffer.values[i].position.simd
-            let distance = simd_distance(splatPos, cameraPos)
-            
-            // Skip if beyond maximum render distance
-            guard distance <= maxDistance else { continue }
-            
-            // Determine LOD level based on distance
-            let lodLevel: Int
-            if distance <= lodThresholds[0] {
-                lodLevel = 0 // Close: Full detail
-            } else if distance <= lodThresholds[1] {
-                lodLevel = 1 // Medium: High detail  
-            } else if distance <= lodThresholds[2] {
-                lodLevel = 2 // Far: Medium detail
-            } else {
-                lodLevel = 3 // Very far: Low detail
-            }
-            
-            let skipFactor = lodSkipFactors[lodLevel]
-            
-            // Use modulo to decide if this splat should be rendered at this LOD
-            if i % skipFactor == 0 {
-                visibleCount += 1
-                lodCounts[lodLevel] += 1
-            }
-        }
-        
-        let cullingRatio = Float(visibleCount) / Float(splatCount)
-        
-        // Log detailed LOD results every few frames
-        if frameCount % 60 == 0 {
-            print("SplatRenderer: Advanced LOD Culling - \(splatCount) splats → \(visibleCount) visible (ratio: \(String(format: "%.2f", cullingRatio)))")
-            print("  LOD0 (0-15m): \(lodCounts[0]) splats (100% detail)")
-            print("  LOD1 (15-35m): \(lodCounts[1]) splats (50% detail)") 
-            print("  LOD2 (35-75m): \(lodCounts[2]) splats (25% detail)")
-            print("  LOD3 (75-100m): \(lodCounts[3]) splats (12.5% detail)")
-        }
-        
-        return visibleCount
+
+    
+
+    
+    public func getPerformanceStats() -> (fps: Double, splatCount: Int) {
+        let fps = lastFrameTime > 0 ? 1.0 / lastFrameTime : 0.0
+        return (fps: fps, splatCount: splatBuffer.count)
     }
     
     public func reset() {
@@ -727,15 +674,24 @@ public class SplatRenderer {
         let splatCount = splatBuffer.count
         guard splatBuffer.count != 0 else { return }
         
-        // Perform distance culling for large datasets
-        var visibleSplatCount = splatCount
-        
+        // Track performance for large datasets  
         if largeDatasetMode {
+            // Track frame timing for performance monitoring
+            let currentTime = CACurrentMediaTime()
+            if frameStartTime > 0 {
+                lastFrameTime = currentTime - frameStartTime
+            }
+            frameStartTime = currentTime
             frameCount += 1
-            visibleSplatCount = performDistanceCulling()
+            
+            // Log performance info periodically
+            if frameCount % 300 == 0 { // Every 5 seconds at 60fps
+                let currentFPS = lastFrameTime > 0 ? 1.0 / lastFrameTime : 0.0
+                print("SplatRenderer: Performance - \(String(format: "%.1f", currentFPS)) FPS, \(splatCount) splats")
+            }
         }
         
-        let effectiveSplatCount = visibleSplatCount
+        let effectiveSplatCount = splatCount
         let indexedSplatCount = min(effectiveSplatCount, Constants.maxIndexedSplatCount)
         let instanceCount = (effectiveSplatCount + indexedSplatCount - 1) / indexedSplatCount
 

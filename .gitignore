@@ -3,3 +3,5 @@ xcuserdata
 DerivedData/
 .swiftpm
 
+.vscode
+.build
