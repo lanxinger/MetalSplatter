@@ -76,12 +76,95 @@ public class SplatSOGSSceneReader: SplatSceneReader {
         }
     }
     
+    /// Streaming version that loads data in chunks for better performance with large datasets
+    public func readSceneStreaming(chunkSize: Int = 50000, to delegate: SplatSceneReaderDelegate) {
+        do {
+            // Handle iOS File Provider security scoped resource access for streaming
+            let shouldStopAccessing = metaURL.startAccessingSecurityScopedResource()
+            defer {
+                if shouldStopAccessing {
+                    metaURL.stopAccessingSecurityScopedResource()
+                }
+            }
+            
+            // Load metadata and textures
+            let metaData = try Data(contentsOf: metaURL)
+            let metadata = try JSONDecoder().decode(SOGSMetadata.self, from: metaData)
+            let compressedData = try loadCompressedData(metadata: metadata)
+            
+            print("SplatSOGSSceneReader: Starting streaming decompression with chunk size: \(chunkSize)")
+            delegate.didStartReading(withPointCount: UInt32(compressedData.numSplats))
+            
+            let iterator = SOGSIterator(compressedData)
+            
+            // Process in chunks on background queue
+            DispatchQueue.global(qos: .userInitiated).async {
+                var processedCount = 0
+                let totalSplats = compressedData.numSplats
+                
+                while processedCount < totalSplats {
+                    let endIndex = min(processedCount + chunkSize, totalSplats)
+                    let currentChunkSize = endIndex - processedCount
+                    
+                    var chunkPoints: [SplatScenePoint] = []
+                    chunkPoints.reserveCapacity(currentChunkSize)
+                    
+                    // Decompress current chunk using autoreleasepool for memory efficiency
+                    autoreleasepool {
+                        for i in processedCount..<endIndex {
+                            let point = iterator.readPoint(at: i)
+                            chunkPoints.append(point)
+                        }
+                    }
+                    
+                    // Deliver chunk to main thread
+                    DispatchQueue.main.async {
+                        delegate.didRead(points: chunkPoints)
+                        
+                        if processedCount % 100000 == 0 || processedCount + currentChunkSize >= totalSplats {
+                            print("SplatSOGSSceneReader: Streamed \(processedCount + currentChunkSize)/\(totalSplats) splats")
+                        }
+                        
+                        // Check if we're done
+                        if processedCount + currentChunkSize >= totalSplats {
+                            delegate.didFinishReading()
+                        }
+                    }
+                    
+                    processedCount += currentChunkSize
+                    
+                    // Small delay to prevent UI blocking only for very large chunks
+                    if processedCount < totalSplats && chunkSize > 25000 {
+                        Thread.sleep(forTimeInterval: 0.002)
+                    }
+                }
+            }
+        } catch {
+            delegate.didFailReading(withError: error)
+        }
+    }
+    
     public func read(to delegate: SplatSceneReaderDelegate) {
         do {
-            let points = try readScene()
-            delegate.didStartReading(withPointCount: UInt32(points.count))
-            delegate.didRead(points: points)
-            delegate.didFinishReading()
+            // Load metadata first to determine dataset size
+            let metaData = try Data(contentsOf: metaURL)
+            let metadata = try JSONDecoder().decode(SOGSMetadata.self, from: metaData)
+            let splatCount = metadata.means.shape[0]
+            
+            print("SplatSOGSSceneReader: Dataset contains \(splatCount) splats")
+            
+            // Use streaming for large datasets (> 100k splats) for better performance
+            if splatCount > 100000 {
+                print("SplatSOGSSceneReader: Using streaming mode for large dataset")
+                readSceneStreaming(chunkSize: min(50000, splatCount / 10), to: delegate)
+            } else {
+                // Use traditional loading for smaller datasets
+                print("SplatSOGSSceneReader: Using traditional loading for small dataset")
+                let points = try readScene()
+                delegate.didStartReading(withPointCount: UInt32(points.count))
+                delegate.didRead(points: points)
+                delegate.didFinishReading()
+            }
         } catch {
             delegate.didFailReading(withError: error)
         }

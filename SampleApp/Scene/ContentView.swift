@@ -206,4 +206,6 @@ struct ContentView: View {
         
         openWindow(value: ModelIdentifier.gaussianSplat(metaURL))
     }
+
+
 }

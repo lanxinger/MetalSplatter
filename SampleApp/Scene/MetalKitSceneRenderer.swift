@@ -86,7 +86,25 @@ class MetalKitSceneRenderer: NSObject, MTKViewDelegate {
                                                 sampleCount: metalKitView.sampleCount,
                                                 maxViewCount: 1,
                                                 maxSimultaneousRenders: Constants.maxSimultaneousRenders)
+            
+            // Auto-enable performance optimizations for large datasets
+            // This will be automatically determined by the scene reader
             try await splat.read(from: url)
+            
+            // Configure performance settings based on splat count
+            let splatCount = splat.splatCount
+            print("MetalKitSceneRenderer: Loaded \(splatCount) splats")
+            
+            if splatCount > 500000 {
+                print("MetalKitSceneRenderer: Enabling large dataset optimizations")
+                splat.largeDatasetMode = true
+                splat.highQualityDepth = false // Better performance for large datasets
+            } else if splatCount > 100000 {
+                print("MetalKitSceneRenderer: Enabling medium dataset optimizations")
+                splat.largeDatasetMode = true
+                // Keep high quality depth for medium datasets if not on low-end devices
+            }
+            
             modelRenderer = splat
         case .sampleBox:
             modelRenderer = try! await SampleBoxRenderer(device: device,

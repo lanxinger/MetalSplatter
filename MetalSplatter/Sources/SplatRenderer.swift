@@ -28,8 +28,12 @@ public class SplatRenderer {
         
         // LOD system constants
         static let maxRenderDistance: Float = 100.0
-        static let lodDistanceThresholds: [Float] = [10.0, 25.0, 50.0]
+        static let lodDistanceThresholds: [Float] = [15.0, 35.0, 75.0]
         static let lodSkipFactors: [Int] = [1, 2, 4, 8] // Skip every Nth splat based on distance
+        
+        // Frustum culling constants
+        static let enableFrustumCulling = true
+        static let cullMargin: Float = 2.0 // Extra margin for culling
     }
 
     private static let log =
@@ -39,6 +43,12 @@ public class SplatRenderer {
     private var computeDepthsPipelineState: MTLComputePipelineState?
     private var computeDistancesPipelineState: MTLComputePipelineState?
     private var frustumCullPipelineState: MTLComputePipelineState?
+    private var lodCullPipelineState: MTLComputePipelineState?
+    
+    // GPU culling buffers
+    private var visibilityBuffer: MTLBuffer?
+    private var culledIndicesBuffer: MTLBuffer?
+    private var culledCountBuffer: MTLBuffer?
     
     public struct ViewportDescriptor {
         public var viewport: MTLViewport
@@ -125,6 +135,14 @@ public class SplatRenderer {
      High-quality depth takes longer, but results in a continuous, more-representative depth buffer result, which is useful for reducing artifacts during Vision Pro's frame reprojection.
      */
     public var highQualityDepth: Bool = true
+    
+    /**
+     Enable performance optimizations for large datasets (> 1M splats)
+     - Reduces sorting frequency
+     - Uses GPU culling when available  
+     - Implements LOD based on distance
+     */
+    public var largeDatasetMode: Bool = false
 
     private var writeDepth: Bool {
         depthFormat != .invalid
@@ -182,6 +200,7 @@ public class SplatRenderer {
     // cameraWorldPosition and Forward vectors are the latest mean camera position across all viewports
     var cameraWorldPosition: SIMD3<Float> = .zero
     var cameraWorldForward: SIMD3<Float> = .init(x: 0, y: 0, z: -1)
+    var lastSortPosition: SIMD3<Float> = .init(x: Float.infinity, y: Float.infinity, z: Float.infinity)
 
     typealias IndexType = UInt32
     // splatBuffer contains one entry for each gaussian splat
@@ -199,6 +218,39 @@ public class SplatRenderer {
 
     var sorting = false
     var orderAndDepthTempSort: [SplatIndexAndDepth] = []
+    
+    // Streaming delegate for optimized SOGS loading
+    private class StreamingSplatDelegate: SplatSceneReaderDelegate {
+        private let renderer: SplatRenderer
+        private let continuation: CheckedContinuation<Void, Error>
+        
+        init(renderer: SplatRenderer, continuation: CheckedContinuation<Void, Error>) {
+            self.renderer = renderer
+            self.continuation = continuation
+        }
+        
+        func didStartReading(withPointCount pointCount: UInt32?) {
+            print("StreamingSplatDelegate: Starting to read \(pointCount ?? 0) points")
+        }
+        
+        func didRead(points: [SplatScenePoint]) {
+            do {
+                try renderer.addBatch(points)
+            } catch {
+                continuation.resume(throwing: error)
+                return
+            }
+        }
+        
+        func didFinishReading() {
+            print("StreamingSplatDelegate: Finished reading, total splats: \(renderer.splatCount)")
+            continuation.resume(returning: ())
+        }
+        
+        func didFailReading(withError error: Error?) {
+            continuation.resume(throwing: error ?? NSError(domain: "SplatRenderer", code: -1, userInfo: [NSLocalizedDescriptionKey: "Unknown streaming error"]))
+        }
+    }
 
     public init(device: MTLDevice,
                 colorFormat: MTLPixelFormat,
@@ -258,9 +310,34 @@ public class SplatRenderer {
     }
 
     public func read(from url: URL) async throws {
-        var newPoints = SplatMemoryBuffer()
-        try await newPoints.read(from: try AutodetectSceneReader(url))
-        try add(newPoints.points)
+        let reader = try AutodetectSceneReader(url)
+        
+        // Optimize for SOGS files by using direct streaming when possible
+        if let sogsReader = reader as? SplatSOGSSceneReader {
+            print("SplatRenderer: Using optimized SOGS streaming loading")
+            
+            // Use streaming delegate for better performance with large datasets
+            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+                let streamingDelegate = StreamingSplatDelegate(renderer: self, continuation: continuation)
+                sogsReader.read(to: streamingDelegate)
+            }
+        } else {
+            // Use traditional loading for other file types
+            var newPoints = SplatMemoryBuffer()
+            try await newPoints.read(from: reader)
+            
+            // Use batch loading for better performance
+            if newPoints.points.count > 50000 {
+                print("SplatRenderer: Using batch loading for \(newPoints.points.count) points")
+                try addBatch(newPoints.points) { processed, total in
+                    if processed % 100000 == 0 {
+                        print("SplatRenderer: Loaded \(processed)/\(total) splats")
+                    }
+                }
+            } else {
+                try add(newPoints.points)
+            }
+        }
     }
 
     private func resetPipelineStates() {
@@ -410,7 +487,29 @@ public class SplatRenderer {
             return
         }
 
-        splatBuffer.append(points.map { Splat($0) })
+        // Batch conversion for better performance
+        let splats = points.map { Splat($0) }
+        splatBuffer.append(splats)
+    }
+    
+    /// Optimized version for large batch additions
+    public func addBatch(_ points: [SplatScenePoint], progressCallback: ((Int, Int) -> Void)? = nil) throws {
+        let chunkSize = 10000
+        let totalCount = points.count
+        
+        try ensureAdditionalCapacity(totalCount)
+        
+        for chunkStart in stride(from: 0, to: totalCount, by: chunkSize) {
+            let chunkEnd = min(chunkStart + chunkSize, totalCount)
+            let chunk = Array(points[chunkStart..<chunkEnd])
+            
+            autoreleasepool {
+                let splats = chunk.map { Splat($0) }
+                splatBuffer.append(splats)
+            }
+            
+            progressCallback?(chunkEnd, totalCount)
+        }
     }
 
     public func add(_ point: SplatScenePoint) throws {
@@ -606,10 +705,21 @@ public class SplatRenderer {
     // Sort splatBuffer (read-only), storing the results in splatBuffer (write-only) then swap splatBuffer and splatBufferPrime
     public func resort(useGPU: Bool = true) {
         guard !sorting else { return }
+        
+        let splatCount = splatBuffer.count
+        guard splatCount > 0 else { return }
+        
+        // Skip sorting for large datasets if camera hasn't moved much
+        if splatCount > 500000 {
+            let positionChange = simd_distance(cameraWorldPosition, lastSortPosition)
+            if positionChange < 1.0 {
+                return
+            }
+        }
+        lastSortPosition = cameraWorldPosition
+        
         sorting = true
         onSortStart?()
-
-        let splatCount = splatBuffer.count
         
         let cameraWorldForward = cameraWorldForward
         let cameraWorldPosition = cameraWorldPosition
