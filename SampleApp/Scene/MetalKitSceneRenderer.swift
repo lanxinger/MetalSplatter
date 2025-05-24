@@ -48,6 +48,8 @@ class MetalKitSceneRenderer: NSObject, MTKViewDelegate {
     private var userIsInteracting = false
     // Add vertical rotation (pitch)
     var verticalRotation: Float = 0.0
+    // Add roll rotation (2-finger twist)
+    var rollRotation: Float = 0.0
     // Add translation for panning
     var translation: SIMD2<Float> = .zero
 
@@ -59,6 +61,7 @@ class MetalKitSceneRenderer: NSObject, MTKViewDelegate {
     private let animationDuration: TimeInterval = 0.3 // seconds
     private var startRotation: Angle = .zero
     private var startVerticalRotation: Float = 0.0
+    private var startRollRotation: Float = 0.0
     private var startZoom: Float = 1.0
     private var startTranslation: SIMD2<Float> = .zero
 
@@ -110,6 +113,8 @@ class MetalKitSceneRenderer: NSObject, MTKViewDelegate {
                                                 axis: Constants.rotationAxis)
         // Add vertical rotation (pitch) around X axis
         let verticalMatrix = matrix4x4_rotation(radians: verticalRotation, axis: SIMD3<Float>(1, 0, 0))
+        // Add roll rotation (2-finger twist) around Z axis
+        let rollMatrix = matrix4x4_rotation(radians: rollRotation, axis: SIMD3<Float>(0, 0, 1))
         // Add translation for panning
         let panMatrix = matrix4x4_translation(translation.x, translation.y, 0)
         let translationMatrix = matrix4x4_translation(0.0, 0.0, Constants.modelCenterZ)
@@ -121,7 +126,7 @@ class MetalKitSceneRenderer: NSObject, MTKViewDelegate {
 
         return ModelRendererViewportDescriptor(viewport: viewport,
                                                projectionMatrix: projectionMatrix,
-                                               viewMatrix: translationMatrix * panMatrix * rotationMatrix * verticalMatrix * commonUpCalibration,
+                                               viewMatrix: translationMatrix * panMatrix * rotationMatrix * verticalMatrix * rollMatrix * commonUpCalibration,
                                                screenSize: SIMD2(x: Int(drawableSize.width), y: Int(drawableSize.height)))
     }
 
@@ -167,6 +172,7 @@ class MetalKitSceneRenderer: NSObject, MTKViewDelegate {
             // Interpolate view properties
             rotation = lerp(startRotation, .zero, Double(t))
             verticalRotation = lerp(startVerticalRotation, 0.0, t)
+            rollRotation = lerp(startRollRotation, 0.0, t)
             zoom = lerp(startZoom, 1.0, t)
             translation = lerp(startTranslation, .zero, t)
 
@@ -241,6 +247,15 @@ class MetalKitSceneRenderer: NSObject, MTKViewDelegate {
         metalKitView.setNeedsDisplay()
         #endif
     }
+    func setUserRollRotation(_ newRoll: Float) {
+        userIsInteracting = true
+        rollRotation = newRoll
+        #if os(macOS)
+        metalKitView.setNeedsDisplay(metalKitView.bounds)
+        #else
+        metalKitView.setNeedsDisplay()
+        #endif
+    }
     func resetView() {
         // Start animation instead of setting directly
         guard !isAnimatingReset else { return } // Don't restart if already animating
@@ -252,6 +267,7 @@ class MetalKitSceneRenderer: NSObject, MTKViewDelegate {
         // Store starting state
         startRotation = rotation
         startVerticalRotation = verticalRotation
+        startRollRotation = rollRotation
         startZoom = zoom
         startTranslation = translation
 

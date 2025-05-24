@@ -12,11 +12,12 @@ private typealias ViewRepresentable = UIViewRepresentable
 struct MetalKitSceneView: ViewRepresentable {
     var modelIdentifier: ModelIdentifier?
 
-    class Coordinator {
+    class Coordinator: NSObject, UIGestureRecognizerDelegate {
         var renderer: MetalKitSceneRenderer?
         // Store camera interaction state
         var lastPanLocation: CGPoint?
         var lastRotation: Angle = .zero
+        var lastRollRotation: Float = 0.0
         var zoom: Float = 1.0
     }
 
@@ -48,12 +49,19 @@ struct MetalKitSceneView: ViewRepresentable {
         // --- Interactivity: Pan (rotation) and Pinch (zoom) ---
         #if os(iOS)
         let panGesture = UIPanGestureRecognizer(target: coordinator, action: #selector(Coordinator.handlePan(_:)))
+        panGesture.delegate = coordinator
         metalKitView.addGestureRecognizer(panGesture)
         let pinchGesture = UIPinchGestureRecognizer(target: coordinator, action: #selector(Coordinator.handlePinch(_:)))
+        pinchGesture.delegate = coordinator
         metalKitView.addGestureRecognizer(pinchGesture)
+        // 2-finger rotation (roll around Z-axis)
+        let rotationGesture = UIRotationGestureRecognizer(target: coordinator, action: #selector(Coordinator.handleRotation(_:)))
+        rotationGesture.delegate = coordinator
+        metalKitView.addGestureRecognizer(rotationGesture)
         // Double-tap to reset view
         let doubleTapGesture = UITapGestureRecognizer(target: coordinator, action: #selector(Coordinator.handleDoubleTap(_:)))
         doubleTapGesture.numberOfTapsRequired = 2
+        doubleTapGesture.delegate = coordinator
         metalKitView.addGestureRecognizer(doubleTapGesture)
         #endif
 
@@ -176,9 +184,37 @@ struct MetalKitSceneView: ViewRepresentable {
             }
         }
 
+        @objc func handleRotation(_ gesture: UIRotationGestureRecognizer) {
+            guard let renderer = renderer else { return }
+
+            // --- Call endUserInteraction on gesture end ---
+            if gesture.state == .ended || gesture.state == .cancelled {
+                renderer.endUserInteraction()
+                return // Don't process further if ended/cancelled
+            }
+            // --- End change ---
+
+            switch gesture.state {
+            case .began:
+                lastRollRotation = renderer.rollRotation
+            case .changed:
+                let newRollRotation = lastRollRotation - Float(gesture.rotation)
+                renderer.setUserRollRotation(newRollRotation)
+            default:
+                break // .ended/.cancelled handled above
+            }
+        }
+
         @objc func handleDoubleTap(_ gesture: UITapGestureRecognizer) {
             guard let renderer = renderer else { return }
             renderer.resetView()
+        }
+        
+        // MARK: - UIGestureRecognizerDelegate
+        func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldRecognizeSimultaneouslyWith otherGestureRecognizer: UIGestureRecognizer) -> Bool {
+            // Allow rotation gesture to work with pan gesture for 2-finger interactions
+            // Allow pinch gesture to work with rotation gesture
+            return true
         }
     }
 #endif
