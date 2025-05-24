@@ -158,14 +158,14 @@ public struct SOGSIterator {
     }
     
     private func readRotation(x: Int, y: Int) -> simd_quatf {
-        // Decode quaternion from packed format
-        let quatPixel = WebPDecoder.getPixelFloat(from: data.quats, x: x, y: y)
+        // Decode quaternion from packed format - use raw integer data to match JavaScript reference exactly
+        let quatPixel = WebPDecoder.getPixelUInt8(from: data.quats, x: x, y: y)
         
-        let a = (quatPixel.x - 0.5) * norm
-        let b = (quatPixel.y - 0.5) * norm
-        let c = (quatPixel.z - 0.5) * norm
+        let a = (Float(quatPixel.x) / 255.0 - 0.5) * norm
+        let b = (Float(quatPixel.y) / 255.0 - 0.5) * norm
+        let c = (Float(quatPixel.z) / 255.0 - 0.5) * norm
         let d = sqrt(max(0, 1 - (a * a + b * b + c * c)))
-        let mode = UInt32(quatPixel.w * 255.0 + 0.5) - 252
+        let mode = UInt32(quatPixel.w) - 252  // Direct integer access - matches JavaScript exactly
         
         // Reconstruct quaternion based on mode
         switch mode {
@@ -234,16 +234,16 @@ public struct SOGSIterator {
             return []
         }
         
-        // Extract spherical harmonics palette index
-        let labelPixel = WebPDecoder.getPixelFloat(from: labels, x: x, y: y)
-        let t = SIMD2<Int>(Int(labelPixel.x * 255.0), Int(labelPixel.y * 255.0))
-        let n = t.x + t.y * 256
+        // Extract spherical harmonics palette index - use raw integer data to match JavaScript exactly
+        let labelPixel = WebPDecoder.getPixelUInt8(from: labels, x: x, y: y)
+        let t = SIMD2<Int>(Int(labelPixel.x), Int(labelPixel.y))  // Direct integer access
+        let n = t.x + t.y * 256  // Same as (t.x + (t.y << 8))
         let u = (n % 64) * 15
         let v = n / 64
         
         var shCoeffs: [SIMD3<Float>] = []
         
-        // Read 15 consecutive texels from the centroids texture
+        // Read 15 consecutive texels from the centroids texture (keep float for interpolation)
         for i in 0..<15 {
             let centroidPixel = WebPDecoder.getPixelFloat(from: centroids, x: u + i, y: v)
             let coeff = SIMD3<Float>(

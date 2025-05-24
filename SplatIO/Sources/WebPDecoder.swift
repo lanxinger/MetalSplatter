@@ -133,7 +133,17 @@ public struct WebPDecoder {
         let b = image.pixels[index + 2]
         let a = image.pixels[index + 3]
         
-        return SIMD4<UInt8>(r, g, b, a)
+        // Un-premultiply alpha to get original color values
+        // Since CGContext uses premultiplied alpha, we need to divide by alpha to get original colors
+        if a > 0 {
+            let alpha = Float(a) / 255.0
+            let unpremultipliedR = UInt8(min(255.0, Float(r) / alpha))
+            let unpremultipliedG = UInt8(min(255.0, Float(g) / alpha))
+            let unpremultipliedB = UInt8(min(255.0, Float(b) / alpha))
+            return SIMD4<UInt8>(unpremultipliedR, unpremultipliedG, unpremultipliedB, a)
+        } else {
+            return SIMD4<UInt8>(r, g, b, a)
+        }
     }
     
     /// Get normalized float pixel value at specific coordinates
@@ -145,5 +155,10 @@ public struct WebPDecoder {
             Float(pixel.z) / 255.0,
             Float(pixel.w) / 255.0
         )
+    }
+    
+    /// Get raw UInt8 pixel value at specific coordinates (alias for getPixel for clarity)
+    public static func getPixelUInt8(from image: DecodedImage, x: Int, y: Int) -> SIMD4<UInt8> {
+        return getPixel(from: image, x: x, y: y)
     }
 } 
