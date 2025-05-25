@@ -1,8 +1,8 @@
 #if os(iOS) || os(macOS)
 
-import Metal
-import MetalKit
-import MetalSplatter
+@preconcurrency import Metal
+@preconcurrency import MetalKit
+@preconcurrency import MetalSplatter
 import os
 import SampleBoxRenderer
 import simd
@@ -28,6 +28,7 @@ private func smoothStep<T: FloatingPoint>(_ t: T) -> T {
     return t * t * (3 - 2 * t)
 }
 
+@MainActor
 class MetalKitSceneRenderer: NSObject, MTKViewDelegate {
     private static let log =
         Logger(subsystem: Bundle.main.bundleIdentifier!,
@@ -83,21 +84,31 @@ class MetalKitSceneRenderer: NSObject, MTKViewDelegate {
         modelRenderer = nil
         switch model {
         case .gaussianSplat(let url):
-            let splat = try await SplatRenderer(device: device,
-                                                colorFormat: metalKitView.colorPixelFormat,
-                                                depthFormat: metalKitView.depthStencilPixelFormat,
-                                                sampleCount: metalKitView.sampleCount,
+            // Capture needed values from main actor context
+            let deviceRef = device
+            let colorPixelFormat = metalKitView.colorPixelFormat
+            let depthStencilPixelFormat = metalKitView.depthStencilPixelFormat
+            let sampleCount = metalKitView.sampleCount
+            
+            // Create and read splat entirely in nonisolated context
+            let splat = try await Task.detached {
+                let renderer = try SplatRenderer(device: deviceRef,
+                                                colorFormat: colorPixelFormat,
+                                                depthFormat: depthStencilPixelFormat,
+                                                sampleCount: sampleCount,
                                                 maxViewCount: 1,
                                                 maxSimultaneousRenders: Constants.maxSimultaneousRenders)
-            try await splat.read(from: url)
+                try await renderer.read(from: url)
+                return renderer
+            }.value
             modelRenderer = splat
         case .sampleBox:
-            modelRenderer = try! await SampleBoxRenderer(device: device,
-                                                         colorFormat: metalKitView.colorPixelFormat,
-                                                         depthFormat: metalKitView.depthStencilPixelFormat,
-                                                         sampleCount: metalKitView.sampleCount,
-                                                         maxViewCount: 1,
-                                                         maxSimultaneousRenders: Constants.maxSimultaneousRenders)
+            modelRenderer = try! SampleBoxRenderer(device: device,
+                                                   colorFormat: metalKitView.colorPixelFormat,
+                                                   depthFormat: metalKitView.depthStencilPixelFormat,
+                                                   sampleCount: metalKitView.sampleCount,
+                                                   maxViewCount: 1,
+                                                   maxSimultaneousRenders: Constants.maxSimultaneousRenders)
         case .none:
             break
         }
@@ -154,7 +165,7 @@ class MetalKitSceneRenderer: NSObject, MTKViewDelegate {
         }
 
         let semaphore = inFlightSemaphore
-        commandBuffer.addCompletedHandler { (_ commandBuffer)-> Swift.Void in
+        commandBuffer.addCompletedHandler { @Sendable (_ commandBuffer)-> Swift.Void in
             semaphore.signal()
         }
 
