@@ -32,14 +32,9 @@ struct PackedGaussiansHeader {
     
     init() {}
     
-    // Helper to calculate SH coefficient count based on degree
+    // Helper to calculate SH coefficient count based on degree (matching Niantic reference)
     var shCoeffCount: Int {
-        // Formula for SH coefficient count based on degree
-        // degree 0: 1 coefficient (l=0: m=0)
-        // degree 1: 4 coefficients (l=0: m=0; l=1: m=-1,0,1)
-        // degree 2: 9 coefficients (l=0: m=0; l=1: m=-1,0,1; l=2: m=-2,-1,0,1,2)
-        // degree 3: 16 coefficients (l=0,1,2,3 with corresponding m values)
-        return Int((shDegree + 1) * (shDegree + 1))
+        return shDimForDegree(Int(shDegree))
     }
     
     init(data: Data) throws {
@@ -178,10 +173,10 @@ struct PackedGaussian {
         // Unpack alpha using sigmoid
         result.alpha = logit(Float(alpha) / 255.0)
         
-        // Unpack color
+        // Unpack color (matching Niantic reference with colorScale = 0.15)
         for i in 0..<3 {
             if i < color.count {
-                result.color[i] = Float(color[i]) / 255.0
+                result.color[i] = unquantizeColor(color[i])
             }
         }
         
@@ -207,8 +202,8 @@ struct PackedGaussian {
     
     // Convert from [0, 255] to proper SH coefficient range
     // The scale factor matches the C++ implementation's normalization
-    private func unquantizeColor(_ value: UInt8, colorScale: Float = 0.5) -> Float {
-        return (Float(value) / 255.0 - 0.5) / colorScale
+    private func unquantizeColor(_ value: UInt8, colorScale: Float = 0.15) -> Float {
+        return ((Float(value) / 255.0) - 0.5) / colorScale
     }
     
     // Convert from [0, 255] to scale value with the mapping used in the C++ version
@@ -243,14 +238,9 @@ struct PackedGaussians {
         positions.count == numPoints * 3 * 2
     }
     
-    // Helper to calculate SH coefficient count
+    // Helper to calculate SH coefficient count (matching Niantic reference)
     var shCoeffCount: Int {
-        // Formula for SH coefficient count based on degree
-        // degree 0: 1 coefficient
-        // degree 1: 4 coefficients (1 + 3)
-        // degree 2: 9 coefficients (1 + 3 + 5)
-        // degree 3: 16 coefficients (1 + 3 + 5 + 7)
-        return (shDegree + 1) * (shDegree + 1)
+        return shDimForDegree(shDegree)
     }
     
     func at(_ index: Int) -> PackedGaussian {
@@ -298,8 +288,8 @@ struct PackedGaussians {
             result.color = Array(colors[colorStart..<colorStart + 3])
         }
         
-        // Calculate SH dimension based on degree
-        let shDim = (shDegree + 1) * (shDegree + 1)
+        // Calculate SH dimension based on degree (matching Niantic reference)
+        let shDim = shDimForDegree(shDegree)
         let shStart = index * shDim * 3
         
         // Verify SH array bounds
@@ -477,7 +467,7 @@ struct PackedGaussians {
             throw SplatFileFormatError.invalidData
         }
         
-        let shDim = (shDegree + 1) * (shDegree + 1)
+        let shDim = shDimForDegree(shDegree)
         let usesFloat16 = (header.flags & 0x2) != 0
         print("PackedGaussians.deserialize: Uses Float16: \(usesFloat16)")
         
@@ -651,4 +641,91 @@ func float16ToFloat32(_ half: UInt16) -> Float {
     
     // Normalized
     return signMul * pow(2.0, Float(exponent - 15)) * (1.0 + Float(mantissa) / 1024.0)
+}
+
+// MARK: - Coordinate System Support (matching Niantic reference)
+
+enum CoordinateSystem: Int {
+    case unspecified = 0
+    case ldb = 1  // Left Down Back
+    case rdb = 2  // Right Down Back
+    case lub = 3  // Left Up Back
+    case rub = 4  // Right Up Back, Three.js coordinate system
+    case ldf = 5  // Left Down Front
+    case rdf = 6  // Right Down Front, PLY coordinate system
+    case luf = 7  // Left Up Front, GLB coordinate system
+    case ruf = 8  // Right Up Front, Unity coordinate system
+}
+
+struct CoordinateConverter {
+    let flipP: SIMD3<Float>  // x, y, z flips for positions
+    let flipQ: SIMD3<Float>  // x, y, z flips for quaternions (w is never flipped)
+    let flipSh: [Float]      // Flips for the 15 spherical harmonics coefficients
+    
+    static func converter(from: CoordinateSystem, to: CoordinateSystem) -> CoordinateConverter {
+        let (xMatch, yMatch, zMatch) = axesMatch(from, to)
+        let x: Float = xMatch ? 1.0 : -1.0
+        let y: Float = yMatch ? 1.0 : -1.0
+        let z: Float = zMatch ? 1.0 : -1.0
+        
+        return CoordinateConverter(
+            flipP: SIMD3<Float>(x, y, z),
+            flipQ: SIMD3<Float>(y * z, x * z, x * y),
+            flipSh: [
+                y,          // 0
+                z,          // 1
+                x,          // 2
+                x * y,      // 3
+                y * z,      // 4
+                1.0,        // 5
+                x * z,      // 6
+                1.0,        // 7
+                y,          // 8
+                x * y * z,  // 9
+                y,          // 10
+                z,          // 11
+                x,          // 12
+                z,          // 13
+                x,          // 14
+            ]
+        )
+    }
+    
+    private static func axesMatch(_ a: CoordinateSystem, _ b: CoordinateSystem) -> (Bool, Bool, Bool) {
+        let aNum = a.rawValue - 1
+        let bNum = b.rawValue - 1
+        
+        if aNum < 0 || bNum < 0 {
+            return (true, true, true)
+        }
+        
+        return (
+            ((aNum >> 0) & 1) == ((bNum >> 0) & 1),
+            ((aNum >> 1) & 1) == ((bNum >> 1) & 1),
+            ((aNum >> 2) & 1) == ((bNum >> 2) & 1)
+        )
+    }
+}
+
+// MARK: - Spherical Harmonics Utilities (matching Niantic reference)
+
+/// Calculate SH coefficient count for a given degree (matching C++ dimForDegree)
+func shDimForDegree(_ degree: Int) -> Int {
+    switch degree {
+    case 0: return 0
+    case 1: return 3
+    case 2: return 8
+    case 3: return 15
+    default:
+        print("Warning: Unsupported SH degree: \(degree)")
+        return 0
+    }
+}
+
+/// Calculate SH degree for a given coefficient count
+func shDegreeForDim(_ dim: Int) -> Int {
+    if dim < 3 { return 0 }
+    if dim < 8 { return 1 }
+    if dim < 15 { return 2 }
+    return 3
 }

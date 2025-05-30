@@ -188,7 +188,7 @@ public class SPZSceneReader: SplatSceneReader {
         let expectedRotationBytes = safeNumPoints * 3
         let expectedAlphaBytes = safeNumPoints
         let expectedColorBytes = safeNumPoints * 3
-        let shDim = (packedGaussians.shDegree + 1) * (packedGaussians.shDegree + 1)
+        let shDim = shDimForDegree(packedGaussians.shDegree)  // Use correct Niantic formula
         let expectedSHBytes = safeNumPoints * shDim * 3
         
         // Log actual vs expected data sizes
@@ -450,8 +450,6 @@ public class SPZSceneReader: SplatSceneReader {
     }
     
     // Helper function to convert sigmoid to logit
-
-    
     private func logit(_ x: Float) -> Float {
         let safe_x = max(0.0001, min(0.9999, x)) // Clamp to avoid log(0) or log(1)
         return log(safe_x / (1.0 - safe_x))
@@ -508,59 +506,59 @@ public class SPZSceneReader: SplatSceneReader {
     }
     
     // Special method for iOS files that don't decompress with standard methods
-private static func decompressIOSGzippedFile(_ data: Data) -> Data? {
-    guard data.count > 10 else { return nil } // Need at least the gzip header
-    
-    print("SPZSceneReader: Attempting iOS-specific gzip decompression")
-    
-    // First try to use the Compression framework directly
-    do {
-        var decompressed = Data()
-        // Skip the first 10 bytes (gzip header)
-        let compressedData = data.subdata(in: 10..<data.count)
+    private static func decompressIOSGzippedFile(_ data: Data) -> Data? {
+        guard data.count > 10 else { return nil } // Need at least the gzip header
         
-        // Initialize a decoder for zlib
-        let outputFilter = try OutputFilter(.decompress, using: .zlib) { (data: Data?) -> Void in
-            if let data = data {
-                decompressed.append(data)
-            }
-        }
+        print("SPZSceneReader: Attempting iOS-specific gzip decompression")
         
-        // Process the data
-        try outputFilter.write(compressedData)
-        try outputFilter.finalize()
-        
-        // If we got something reasonable, return it
-        if decompressed.count > 1000 {
-            print("SPZSceneReader: iOS-specific decompression succeeded with \(decompressed.count) bytes")
-            return decompressed
-        }
-    } catch {
-        print("SPZSceneReader: iOS-specific decompression failed: \(error)")
-    }
-    
-    // Second approach: try several offsets into the file
-    let possibleOffsets = [0, 10, 16, 18, 20, 24, 32]
-    
-    for offset in possibleOffsets {
-        guard offset < data.count else { continue }
-        
-        let compressedData = data.subdata(in: offset..<data.count)
+        // First try to use the Compression framework directly
         do {
-            let decompressed = try (compressedData as NSData).decompressed(using: .zlib) as Data
+            var decompressed = Data()
+            // Skip the first 10 bytes (gzip header)
+            let compressedData = data.subdata(in: 10..<data.count)
+            
+            // Initialize a decoder for zlib
+            let outputFilter = try OutputFilter(.decompress, using: .zlib) { (data: Data?) -> Void in
+                if let data = data {
+                    decompressed.append(data)
+                }
+            }
+            
+            // Process the data
+            try outputFilter.write(compressedData)
+            try outputFilter.finalize()
+            
+            // If we got something reasonable, return it
             if decompressed.count > 1000 {
-                print("SPZSceneReader: iOS decompression succeeded at offset \(offset) with \(decompressed.count) bytes")
+                print("SPZSceneReader: iOS-specific decompression succeeded with \(decompressed.count) bytes")
                 return decompressed
             }
         } catch {
-            // Just try the next offset
+            print("SPZSceneReader: iOS-specific decompression failed: \(error)")
         }
+        
+        // Second approach: try several offsets into the file
+        let possibleOffsets = [0, 10, 16, 18, 20, 24, 32]
+        
+        for offset in possibleOffsets {
+            guard offset < data.count else { continue }
+            
+            let compressedData = data.subdata(in: offset..<data.count)
+            do {
+                let decompressed = try (compressedData as NSData).decompressed(using: .zlib) as Data
+                if decompressed.count > 1000 {
+                    print("SPZSceneReader: iOS decompression succeeded at offset \(offset) with \(decompressed.count) bytes")
+                    return decompressed
+                }
+            } catch {
+                // Just try the next offset
+            }
+        }
+        
+        return nil
     }
     
-    return nil
-}
-
-private static func decompressGzipped(_ data: Data) -> Data? {
+    private static func decompressGzipped(_ data: Data) -> Data? {
         // Simple check for gzip header
         guard data.count >= 2, data[0] == 0x1F, data[1] == 0x8B else {
             print("SPZSceneReader: Not a gzip file (wrong magic bytes)")
