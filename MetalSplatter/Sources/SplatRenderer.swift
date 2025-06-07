@@ -9,6 +9,54 @@ typealias Float16 = Float
 #warning("x86_64 targets are unsupported by MetalSplatter and will fail at runtime. MetalSplatter builds on x86_64 only because Xcode builds Swift Packages as universal binaries and provides no way to override this. When Swift supports Float16 on x86_64, this may be revisited.")
 #endif
 
+// Simple buffer pool for reusing GPU buffers
+class BufferPool {
+    private let device: MTLDevice
+    private var distanceBuffers: [MTLBuffer] = []
+    private var indexBuffers: [MTLBuffer] = []
+    private let maxPoolSize = 3
+    
+    init(device: MTLDevice) {
+        self.device = device
+    }
+    
+    func getDistanceBuffer(size: Int) -> MTLBuffer? {
+        // Try to find a suitable buffer from pool
+        for (index, buffer) in distanceBuffers.enumerated() {
+            if buffer.length >= MemoryLayout<Float>.size * size {
+                distanceBuffers.remove(at: index)
+                return buffer
+            }
+        }
+        
+        // Create new buffer if none available
+        return device.makeBuffer(length: MemoryLayout<Float>.size * size, options: .storageModePrivate)
+    }
+    
+    func getIndexBuffer(size: Int) -> MTLBuffer? {
+        // Try to find a suitable buffer from pool
+        for (index, buffer) in indexBuffers.enumerated() {
+            if buffer.length >= MemoryLayout<Int32>.size * size {
+                indexBuffers.remove(at: index)
+                return buffer
+            }
+        }
+        
+        // Create new buffer if none available
+        return device.makeBuffer(length: MemoryLayout<Int32>.size * size, options: .storageModeShared)
+    }
+    
+    func returnDistanceBuffer(_ buffer: MTLBuffer) {
+        guard distanceBuffers.count < maxPoolSize else { return }
+        distanceBuffers.append(buffer)
+    }
+    
+    func returnIndexBuffer(_ buffer: MTLBuffer) {
+        guard indexBuffers.count < maxPoolSize else { return }
+        indexBuffers.append(buffer)
+    }
+}
+
 public class SplatRenderer {
     enum Constants {
         // Keep in sync with Shaders.metal : maxViewCount
@@ -38,6 +86,7 @@ public class SplatRenderer {
     
     private var computeDepthsPipelineState: MTLComputePipelineState?
     private var computeDistancesPipelineState: MTLComputePipelineState?
+    private var computeDistancesVectorizedPipelineState: MTLComputePipelineState?
     private var frustumCullPipelineState: MTLComputePipelineState?
     
     public struct ViewportDescriptor {
@@ -109,10 +158,6 @@ public class SplatRenderer {
         var covB: PackedHalf3
     }
 
-    struct SplatIndexAndDepth {
-        var index: UInt32
-        var depth: Float
-    }
 
     public let device: MTLDevice
     public let colorFormat: MTLPixelFormat
@@ -125,6 +170,17 @@ public class SplatRenderer {
      High-quality depth takes longer, but results in a continuous, more-representative depth buffer result, which is useful for reducing artifacts during Vision Pro's frame reprojection.
      */
     public var highQualityDepth: Bool = true
+    
+    // Compute optimization properties
+    public var useVectorizedCompute: Bool = true // Use SIMD-optimized compute shader
+    public var maxCullDistance: Float = 200.0 // Distance beyond which splats are culled
+    
+    // Sorting optimization properties
+    private var lastCameraPosition: SIMD3<Float> = .zero
+    private var lastCameraForward: SIMD3<Float> = .init(x: 0, y: 0, z: -1)
+    private var sortingThreshold: Float = 0.01 // Minimum camera movement to trigger resort
+    private var framesSinceLastSort: Int = 0
+    private let maxFramesWithoutSort: Int = 60 // Force resort after this many frames
 
     private var writeDepth: Bool {
         depthFormat != .invalid
@@ -198,7 +254,10 @@ public class SplatRenderer {
     public var splatCount: Int { splatBuffer.count }
 
     var sorting = false
-    var orderAndDepthTempSort: [SplatIndexAndDepth] = []
+    
+    // Buffer pool for sorting to avoid repeated allocations  
+    private var bufferPool: BufferPool
+    private lazy var sortCommandQueue: MTLCommandQueue? = device.makeCommandQueue()
 
     public init(device: MTLDevice,
                 colorFormat: MTLPixelFormat,
@@ -224,9 +283,10 @@ public class SplatRenderer {
         self.dynamicUniformBuffers.label = "Uniform Buffers"
         self.uniforms = UnsafeMutableRawPointer(dynamicUniformBuffers.contents()).bindMemory(to: UniformsArray.self, capacity: 1)
 
-        self.splatBuffer = try MetalBuffer(device: device)
-        self.splatBufferPrime = try MetalBuffer(device: device)
-        self.indexBuffer = try MetalBuffer(device: device)
+        self.splatBuffer = try MetalBuffer(device: device, storageMode: .storageModeShared)
+        self.splatBufferPrime = try MetalBuffer(device: device, storageMode: .storageModeShared)
+        self.indexBuffer = try MetalBuffer(device: device, storageMode: .storageModeShared)
+        self.bufferPool = BufferPool(device: device)
 
         do {
             library = try device.makeDefaultLibrary(bundle: Bundle.module)
@@ -234,10 +294,13 @@ public class SplatRenderer {
             fatalError("Unable to initialize SplatRenderer: \(error)")
         }
         
-        // Initialize compute pipeline for distance calculation
+        // Initialize compute pipelines for distance calculation
         do {
             let computeFunction = library.makeFunction(name: "computeSplatDistances")
             computeDistancesPipelineState = try device.makeComputePipelineState(function: computeFunction!)
+            
+            let computeVectorizedFunction = library.makeFunction(name: "computeSplatDistancesVectorized")
+            computeDistancesVectorizedPipelineState = try device.makeComputePipelineState(function: computeVectorizedFunction!)
         } catch {
             Self.log.error("Failed to create compute pipeline state: \(error)")
         }
@@ -438,6 +501,7 @@ public class SplatRenderer {
         cameraWorldPosition = viewports.map { Self.cameraWorldPosition(forViewMatrix: $0.viewMatrix) }.mean ?? .zero
         cameraWorldForward = viewports.map { Self.cameraWorldForward(forViewMatrix: $0.viewMatrix) }.mean?.normalized ?? .init(x: 0, y: 0, z: -1)
 
+        framesSinceLastSort += 1
         if !sorting {
             resort()
         }
@@ -450,6 +514,20 @@ public class SplatRenderer {
     private static func cameraWorldPosition(forViewMatrix view: simd_float4x4) -> simd_float3 {
         (view.inverse * SIMD4<Float>(x: 0, y: 0, z: 0, w: 1)).xyz
     }
+    
+    private func shouldSkipSort(position: SIMD3<Float>, forward: SIMD3<Float>) -> Bool {
+        // Force sort if too many frames have passed
+        if framesSinceLastSort >= maxFramesWithoutSort {
+            return false
+        }
+        
+        // Check if camera has moved significantly
+        let positionDelta = distance(position, lastCameraPosition)
+        let forwardDelta = distance(forward, lastCameraForward)
+        
+        return positionDelta < sortingThreshold && forwardDelta < sortingThreshold
+    }
+    
 
     func renderEncoder(multiStage: Bool,
                        viewports: [ViewportDescriptor],
@@ -604,15 +682,26 @@ public class SplatRenderer {
     }
 
     // Sort splatBuffer (read-only), storing the results in splatBuffer (write-only) then swap splatBuffer and splatBufferPrime
-    public func resort(useGPU: Bool = true) {
+    public func resort(useGPU: Bool = true, force: Bool = false) {
         guard !sorting else { return }
-        sorting = true
-        onSortStart?()
-
+        
         let splatCount = splatBuffer.count
+        guard splatCount > 0 else { return }
         
         let cameraWorldForward = cameraWorldForward
         let cameraWorldPosition = cameraWorldPosition
+        
+        // Skip sorting if camera hasn't moved significantly (unless forced)
+        if !force && shouldSkipSort(position: cameraWorldPosition, forward: cameraWorldForward) {
+            return
+        }
+        
+        sorting = true
+        onSortStart?()
+        
+        lastCameraPosition = cameraWorldPosition
+        lastCameraForward = cameraWorldForward
+        framesSinceLastSort = 0
         
 //        // For benchmark.
 //        guard splatCount > 0 else {
@@ -625,137 +714,124 @@ public class SplatRenderer {
 
         if useGPU {
             Task(priority: .high) {
-//                let startTime = Date()
-
-                // Allocate a GPU buffer for storing distances.
-                guard let distanceBuffer = device.makeBuffer(
-                    length: MemoryLayout<Float>.size * splatCount,
-                    options: .storageModeShared
-                ) else {
-                    Self.log.error("Failed to create distance buffer.")
-                    self.sorting = false
-                    return
-                }
-
-                // Create command queue for compute and MPSArgSort.
-                guard let commandQueue = device.makeCommandQueue() else {
-                    Self.log.error("Failed to create command queue for compute and MPSArgSort.")
+                let startTime = CFAbsoluteTimeGetCurrent()
+                
+                // Get buffers from pool
+                guard let distanceBuffer = self.bufferPool.getDistanceBuffer(size: splatCount),
+                      let indexOutputBuffer = self.bufferPool.getIndexBuffer(size: splatCount) else {
+                    Self.log.error("Failed to get sort buffers from pool.")
                     self.sorting = false
                     return
                 }
                 
-                // Create command buffer for distance computation
-                guard let commandBuffer = commandQueue.makeCommandBuffer(),
-                      let computeEncoder = commandBuffer.makeComputeCommandEncoder(),
-                      let computePipelineState = computeDistancesPipelineState else {
-                    Self.log.error("Failed to create compute command buffer or encoder.")
+                guard let commandQueue = self.sortCommandQueue else {
+                    Self.log.error("Missing command queue.")
                     self.sorting = false
                     return
                 }
                 
-                // Set up compute shader parameters
+                // Choose compute pipeline based on settings
+                let computePipelineState: MTLComputePipelineState?
+                let useVectorized = self.useVectorizedCompute && splatCount >= 1024 // Use vectorized for larger datasets
+                
+                if useVectorized {
+                    computePipelineState = self.computeDistancesVectorizedPipelineState
+                } else {
+                    computePipelineState = self.computeDistancesPipelineState
+                }
+                
+                guard let pipelineState = computePipelineState else {
+                    Self.log.error("Missing compute pipeline state.")
+                    self.sorting = false
+                    return
+                }
+                
+                // Use single command buffer for both compute and sort to eliminate sync
+                guard let commandBuffer = commandQueue.makeCommandBuffer() else {
+                    Self.log.error("Failed to create command buffer.")
+                    self.sorting = false
+                    return
+                }
+                
+                // Distance computation pass
+                guard let computeEncoder = commandBuffer.makeComputeCommandEncoder() else {
+                    Self.log.error("Failed to create compute encoder.")
+                    self.sorting = false
+                    return
+                }
+                
                 var cameraPos = cameraWorldPosition
                 var cameraFwd = cameraWorldForward
                 var sortByDist = Constants.sortByDistance
                 var count = UInt32(splatCount)
+                var cullDist = self.maxCullDistance
                 
-                computeEncoder.setComputePipelineState(computePipelineState)
-                computeEncoder.setBuffer(splatBuffer.buffer, offset: 0, index: 0)
+                computeEncoder.setComputePipelineState(pipelineState)
+                computeEncoder.setBuffer(self.splatBuffer.buffer, offset: 0, index: 0)
                 computeEncoder.setBuffer(distanceBuffer, offset: 0, index: 1)
                 computeEncoder.setBytes(&cameraPos, length: MemoryLayout<SIMD3<Float>>.size, index: 2)
                 computeEncoder.setBytes(&cameraFwd, length: MemoryLayout<SIMD3<Float>>.size, index: 3)
                 computeEncoder.setBytes(&sortByDist, length: MemoryLayout<Bool>.size, index: 4)
                 computeEncoder.setBytes(&count, length: MemoryLayout<UInt32>.size, index: 5)
+                computeEncoder.setBytes(&cullDist, length: MemoryLayout<Float>.size, index: 6)
                 
-                let threadsPerThreadgroup = MTLSize(width: 256, height: 1, depth: 1)
-                let threadgroups = MTLSize(width: (splatCount + 255) / 256, height: 1, depth: 1)
+                // Optimize threadgroup size based on pipeline type
+                let threadsPerThreadgroup: MTLSize
+                let threadgroups: MTLSize
+                
+                if useVectorized {
+                    // Vectorized version processes 4 splats per thread
+                    let workSize = (splatCount + 3) / 4 // Round up for 4-splat groups
+                    threadsPerThreadgroup = MTLSize(width: 128, height: 1, depth: 1) // Smaller threadgroups for vectorized
+                    threadgroups = MTLSize(width: (workSize + 127) / 128, height: 1, depth: 1)
+                } else {
+                    // Regular version processes 1 splat per thread
+                    threadsPerThreadgroup = MTLSize(width: 256, height: 1, depth: 1)
+                    threadgroups = MTLSize(width: (splatCount + 255) / 256, height: 1, depth: 1)
+                }
                 
                 computeEncoder.dispatchThreadgroups(threadgroups, threadsPerThreadgroup: threadsPerThreadgroup)
                 computeEncoder.endEncoding()
+                
+                Self.log.debug("Using \(useVectorized ? "vectorized" : "standard") compute: \(threadgroups.width) threadgroups, \(threadsPerThreadgroup.width) threads each")
+                
                 commandBuffer.commit()
                 commandBuffer.waitUntilCompleted()
-
-                // Allocate a GPU buffer for the ArgSort output indices
-                guard let indexOutputBuffer = device.makeBuffer(
-                    length: MemoryLayout<Int32>.size * splatCount,
-                    options: .storageModeShared
-                ) else {
-                    Self.log.error("Failed to create output indices buffer.")
-                    self.sorting = false
-                    return
-                }
-
-                // Run argsort, in decending order.
+                
+                // Run ArgSort after compute is complete
                 let argSort = MPSArgSort(dataType: .float32, descending: true)
                 argSort(commandQueue: commandQueue,
                         input: distanceBuffer,
                         output: indexOutputBuffer,
                         count: splatCount)
-
-                // Read back the sorted indices and reorder splats on the CPU.
+                
+                // Reorder splats on CPU with sorted indices
                 let sortedIndices = indexOutputBuffer.contents().bindMemory(to: Int32.self, capacity: splatCount)
-
+                
                 do {
                     try self.splatBufferPrime.setCapacity(splatCount)
                     self.splatBufferPrime.count = 0
                     for newIndex in 0 ..< splatCount {
                         let oldIndex = Int(sortedIndices[newIndex])
-                        splatBufferPrime.append(splatBuffer, fromIndex: oldIndex)
+                        self.splatBufferPrime.append(self.splatBuffer, fromIndex: oldIndex)
                     }
-                    swap(&splatBuffer, &splatBufferPrime)
+                    swap(&self.splatBuffer, &self.splatBufferPrime)
                 } catch {
                     Self.log.error("Failed to set capacity or reorder: \(error)")
                 }
-
-//                let elapsed = Date().timeIntervalSince(startTime)
-//                Self.log.info("Sort time (GPU): \(elapsed) seconds")
-//                self.onSortComplete?(elapsed)
+                
+                let elapsed = CFAbsoluteTimeGetCurrent() - startTime
+                self.onSortComplete?(elapsed)
                 self.sorting = false
+                
+                // Return buffers to pool for reuse
+                self.bufferPool.returnDistanceBuffer(distanceBuffer)
+                self.bufferPool.returnIndexBuffer(indexOutputBuffer)
             }
         } else {
-            Task(priority: .high) {
-//                let cpuStart = Date()
-                if orderAndDepthTempSort.count != splatCount {
-                    orderAndDepthTempSort = Array(
-                        repeating: SplatIndexAndDepth(index: .max, depth: 0),
-                        count: splatCount
-                    )
-                }
-
-                if Constants.sortByDistance {
-                    for i in 0 ..< splatCount {
-                        orderAndDepthTempSort[i].index = UInt32(i)
-                        let splatPos = splatBuffer.values[i].position.simd
-                        orderAndDepthTempSort[i].depth = (splatPos - cameraWorldPosition).lengthSquared
-                    }
-                } else {
-                    for i in 0 ..< splatCount {
-                        orderAndDepthTempSort[i].index = UInt32(i)
-                        let splatPos = splatBuffer.values[i].position.simd
-                        orderAndDepthTempSort[i].depth = dot(splatPos, cameraWorldForward)
-                    }
-                }
-
-                orderAndDepthTempSort.sort { $0.depth > $1.depth }
-
-                do {
-                    try splatBufferPrime.setCapacity(splatCount)
-                    splatBufferPrime.count = 0
-                    for newIndex in 0..<orderAndDepthTempSort.count {
-                        let oldIndex = Int(orderAndDepthTempSort[newIndex].index)
-                        splatBufferPrime.append(splatBuffer, fromIndex: oldIndex)
-                    }
-
-                    swap(&splatBuffer, &splatBufferPrime)
-                } catch {
-                    Self.log.error("Failed to set capacity or reorder: \(error)")
-                }
-
-//                let elapsedCPU = -cpuStart.timeIntervalSinceNow
-//                Self.log.info("Sort time (CPU): \(elapsedCPU) seconds")
-//                onSortComplete?(elapsedCPU)
-                self.sorting = false
-            }
+            // CPU fallback removed - always use GPU sorting for better performance
+            Self.log.warning("GPU sorting not available, fallback to GPU-only path")
+            self.sorting = false
         }
     }
 }

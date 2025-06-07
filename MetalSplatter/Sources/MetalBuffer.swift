@@ -22,19 +22,26 @@ class MetalBuffer<T> {
     }
 
     let device: MTLDevice
-
+    let storageMode: MTLResourceOptions
+    
     var capacity: Int = 0
     var count: Int = 0
     var buffer: MTLBuffer
     var values: UnsafeMutablePointer<T>
+    
+    // Smart growth constants (computed properties to avoid static stored property limitation)
+    private var smallBufferThreshold: Int { 1024 }
+    private var mediumBufferThreshold: Int { 32768 }
+    private var maxGrowthFactor: Float { 1.5 }
 
-    init(device: MTLDevice, capacity: Int = 1) throws {
+    init(device: MTLDevice, capacity: Int = 1, storageMode: MTLResourceOptions = .storageModeShared) throws {
         let capacity = max(capacity, 1)
         guard capacity <= Self.maxCapacity(for: device) else {
             throw Error.capacityGreatedThanMaxCapacity(requested: capacity, max: Self.maxCapacity(for: device))
         }
 
         self.device = device
+        self.storageMode = storageMode
 
         self.capacity = capacity
         self.count = 0
@@ -61,17 +68,28 @@ class MetalBuffer<T> {
             throw Error.capacityGreatedThanMaxCapacity(requested: capacity, max: maxCapacity)
         }
 
-        // Use exponential growth strategy to reduce frequent reallocations
-        let actualNewCapacity = newCapacity > capacity ? 
-            max(newCapacity, capacity * 2) : newCapacity
+        // Smart growth strategy based on buffer size
+        let actualNewCapacity: Int
+        if newCapacity > capacity {
+            if capacity < smallBufferThreshold {
+                // Double small buffers for quick initial growth
+                actualNewCapacity = max(newCapacity, capacity * 2)
+            } else if capacity < mediumBufferThreshold {
+                // 1.5x growth for medium buffers
+                actualNewCapacity = max(newCapacity, Int(Float(capacity) * maxGrowthFactor))
+            } else {
+                // Conservative growth for large buffers (25% or minimum needed)
+                let conservativeGrowth = capacity + max(capacity / 4, newCapacity - capacity)
+                actualNewCapacity = min(conservativeGrowth, maxCapacity)
+            }
+        } else {
+            actualNewCapacity = newCapacity
+        }
 
         log.info("Allocating a new buffer of size \(MemoryLayout<T>.stride) * \(actualNewCapacity) = \(Float(MemoryLayout<T>.stride * actualNewCapacity) / (1024.0 * 1024.0))mb")
         
-        // Use private storage mode for better performance if not accessed by CPU
-        let storageMode: MTLResourceOptions = .storageModeShared
-        
         guard let newBuffer = device.makeBuffer(length: MemoryLayout<T>.stride * actualNewCapacity,
-                                                options: storageMode) else {
+                                                options: self.storageMode) else {
             throw Error.bufferCreationFailed
         }
         let newValues = UnsafeMutableRawPointer(newBuffer.contents()).bindMemory(to: T.self, capacity: actualNewCapacity)
