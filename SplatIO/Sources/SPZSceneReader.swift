@@ -50,7 +50,11 @@ public class SPZSceneReader: SplatSceneReader {
             
             // Check for SPZ magic number
             if fileData.count >= 4 {
-                let magic = fileData.prefix(4).withUnsafeBytes { $0.load(as: UInt32.self) }
+                // Safer way to load UInt32 from potentially unaligned data
+                var magic: UInt32 = 0
+                _ = withUnsafeMutableBytes(of: &magic) { magicPtr in
+                    fileData.prefix(4).copyBytes(to: magicPtr)
+                }
                 print("SPZSceneReader: No SPZ magic number found at start: 0x\(String(format: "%08X", magic))")
             }
             
@@ -84,7 +88,11 @@ public class SPZSceneReader: SplatSceneReader {
             for offset in stride(from: 0, to: min(fileData.count - 20, 10000), by: 1) {
                 let currentBytes = fileData[offset..<min(offset+4, fileData.count)]
                 if currentBytes.count == 4 {
-                    let magic = currentBytes.withUnsafeBytes { $0.load(as: UInt32.self) }
+                    // Safer way to load UInt32 from potentially unaligned data
+                    var magic: UInt32 = 0
+                    _ = withUnsafeMutableBytes(of: &magic) { magicPtr in
+                        currentBytes.copyBytes(to: magicPtr)
+                    }
                     
                     // Check for NGSP in little endian
                     if magic == 0x5053474E {
@@ -124,7 +132,11 @@ public class SPZSceneReader: SplatSceneReader {
                     guard offset + 4 <= data.count else { break }
                     
                     let magicBytes = data[offset..<(offset+4)]
-                    let magic = magicBytes.withUnsafeBytes { $0.load(as: UInt32.self) }
+                    // Safer way to load UInt32 from potentially unaligned data
+                    var magic: UInt32 = 0
+                    _ = withUnsafeMutableBytes(of: &magic) { magicPtr in
+                        magicBytes.copyBytes(to: magicPtr)
+                    }
                     
                     // Check for NGSP magic (0x5053474E in little endian)
                     if magic == 0x5053474E {

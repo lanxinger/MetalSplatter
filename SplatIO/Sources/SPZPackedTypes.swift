@@ -42,9 +42,16 @@ struct PackedGaussiansHeader {
             throw SplatFileFormatError.invalidHeader
         }
         
-        magic = data.withUnsafeBytes { $0.load(as: UInt32.self) }
-        version = data.withUnsafeBytes { $0.load(fromByteOffset: 4, as: UInt32.self) }
-        numPoints = data.withUnsafeBytes { $0.load(fromByteOffset: 8, as: UInt32.self) }
+        // Safely load UInt32 values using copyBytes to avoid alignment issues
+        _ = withUnsafeMutableBytes(of: &magic) { ptr in
+            data[0..<4].copyBytes(to: ptr)
+        }
+        _ = withUnsafeMutableBytes(of: &version) { ptr in
+            data[4..<8].copyBytes(to: ptr)
+        }
+        _ = withUnsafeMutableBytes(of: &numPoints) { ptr in
+            data[8..<12].copyBytes(to: ptr)
+        }
         shDegree = data[12]
         fractionalBits = data[13]
         flags = data[14]
@@ -401,7 +408,11 @@ struct PackedGaussians {
                         guard offset + 4 <= data.count else { break }
                         
                         let magicBytes = data[offset..<(offset+4)]
-                        let magic = magicBytes.withUnsafeBytes { $0.load(as: UInt32.self) }
+                        // Safer way to load UInt32 from potentially unaligned data
+                        var magic: UInt32 = 0
+                        _ = withUnsafeMutableBytes(of: &magic) { magicPtr in
+                            magicBytes.copyBytes(to: magicPtr)
+                        }
                         
                         // Check for NGSP magic (0x5053474E in little endian)
                         if magic == 0x5053474E {
@@ -523,7 +534,11 @@ struct PackedGaussians {
             for i in 0...12 {
                 if i + 4 <= data.count {
                     let magicBytes = data[i..<(i+4)]
-                    let magic = magicBytes.withUnsafeBytes { $0.load(as: UInt32.self) }
+                    // Safer way to load UInt32 from potentially unaligned data
+                    var magic: UInt32 = 0
+                    _ = withUnsafeMutableBytes(of: &magic) { magicPtr in
+                        magicBytes.copyBytes(to: magicPtr)
+                    }
                     print("  Offset \(i): 0x\(String(format: "%08X", magic)) (\(String(bytes: magicBytes, encoding: .ascii) ?? "non-ASCII"))")
                 }
             }
