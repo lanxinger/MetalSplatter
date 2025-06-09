@@ -259,14 +259,16 @@ public class SPXSceneReader: SplatSceneReader {
     }
     
     private func parseFormat20(_ data: Data, count: Int) throws -> [SplatScenePoint] {
-        let expectedSize = count * SPXBasicGaussian.byteSize
-        print("SPXSceneReader: Format 20 parsing - Count: \(count), Expected size: \(expectedSize), Actual size: \(data.count), Bytes per gaussian: \(SPXBasicGaussian.byteSize)")
+        // SPX Format 20 expected size: count * 20 bytes total
+        // (3+3+3) bytes for positions + 3 bytes for scales + 4 bytes for colors + 4 bytes for rotations
+        let expectedSize = count * 20
+        print("SPXSceneReader: Format 20 parsing - Count: \(count), Expected size: \(expectedSize), Actual size: \(data.count), Bytes per gaussian: 20")
         
         guard data.count >= expectedSize else {
             print("SPXSceneReader: Insufficient data for format 20. Need \(expectedSize) bytes, have \(data.count) bytes")
             
             // Try to parse as many points as we can with available data
-            let availablePoints = data.count / SPXBasicGaussian.byteSize
+            let availablePoints = data.count / 20
             print("SPXSceneReader: Attempting to parse \(availablePoints) points instead of \(count)")
             
             if availablePoints == 0 {
@@ -282,7 +284,6 @@ public class SPXSceneReader: SplatSceneReader {
     private func parseFormat20Points(_ data: Data, count: Int) throws -> [SplatScenePoint] {
         var newPoints: [SplatScenePoint] = []
         newPoints.reserveCapacity(count)
-        let pointRecordSize = SPXBasicGaussian.byteSize // 16 bytes per point
 
         guard let header = header else {
             throw SPXFileFormatError.invalidHeader
@@ -294,40 +295,43 @@ public class SPXSceneReader: SplatSceneReader {
         let boundsSize = boundsMax - boundsMin
         let boundsCenter = (boundsMin + boundsMax) * 0.5
         
+        // SPX Format 20 data layout (based on Go reference implementation):
+        // Positions: count * 3 bytes each for X, Y, Z (stored as arrays, not interleaved)
+        // Scales: count * 1 byte each for X, Y, Z
+        // Colors: count * 1 byte each for R, G, B, A
+        // Rotations: count * 1 byte each for W, X, Y, Z
+        
         for i in 0..<count {
-            let offset = i * pointRecordSize
-            guard offset + pointRecordSize <= data.count else {
-                print("SPXSceneReader: Data insufficient for point \(i)")
-                break
-            }
-
-            // Manually extract and decode each part of the SPXBasicGaussian
-            // This avoids creating an intermediate struct and gives more control
-            
-            // Position (9 bytes: 3 * 24-bit)
-            let posX = decodeSpxPosition(from: data, at: offset)
-            let posY = decodeSpxPosition(from: data, at: offset + 3)
-            let posZ = decodeSpxPosition(from: data, at: offset + 6)
+            // Position (3 bytes each for X, Y, Z - stored in separate arrays)
+            let posX = decodeSpxPosition(from: data, at: i * 3)
+            let posY = decodeSpxPosition(from: data, at: count * 3 + i * 3)
+            let posZ = decodeSpxPosition(from: data, at: count * 6 + i * 3)
             var position = SIMD3<Float>(posX, posY, posZ)
             
-            // Scale (3 bytes: 3 * 8-bit)
-            let scaleX = decodeSpxScale(data[offset + 9])
-            let scaleY = decodeSpxScale(data[offset + 10])
-            let scaleZ = decodeSpxScale(data[offset + 11])
+            // Scale (1 byte each for X, Y, Z - stored in separate arrays)
+            // SPX stores scales in log space, convert to linear space with exp()
+            let scaleXLog = decodeSpxScale(data[count * 9 + i])
+            let scaleYLog = decodeSpxScale(data[count * 10 + i])
+            let scaleZLog = decodeSpxScale(data[count * 11 + i])
+            
+            // Convert from log space and clamp to reasonable values
+            let scaleX = max(0.0001, min(100.0, exp(scaleXLog)))
+            let scaleY = max(0.0001, min(100.0, exp(scaleYLog)))
+            let scaleZ = max(0.0001, min(100.0, exp(scaleZLog)))
             let scale = SIMD3<Float>(scaleX, scaleY, scaleZ)
             
-            // Color (4 bytes: RGBA 8-bit)
-            let r = Float(data[offset + 12]) / 255.0
-            let g = Float(data[offset + 13]) / 255.0
-            let b = Float(data[offset + 14]) / 255.0
-            let opacity = Float(data[offset + 15]) / 255.0
+            // Color (1 byte each for R, G, B, A - stored in separate arrays)
+            let r = Float(data[count * 12 + i]) / 255.0
+            let g = Float(data[count * 13 + i]) / 255.0
+            let b = Float(data[count * 14 + i]) / 255.0
+            let opacity = Float(data[count * 15 + i]) / 255.0
             let color = SIMD3<Float>(r, g, b)
             
-            // Rotation (4 bytes: 4 * 8-bit) - Note: order is w,x,y,z in spec, but data is x,y,z,w
-            let rotW = data[offset + 16]
-            let rotX = data[offset + 17]
-            let rotY = data[offset + 18]
-            let rotZ = data[offset + 19]
+            // Rotation (1 byte each for W, X, Y, Z - stored in separate arrays)
+            let rotW = data[count * 16 + i]
+            let rotX = data[count * 17 + i]
+            let rotY = data[count * 18 + i]
+            let rotZ = data[count * 19 + i]
             let rotation = normalizeRotations(rotW, rotX, rotY, rotZ)
             
             if i == 0 { // First point in the block
@@ -530,25 +534,38 @@ extension Array {
 // MARK: - Format-specific Parsers
 private extension SPXSceneReader {
     func decodeSpxPosition(from data: Data, at offset: Int) -> Float {
-        let b1 = UInt32(data[offset])
-        let b2 = UInt32(data[offset + 1])
-        let b3 = UInt32(data[offset + 2])
-        let packed = (b3 << 16) | (b2 << 8) | b1
-        return SplatIO.decodeSpxPosition(packed)
+        let b1 = data[offset]
+        let b2 = data[offset + 1]
+        let b3 = data[offset + 2]
+        return SplatIO.decodeSpxPosition(b1, b2, b3)
     }
 
     func decodeSpxScale(_ byte: UInt8) -> Float {
-        return exp(Float(Int8(bitPattern: byte)) / 10.0)
+        return Float(byte) / 16.0 - 10.0
     }
 
     func normalizeRotations(_ w: UInt8, _ x: UInt8, _ y: UInt8, _ z: UInt8) -> simd_quatf {
-        let quat = simd_float4(
-            (Float(Int8(bitPattern: x)) / 127.0),
-            (Float(Int8(bitPattern: y)) / 127.0),
-            (Float(Int8(bitPattern: z)) / 127.0),
-            (Float(Int8(bitPattern: w)) / 127.0)
+        // Match Go implementation: cmn.NormalizeRotations
+        var r0 = Double(w) / 128.0 - 1.0
+        var r1 = Double(x) / 128.0 - 1.0
+        var r2 = Double(y) / 128.0 - 1.0
+        var r3 = Double(z) / 128.0 - 1.0
+        
+        if r0 < 0 {
+            r0 = -r0
+            r1 = -r1
+            r2 = -r2
+            r3 = -r3
+        }
+        
+        let qlen = sqrt(r0*r0 + r1*r1 + r2*r2 + r3*r3)
+        
+        return simd_quatf(
+            ix: Float(r1 / qlen),
+            iy: Float(r2 / qlen),
+            iz: Float(r3 / qlen),
+            r: Float(r0 / qlen)
         )
-        return simd_quatf(vector: simd_normalize(quat))
     }
 }
 

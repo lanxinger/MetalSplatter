@@ -183,7 +183,7 @@ struct SPXBasicGaussian {
     var color: SIMD4<UInt8> = SIMD4<UInt8>(0, 0, 0, 255) // RGBA, 8-bit channels
     var rotation: SIMD4<UInt8> = SIMD4<UInt8>(0, 0, 0, 255) // Quaternion, 8-bit components
     
-    static let byteSize = 16 // 9 + 3 + 4 = 16 bytes per point
+    static let byteSize = 20 // 9 + 3 + 4 + 4 = 20 bytes per point
     
     func toSplatScenePoint() -> SplatScenePoint {
         // Decode 24-bit positions (SPX uses special encoding)
@@ -193,11 +193,16 @@ struct SPXBasicGaussian {
             decodeSpxPosition(position.z)
         )
         
-        // Decode 8-bit scale values (SPX uses special encoding)
+        // Decode 8-bit scale values (SPX stores in log space, convert to linear)
+        let scaleXLog = decodeSpxScale(scale.x)
+        let scaleYLog = decodeSpxScale(scale.y)
+        let scaleZLog = decodeSpxScale(scale.z)
+        
+        // Convert from log space and clamp to reasonable values
         let scl = SIMD3<Float>(
-            decodeSpxScale(scale.x),
-            decodeSpxScale(scale.y),
-            decodeSpxScale(scale.z)
+            max(0.0001, min(100.0, exp(scaleXLog))),
+            max(0.0001, min(100.0, exp(scaleYLog))),
+            max(0.0001, min(100.0, exp(scaleZLog)))
         )
         
         // Convert 8-bit color to float
@@ -225,40 +230,48 @@ struct SPXBasicGaussian {
     private func decodeSpxPosition(_ value: UInt32) -> Float {
         // SPX 24-bit position decoding
         // Based on the Go implementation: cmn.DecodeSpxPositionUint24
-        // Convert 24-bit unsigned to signed value and normalize
-        let masked = value & 0xFFFFFF // Ensure only 24 bits
+        let i32 = Int32(value & 0xFFFFFF) // Ensure only 24 bits
         
         // Convert to signed 24-bit value
         let signed: Int32
-        if masked >= 0x800000 { // If sign bit is set
-            signed = Int32(masked) - 0x1000000 // Convert to negative
+        if i32 & 0x800000 > 0 { // If sign bit is set
+            signed = i32 | (-0x1000000) // Convert to negative
         } else {
-            signed = Int32(masked)
+            signed = i32
         }
         
         // Normalize to world coordinates - match Go implementation exactly  
-        return Float(signed) / Float(0x800000)
+        return Float(signed) / 4096.0
     }
     
     private func decodeSpxScale(_ value: UInt8) -> Float {
         // SPX scale decoding based on Go implementation: cmn.DecodeSpxScale
-        // Handle zero values specially to avoid tiny scales
-        if value == 0 {
-            return 0.01 // Default scale for zero values
-        }
-        
-        let scale = exp((Float(value) / 255.0) * 12.0 - 6.0)
-        return max(scale, 0.001) // Minimum scale to ensure visibility
+        return Float(value) / 16.0 - 10.0
     }
     
     private func normalizeRotations(_ w: UInt8, _ x: UInt8, _ y: UInt8, _ z: UInt8) -> simd_quatf {
         // Convert bytes to normalized floats and create quaternion
-        let fw = Float(w) / 127.5 - 1.0
-        let fx = Float(x) / 127.5 - 1.0
-        let fy = Float(y) / 127.5 - 1.0
-        let fz = Float(z) / 127.5 - 1.0
+        // Match Go implementation: cmn.NormalizeRotations
+        var r0 = Double(w) / 128.0 - 1.0
+        var r1 = Double(x) / 128.0 - 1.0
+        var r2 = Double(y) / 128.0 - 1.0
+        var r3 = Double(z) / 128.0 - 1.0
         
-        return simd_quatf(ix: fx, iy: fy, iz: fz, r: fw).normalized
+        if r0 < 0 {
+            r0 = -r0
+            r1 = -r1
+            r2 = -r2
+            r3 = -r3
+        }
+        
+        let qlen = sqrt(r0*r0 + r1*r1 + r2*r2 + r3*r3)
+        
+        return simd_quatf(
+            ix: Float(r1 / qlen),
+            iy: Float(r2 / qlen),
+            iz: Float(r3 / qlen),
+            r: Float(r0 / qlen)
+        )
     }
     
     private func logit(_ x: Float) -> Float {
@@ -308,40 +321,46 @@ struct SPXSHGaussian {
 func decodeSpxPosition(_ byte1: UInt8, _ byte2: UInt8, _ byte3: UInt8) -> Float {
     // SPX 24-bit position decoding from 3 bytes
     // Based on the Go implementation: cmn.DecodeSpxPositionUint24
-    let value = UInt32(byte1) | (UInt32(byte2) << 8) | (UInt32(byte3) << 16)
+    let i32 = Int32(byte1) | (Int32(byte2) << 8) | (Int32(byte3) << 16)
     
     // Convert to signed 24-bit value
     let signed: Int32
-    if value >= 0x800000 { // If sign bit is set
-        signed = Int32(value) - 0x1000000 // Convert to negative
+    if i32 & 0x800000 > 0 { // If sign bit is set
+        signed = i32 | (-0x1000000) // Convert to negative
     } else {
-        signed = Int32(value)
+        signed = i32
     }
     
     // Normalize to world coordinates - match Go implementation exactly
-    let normalized = Float(signed) / Float(0x800000)
-    
-    
-    return normalized
+    return Float(signed) / 4096.0
 }
 
 func decodeSpxScale(_ value: UInt8) -> Float {
     // SPX scale decoding based on Go implementation: cmn.DecodeSpxScale
-    // Handle zero values specially to avoid tiny scales
-    if value == 0 {
-        return 0.01 // Default scale for zero values
-    }
-    
-    let scale = exp((Float(value) / 255.0) * 12.0 - 6.0)
-    return max(scale, 0.001) // Minimum scale to ensure visibility
+    return Float(value) / 16.0 - 10.0
 }
 
 func normalizeRotations(_ w: UInt8, _ x: UInt8, _ y: UInt8, _ z: UInt8) -> simd_quatf {
     // Convert bytes to normalized floats and create quaternion
-    let fw = Float(w) / 127.5 - 1.0
-    let fx = Float(x) / 127.5 - 1.0
-    let fy = Float(y) / 127.5 - 1.0
-    let fz = Float(z) / 127.5 - 1.0
+    // Match Go implementation: cmn.NormalizeRotations
+    var r0 = Double(w) / 128.0 - 1.0
+    var r1 = Double(x) / 128.0 - 1.0
+    var r2 = Double(y) / 128.0 - 1.0
+    var r3 = Double(z) / 128.0 - 1.0
     
-    return simd_quatf(ix: fx, iy: fy, iz: fz, r: fw).normalized
+    if r0 < 0 {
+        r0 = -r0
+        r1 = -r1
+        r2 = -r2
+        r3 = -r3
+    }
+    
+    let qlen = sqrt(r0*r0 + r1*r1 + r2*r2 + r3*r3)
+    
+    return simd_quatf(
+        ix: Float(r1 / qlen),
+        iy: Float(r2 / qlen),
+        iz: Float(r3 / qlen),
+        r: Float(r0 / qlen)
+    )
 }
