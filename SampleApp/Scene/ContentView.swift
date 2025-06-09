@@ -82,6 +82,7 @@ struct ContentView: View {
                             UTType(filenameExtension: "ply")!,
                             UTType(filenameExtension: "splat")!,
                             UTType(filenameExtension: "spz")!,
+                            UTType(filenameExtension: "spx")!,
                             UTType(filenameExtension: "json")!
                           ]) {
                 isPickingFile = false

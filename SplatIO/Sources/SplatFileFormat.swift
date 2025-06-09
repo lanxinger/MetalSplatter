@@ -5,6 +5,7 @@ public enum SplatFileFormat {
     case dotSplat
     case spz
     case sogs
+    case spx
 
     public init?(for url: URL) {
         switch url.pathExtension.lowercased() {
@@ -12,6 +13,8 @@ public enum SplatFileFormat {
         case "splat": self = .dotSplat
         case "spz":
             self = .spz
+        case "spx":
+            self = .spx
         case "gz":
             // Check if this is a compressed SPZ file (e.g., file.spz.gz)
             if url.deletingPathExtension().pathExtension.lowercased() == "spz" {

@@ -39,6 +39,15 @@ public class AutodetectSceneReader: SplatSceneReader {
                 print("AutodetectSceneReader: Failed to create SplatSOGSSceneReader: \(error)")
                 throw Error.cannotDetermineFormat
             }
+        case .spx:
+            print("AutodetectSceneReader: Loading as SPX")
+            do {
+                reader = try SPXSceneReader(contentsOf: url)
+                print("AutodetectSceneReader: Successfully created SPXSceneReader")
+            } catch {
+                print("AutodetectSceneReader: Failed to create SPXSceneReader: \(error)")
+                throw Error.cannotDetermineFormat
+            }
         case .none:
             print("AutodetectSceneReader: Unknown format")
             throw Error.cannotDetermineFormat
