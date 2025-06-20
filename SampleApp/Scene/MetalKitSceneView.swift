@@ -177,7 +177,7 @@ struct MetalKitSceneView: ViewRepresentable {
             case .began:
                 zoom = renderer.zoom
             case .changed:
-                let newZoom = max(0.2, min(zoom * Float(gesture.scale), 5.0))
+                let newZoom = max(0.1, min(zoom * Float(gesture.scale), 50.0))
                 renderer.setUserZoom(newZoom)
             default:
                 break // .ended/.cancelled handled above

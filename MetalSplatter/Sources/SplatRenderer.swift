@@ -196,6 +196,40 @@ public class SplatRenderer {
     var indexBuffer: MetalBuffer<UInt32>
 
     public var splatCount: Int { splatBuffer.count }
+    
+    // Bounding box for the splats
+    private var _cachedBounds: (min: SIMD3<Float>, max: SIMD3<Float>)?
+    private var _boundsDirty = true
+    
+    public var bounds: (min: SIMD3<Float>, max: SIMD3<Float>) {
+        if _boundsDirty || _cachedBounds == nil {
+            calculateBounds()
+        }
+        return _cachedBounds ?? (min: .zero, max: .zero)
+    }
+    
+    private func calculateBounds() {
+        guard splatCount > 0 else {
+            _cachedBounds = (min: .zero, max: .zero)
+            _boundsDirty = false
+            return
+        }
+        
+        var minBounds = SIMD3<Float>(repeating: .infinity)
+        var maxBounds = SIMD3<Float>(repeating: -.infinity)
+        
+        let splats = splatBuffer.values
+        for i in 0..<splatCount {
+            let position = SIMD3<Float>(splats[i].position.elements.0, 
+                                       splats[i].position.elements.1, 
+                                       splats[i].position.elements.2)
+            minBounds = min(minBounds, position)
+            maxBounds = max(maxBounds, position)
+        }
+        
+        _cachedBounds = (min: minBounds, max: maxBounds)
+        _boundsDirty = false
+    }
 
     var sorting = false
     var orderAndDepthTempSort: [SplatIndexAndDepth] = []
@@ -255,6 +289,7 @@ public class SplatRenderer {
     public func reset() {
         splatBuffer.count = 0
         try? splatBuffer.setCapacity(0)
+        _boundsDirty = true
     }
 
     public func read(from url: URL) async throws {
@@ -411,6 +446,7 @@ public class SplatRenderer {
         }
 
         splatBuffer.append(points.map { Splat($0) })
+        _boundsDirty = true
     }
 
     public func add(_ point: SplatScenePoint) throws {

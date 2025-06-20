@@ -17,4 +17,6 @@ public protocol ModelRenderer {
                 rasterizationRateMap: MTLRasterizationRateMap?,
                 renderTargetArrayLength: Int,
                 to commandBuffer: MTLCommandBuffer) throws
+    
+    var bounds: (min: SIMD3<Float>, max: SIMD3<Float>) { get }
 }
