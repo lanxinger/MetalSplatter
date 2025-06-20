@@ -416,6 +416,24 @@ public class SplatRenderer {
     public func add(_ point: SplatScenePoint) throws {
         try add([ point ])
     }
+    
+    public func calculateBounds() -> (min: SIMD3<Float>, max: SIMD3<Float>)? {
+        guard splatCount > 0 else { return nil }
+        
+        let splats = splatBuffer.values
+        var minBounds = SIMD3<Float>(repeating: .infinity)
+        var maxBounds = SIMD3<Float>(repeating: -.infinity)
+        
+        for i in 0..<splatCount {
+            let position = SIMD3<Float>(splats[i].position.elements.0,
+                                       splats[i].position.elements.1,
+                                       splats[i].position.elements.2)
+            minBounds = min(minBounds, position)
+            maxBounds = max(maxBounds, position)
+        }
+        
+        return (min: minBounds, max: maxBounds)
+    }
 
     private func switchToNextDynamicBuffer() {
         uniformBufferIndex = (uniformBufferIndex + 1) % maxSimultaneousRenders

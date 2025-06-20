@@ -53,6 +53,8 @@ class MetalKitSceneRenderer: NSObject, MTKViewDelegate {
     var rollRotation: Float = 0.0
     // Add translation for panning
     var translation: SIMD2<Float> = .zero
+    private var modelScale: Float = 1.0
+    private var autoFitEnabled: Bool = true
 
     var drawableSize: CGSize = .zero
 
@@ -102,6 +104,9 @@ class MetalKitSceneRenderer: NSObject, MTKViewDelegate {
                 return renderer
             }.value
             modelRenderer = splat
+            if autoFitEnabled {
+                await optimizeViewportForModel(splat)
+            }
         case .sampleBox:
             modelRenderer = try! SampleBoxRenderer(device: device,
                                                    colorFormat: metalKitView.colorPixelFormat,
@@ -128,6 +133,7 @@ class MetalKitSceneRenderer: NSObject, MTKViewDelegate {
         let rollMatrix = matrix4x4_rotation(radians: rollRotation, axis: SIMD3<Float>(0, 0, 1))
         // Add translation for panning
         let panMatrix = matrix4x4_translation(translation.x, translation.y, 0)
+        let scaleMatrix = matrix4x4_scale(modelScale, modelScale, modelScale)
         let translationMatrix = matrix4x4_translation(0.0, 0.0, Constants.modelCenterZ)
         // Turn common 3D GS PLY files rightside-up. This isn't generally meaningful, it just
         // happens to be a useful default for the most common datasets at the moment.
@@ -137,7 +143,7 @@ class MetalKitSceneRenderer: NSObject, MTKViewDelegate {
 
         return ModelRendererViewportDescriptor(viewport: viewport,
                                                projectionMatrix: projectionMatrix,
-                                               viewMatrix: translationMatrix * panMatrix * rotationMatrix * verticalMatrix * rollMatrix * commonUpCalibration,
+                                               viewMatrix: translationMatrix * panMatrix * rotationMatrix * verticalMatrix * rollMatrix * scaleMatrix * commonUpCalibration,
                                                screenSize: SIMD2(x: Int(drawableSize.width), y: Int(drawableSize.height)))
     }
 
@@ -285,6 +291,22 @@ class MetalKitSceneRenderer: NSObject, MTKViewDelegate {
         // No need to set final values here, draw() will handle it.
         // No need for metalKitView.setNeedsDisplay() here, draw() will trigger redraws.
     }
+    
+    func toggleAutoFit() {
+        autoFitEnabled.toggle()
+        if autoFitEnabled, let modelRenderer = modelRenderer {
+            Task {
+                await optimizeViewportForModel(modelRenderer)
+            }
+        } else {
+            modelScale = 1.0
+            #if os(macOS)
+            metalKitView.setNeedsDisplay(metalKitView.bounds)
+            #else
+            metalKitView.setNeedsDisplay()
+            #endif
+        }
+    }
 
     /// Call this when user gestures (drag, pinch) end.
     func endUserInteraction() {
@@ -298,6 +320,56 @@ class MetalKitSceneRenderer: NSObject, MTKViewDelegate {
         lastRotationUpdateTimestamp = nil
     }
     #endif
+    
+    // MARK: - Viewport Optimization
+    private func optimizeViewportForModel(_ renderer: any ModelRenderer) async {
+        // Calculate model bounds
+        guard let bounds = await calculateModelBounds(renderer) else {
+            return
+        }
+        
+        // Calculate model dimensions
+        let size = bounds.max - bounds.min
+        let maxDimension = max(size.x, size.y, size.z)
+        
+        // Adaptive scaling strategy based on model size
+        let newScale: Float
+        
+        if maxDimension > 0 {
+            // Only scale up small models - never scale down anything
+            if maxDimension < 0.5 {
+                // Very tiny models - scale up significantly
+                let targetSize: Float = 3.0
+                newScale = targetSize / maxDimension
+                modelScale = max(1.0, min(newScale, 25.0))
+            } else if maxDimension < 2.0 {
+                // Small models - scale up moderately  
+                let targetSize: Float = 4.0
+                newScale = targetSize / maxDimension
+                modelScale = max(1.0, min(newScale, 8.0))
+            } else {
+                // Everything else (>= 2 units) - leave completely unchanged
+                modelScale = 1.0
+            }
+        } else {
+            modelScale = 1.0
+        }
+        
+        // Trigger redraw with new scale
+        #if os(macOS)
+        metalKitView.setNeedsDisplay(metalKitView.bounds)
+        #else
+        metalKitView.setNeedsDisplay()
+        #endif
+    }
+    
+    private func calculateModelBounds(_ renderer: any ModelRenderer) async -> (min: SIMD3<Float>, max: SIMD3<Float>)? {
+        if let splatRenderer = renderer as? SplatRenderer {
+            return splatRenderer.calculateBounds()
+        }
+        
+        return nil
+    }
 }
 
 #endif // os(iOS) || os(macOS)
