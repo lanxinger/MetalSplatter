@@ -426,16 +426,18 @@ public class SPZSceneReader: SplatSceneReader {
             }
             
             // Extract additional SH coefficients if present and needed
+            // SH data is organized with color channel as inner axis, coefficient as outer axis
+            // For degree 1: sh1n1_r, sh1n1_g, sh1n1_b, sh10_r, sh10_g, sh10_b, sh1p1_r, sh1p1_g, sh1p1_b
             if shDim > 1 && shOffset + (shDim-1)*3 < packedGaussians.sh.count {
                 // We already have the DC term (first coefficient), so start from the second
                 for j in 1..<min(shDim, 15) { // Limit to 15 max coefficients per channel
                     let idx = shOffset + j * 3
                     if idx + 2 < packedGaussians.sh.count {
-                        // Process all three SH components at once
+                        // Process all three SH components at once (R, G, B for coefficient j)
                         let shBytes = SIMD3<Float>(
-                            Float(packedGaussians.sh[idx]),
-                            Float(packedGaussians.sh[idx + 1]),
-                            Float(packedGaussians.sh[idx + 2])
+                            Float(packedGaussians.sh[idx]),     // R component
+                            Float(packedGaussians.sh[idx + 1]), // G component
+                            Float(packedGaussians.sh[idx + 2])  // B component
                         )
                         
                         // Use SIMD to unquantize all components at once

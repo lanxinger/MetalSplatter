@@ -110,7 +110,7 @@ struct PackedGaussian {
     var shB: [UInt8]
     
     init() {
-        position = Array(repeating: 0, count: 9)
+        position = Array(repeating: 0, count: 9) // 3 positions × 3 bytes each for 24-bit fixed-point (or 6 bytes for float16)
         rotation = Array(repeating: 0, count: 3)
         scale = Array(repeating: 0, count: 3)
         color = Array(repeating: 0, count: 3)
@@ -324,7 +324,8 @@ struct PackedGaussians {
             return result
         }
         
-        // Copy SH data
+        // Copy SH data (organized as: color channel is inner axis, coefficient is outer axis)
+        // For degree 1: sh1n1_r, sh1n1_g, sh1n1_b, sh10_r, sh10_g, sh10_b, sh1p1_r, sh1p1_g, sh1p1_b
         for j in 0..<shDim {
             // Check if j is within bounds of the arrays
             guard j < result.shR.count && j < result.shG.count && j < result.shB.count else {
@@ -473,8 +474,8 @@ struct PackedGaussians {
         
         let shDegree = Int(header.shDegree)
         print("PackedGaussians.deserialize: SH degree: \(shDegree)")
-        if shDegree < 0 || shDegree > 3 { // Sanity check for reasonableness
-            print("PackedGaussians.deserialize: Unreasonable SH degree: \(shDegree)")
+        if shDegree < 0 || shDegree > 3 { // SPZ spec: SH degree must be between 0 and 3 (inclusive)
+            print("PackedGaussians.deserialize: Invalid SH degree: \(shDegree). SPZ spec requires degree 0-3.")
             throw SplatFileFormatError.invalidData
         }
         
