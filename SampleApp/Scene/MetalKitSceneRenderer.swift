@@ -46,7 +46,6 @@ class MetalKitSceneRenderer: NSObject, MTKViewDelegate {
     var lastRotationUpdateTimestamp: Date? = nil
     var rotation: Angle = .zero
     var zoom: Float = 1.0
-    var modelScale: Float = 1.0  // Scale factor based on model bounds
     private var userIsInteracting = false
     // Add vertical rotation (pitch)
     var verticalRotation: Float = 0.0
@@ -113,33 +112,6 @@ class MetalKitSceneRenderer: NSObject, MTKViewDelegate {
         case .none:
             break
         }
-        
-        // Calculate optimal scale based on model bounds
-        if let renderer = modelRenderer {
-            calculateOptimalScale(for: renderer.bounds)
-        }
-    }
-    
-    private func calculateOptimalScale(for bounds: (min: SIMD3<Float>, max: SIMD3<Float>)) {
-        // Calculate bounding box dimensions
-        let size = bounds.max - bounds.min
-        
-        // Find the largest dimension
-        let maxDimension = max(size.x, size.y, size.z)
-        
-        // Calculate scale to fit the model nicely in view
-        // Target size is about 4 units for comfortable viewing at default zoom
-        let targetSize: Float = 4.0
-        if maxDimension > 0 {
-            self.modelScale = targetSize / maxDimension
-        } else {
-            self.modelScale = 1.0
-        }
-        
-        // Log the calculated scale for debugging
-        Self.log.info("Model bounds: min=\(bounds.min), max=\(bounds.max)")
-        Self.log.info("Model size: \(size), max dimension: \(maxDimension)")
-        Self.log.info("Calculated model scale: \(self.modelScale)")
     }
 
     private var viewport: ModelRendererViewportDescriptor {
@@ -157,8 +129,6 @@ class MetalKitSceneRenderer: NSObject, MTKViewDelegate {
         // Add translation for panning
         let panMatrix = matrix4x4_translation(translation.x, translation.y, 0)
         let translationMatrix = matrix4x4_translation(0.0, 0.0, Constants.modelCenterZ)
-        // Apply model scale to fit different sized models appropriately
-        let scaleMatrix = matrix4x4_scale(modelScale, modelScale, modelScale)
         // Turn common 3D GS PLY files rightside-up. This isn't generally meaningful, it just
         // happens to be a useful default for the most common datasets at the moment.
         let commonUpCalibration = matrix4x4_rotation(radians: .pi, axis: SIMD3<Float>(0, 0, 1))
@@ -167,7 +137,7 @@ class MetalKitSceneRenderer: NSObject, MTKViewDelegate {
 
         return ModelRendererViewportDescriptor(viewport: viewport,
                                                projectionMatrix: projectionMatrix,
-                                               viewMatrix: translationMatrix * panMatrix * rotationMatrix * verticalMatrix * rollMatrix * scaleMatrix * commonUpCalibration,
+                                               viewMatrix: translationMatrix * panMatrix * rotationMatrix * verticalMatrix * rollMatrix * commonUpCalibration,
                                                screenSize: SIMD2(x: Int(drawableSize.width), y: Int(drawableSize.height)))
     }
 
@@ -216,7 +186,6 @@ class MetalKitSceneRenderer: NSObject, MTKViewDelegate {
             rollRotation = lerp(startRollRotation, 0.0, t)
             zoom = lerp(startZoom, 1.0, t)
             translation = lerp(startTranslation, .zero, t)
-            // Note: We don't reset modelScale as it's based on the model's actual size
 
             if progress >= 1.0 {
                 // Animation finished

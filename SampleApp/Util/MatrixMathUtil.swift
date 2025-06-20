@@ -30,10 +30,3 @@ func matrix_perspective_right_hand(fovyRadians fovy: Float, aspectRatio: Float, 
                                          vector_float4( 0,  0, zs, -1),
                                          vector_float4( 0,  0, zs * nearZ, 0)))
 }
-
-func matrix4x4_scale(_ scaleX: Float, _ scaleY: Float, _ scaleZ: Float) -> matrix_float4x4 {
-    return matrix_float4x4.init(columns:(vector_float4(scaleX, 0, 0, 0),
-                                         vector_float4(0, scaleY, 0, 0),
-                                         vector_float4(0, 0, scaleZ, 0),
-                                         vector_float4(0, 0, 0, 1)))
-}

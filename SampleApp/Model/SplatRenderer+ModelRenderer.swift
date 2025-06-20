@@ -23,6 +23,4 @@ extension SplatRenderer: ModelRenderer {
                    renderTargetArrayLength: renderTargetArrayLength,
                    to: commandBuffer)
     }
-    
-    // Already implemented in SplatRenderer
 }
