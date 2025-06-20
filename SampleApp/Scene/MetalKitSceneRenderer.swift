@@ -103,6 +103,12 @@ class MetalKitSceneRenderer: NSObject, MTKViewDelegate {
                 try await renderer.read(from: url)
                 return renderer
             }.value
+            
+            // Enable memory optimization for testing
+            splat.useOptimizedMemoryLayout = true
+            Self.log.info("SplatRenderer loaded - Splat count: \(splat.splatCount)")
+            Self.log.info("Memory optimization: \(splat.useOptimizedMemoryLayout ? "ENABLED" : "DISABLED")")
+            
             modelRenderer = splat
             if autoFitEnabled {
                 await optimizeViewportForModel(splat)

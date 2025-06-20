@@ -41,6 +41,20 @@ typedef struct
     packed_half3 covB;
 } Splat;
 
+// Optimized 24-byte splat structure
+typedef struct
+{
+    packed_float3 position;  // 12 bytes
+    packed_half3 covA;       // 6 bytes
+    packed_half3 covB;       // 6 bytes
+} SplatOptimized;
+
+// Packed color as separate buffer - 4 bytes per splat
+typedef struct
+{
+    uint rgba;  // RGBA8888 format
+} PackedColor;
+
 typedef struct
 {
     float4 position [[position]];

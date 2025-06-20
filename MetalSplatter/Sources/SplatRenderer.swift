@@ -108,6 +108,40 @@ public class SplatRenderer {
         var covA: PackedHalf3
         var covB: PackedHalf3
     }
+    
+    // Optimized splat structure - 24 bytes instead of 32
+    struct SplatCompact {
+        var position: MTLPackedFloat3      // 12 bytes
+        var colorRGB565: UInt16           // 2 bytes (5-6-5 bits for RGB)
+        var alpha: UInt8                  // 1 byte
+        var padding: UInt8                // 1 byte (for alignment)
+        var covA: PackedHalf3             // 6 bytes
+        var covB: PackedHalf3             // 6 bytes
+        // Total: 28 bytes (will be 32 due to alignment, but we can pack better)
+    }
+    
+    // Optimized 24-byte splat structure
+    struct SplatOptimized {
+        var position: MTLPackedFloat3      // 12 bytes
+        var covA: PackedHalf3             // 6 bytes
+        var covB: PackedHalf3             // 6 bytes
+        // Total: 24 bytes for geometry
+        
+        // Color stored separately in parallel array for better cache usage
+    }
+    
+    // Packed color structure - 4 bytes
+    struct PackedColor {
+        var rgba: UInt32  // RGBA8888 format
+        
+        init(r: Float, g: Float, b: Float, a: Float) {
+            let r8 = UInt32(min(max(r * 255, 0), 255))
+            let g8 = UInt32(min(max(g * 255, 0), 255))
+            let b8 = UInt32(min(max(b * 255, 0), 255))
+            let a8 = UInt32(min(max(a * 255, 0), 255))
+            self.rgba = (r8 << 24) | (g8 << 16) | (b8 << 8) | a8
+        }
+    }
 
     struct SplatIndexAndDepth {
         var index: UInt32
@@ -164,6 +198,7 @@ public class SplatRenderer {
     // Single-stage pipeline
     private var singleStagePipelineState: MTLRenderPipelineState?
     private var singleStageDepthState: MTLDepthStencilState?
+    private var singleStageOptimizedPipelineState: MTLRenderPipelineState?
     // Multi-stage pipeline
     private var initializePipelineState: MTLRenderPipelineState?
     private var drawSplatPipelineState: MTLRenderPipelineState?
@@ -192,6 +227,11 @@ public class SplatRenderer {
     // rendering.
     // TODO: Replace this with a more robust multiple-buffer scheme to guarantee we're never actively sorting a buffer still in use for rendering
     var splatBufferPrime: MetalBuffer<Splat>
+    
+    // Optimized memory layout buffers (24 bytes + 4 bytes vs 32 bytes)
+    var splatOptimizedBuffer: MetalBuffer<SplatOptimized>
+    var colorBuffer: MetalBuffer<PackedColor>
+    public var useOptimizedMemoryLayout = false // Flag to enable/disable memory optimization
 
     var indexBuffer: MetalBuffer<UInt32>
 
@@ -226,6 +266,8 @@ public class SplatRenderer {
 
         self.splatBuffer = try MetalBuffer(device: device)
         self.splatBufferPrime = try MetalBuffer(device: device)
+        self.splatOptimizedBuffer = try MetalBuffer(device: device)
+        self.colorBuffer = try MetalBuffer(device: device)
         self.indexBuffer = try MetalBuffer(device: device)
 
         do {
@@ -255,6 +297,10 @@ public class SplatRenderer {
     public func reset() {
         splatBuffer.count = 0
         try? splatBuffer.setCapacity(0)
+        splatOptimizedBuffer.count = 0
+        try? splatOptimizedBuffer.setCapacity(0)
+        colorBuffer.count = 0
+        try? colorBuffer.setCapacity(0)
     }
 
     public func read(from url: URL) async throws {
@@ -277,6 +323,10 @@ public class SplatRenderer {
 
         singleStagePipelineState = try buildSingleStagePipelineState()
         singleStageDepthState = try buildSingleStageDepthState()
+        
+        if useOptimizedMemoryLayout {
+            singleStageOptimizedPipelineState = try buildSingleStageOptimizedPipelineState()
+        }
     }
 
     private func buildMultiStagePipelineStatesIfNeeded() throws {
@@ -325,6 +375,35 @@ public class SplatRenderer {
         depthStateDescriptor.depthCompareFunction = MTLCompareFunction.always
         depthStateDescriptor.isDepthWriteEnabled = writeDepth
         return device.makeDepthStencilState(descriptor: depthStateDescriptor)!
+    }
+    
+    private func buildSingleStageOptimizedPipelineState() throws -> MTLRenderPipelineState {
+        assert(!useMultiStagePipeline)
+        
+        let pipelineDescriptor = MTLRenderPipelineDescriptor()
+        
+        pipelineDescriptor.label = "SingleStagePipeline-OptimizedMemory"
+        pipelineDescriptor.vertexFunction = library.makeRequiredFunction(name: "optimizedSplatVertexShader")
+        pipelineDescriptor.fragmentFunction = library.makeRequiredFunction(name: "optimizedSplatFragmentShader")
+        
+        pipelineDescriptor.rasterSampleCount = sampleCount
+        
+        let colorAttachment = pipelineDescriptor.colorAttachments[0]!
+        colorAttachment.pixelFormat = colorFormat
+        colorAttachment.isBlendingEnabled = true
+        colorAttachment.rgbBlendOperation = .add
+        colorAttachment.alphaBlendOperation = .add
+        colorAttachment.sourceRGBBlendFactor = .one
+        colorAttachment.sourceAlphaBlendFactor = .one
+        colorAttachment.destinationRGBBlendFactor = .oneMinusSourceAlpha
+        colorAttachment.destinationAlphaBlendFactor = .oneMinusSourceAlpha
+        pipelineDescriptor.colorAttachments[0] = colorAttachment
+        
+        pipelineDescriptor.depthAttachmentPixelFormat = depthFormat
+        
+        pipelineDescriptor.maxVertexAmplificationCount = maxViewCount
+        
+        return try device.makeRenderPipelineState(descriptor: pipelineDescriptor)
     }
 
     private func buildInitializePipelineState() throws -> MTLRenderPipelineState {
@@ -400,6 +479,51 @@ public class SplatRenderer {
 
     public func ensureAdditionalCapacity(_ pointCount: Int) throws {
         try splatBuffer.ensureCapacity(splatBuffer.count + pointCount)
+        if useOptimizedMemoryLayout {
+            try splatOptimizedBuffer.ensureCapacity(splatOptimizedBuffer.count + pointCount)
+            try colorBuffer.ensureCapacity(colorBuffer.count + pointCount)
+        }
+    }
+    
+    private func convertToOptimizedFormat() {
+        guard splatBuffer.count > 0 else { return }
+        
+        do {
+            try splatOptimizedBuffer.setCapacity(splatBuffer.count)
+            try colorBuffer.setCapacity(splatBuffer.count)
+            
+            splatOptimizedBuffer.count = splatBuffer.count
+            colorBuffer.count = splatBuffer.count
+            
+            for i in 0..<splatBuffer.count {
+                let splat = splatBuffer.values[i]
+                
+                // Copy geometry data (24 bytes)
+                splatOptimizedBuffer.values[i] = SplatOptimized(
+                    position: splat.position,
+                    covA: splat.covA,
+                    covB: splat.covB
+                )
+                
+                // Pack color into 4 bytes (RGBA8888)
+                let r = splat.color.r
+                let g = splat.color.g
+                let b = splat.color.b
+                let a = splat.color.a
+                colorBuffer.values[i] = PackedColor(
+                    r: Float(r),
+                    g: Float(g),
+                    b: Float(b),
+                    a: Float(a)
+                )
+            }
+            
+            Self.log.info("Converted \(self.splatBuffer.count) splats to optimized format (24+4 bytes vs 32 bytes)")
+            Self.log.info("Memory saved: \((self.splatBuffer.count * 4) / 1024 / 1024) MB")
+        } catch {
+            Self.log.error("Failed to convert to optimized format: \(error)")
+            useOptimizedMemoryLayout = false
+        }
     }
 
     public func add(_ points: [SplatScenePoint]) throws {
@@ -583,17 +707,35 @@ public class SplatRenderer {
             renderEncoder.pushDebugGroup("Draw Splats")
             renderEncoder.setRenderPipelineState(drawSplatPipelineState)
             renderEncoder.setDepthStencilState(drawSplatDepthState)
+            
+            // Multi-stage doesn't support optimized memory layout yet
+            renderEncoder.setVertexBuffer(dynamicUniformBuffers, offset: uniformBufferOffset, index: BufferIndex.uniforms.rawValue)
+            renderEncoder.setVertexBuffer(splatBuffer.buffer, offset: 0, index: BufferIndex.splat.rawValue)
         } else {
-            guard let singleStagePipelineState
-            else { return }
-
-            renderEncoder.pushDebugGroup("Draw Splats")
-            renderEncoder.setRenderPipelineState(singleStagePipelineState)
-            renderEncoder.setDepthStencilState(singleStageDepthState)
+            if useOptimizedMemoryLayout && singleStageOptimizedPipelineState != nil {
+                // Convert to optimized format if needed
+                if splatOptimizedBuffer.count != splatBuffer.count {
+                    convertToOptimizedFormat()
+                }
+                
+                renderEncoder.pushDebugGroup("Draw Splats (Optimized Memory)")
+                renderEncoder.setRenderPipelineState(singleStageOptimizedPipelineState!)
+                renderEncoder.setDepthStencilState(singleStageDepthState)
+                
+                renderEncoder.setVertexBuffer(dynamicUniformBuffers, offset: uniformBufferOffset, index: 0) // uniforms
+                renderEncoder.setVertexBuffer(splatOptimizedBuffer.buffer, offset: 0, index: 1) // geometry
+                renderEncoder.setVertexBuffer(colorBuffer.buffer, offset: 0, index: 2) // colors
+            } else {
+                guard let singleStagePipelineState else { return }
+                
+                renderEncoder.pushDebugGroup("Draw Splats")
+                renderEncoder.setRenderPipelineState(singleStagePipelineState)
+                renderEncoder.setDepthStencilState(singleStageDepthState)
+                
+                renderEncoder.setVertexBuffer(dynamicUniformBuffers, offset: uniformBufferOffset, index: BufferIndex.uniforms.rawValue)
+                renderEncoder.setVertexBuffer(splatBuffer.buffer, offset: 0, index: BufferIndex.splat.rawValue)
+            }
         }
-
-        renderEncoder.setVertexBuffer(dynamicUniformBuffers, offset: uniformBufferOffset, index: BufferIndex.uniforms.rawValue)
-        renderEncoder.setVertexBuffer(splatBuffer.buffer, offset: 0, index: BufferIndex.splat.rawValue)
 
         renderEncoder.drawIndexedPrimitives(type: .triangle,
                                             indexCount: indexCount,
