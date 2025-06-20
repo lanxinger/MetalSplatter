@@ -103,10 +103,19 @@ public class SplatSOGSSceneReader: SplatSceneReader {
         var sh_centroids: WebPDecoder.DecodedImage?
         var sh_labels: WebPDecoder.DecodedImage?
         
-        if let shN = metadata.shN {
-            if shN.files.count >= 2 {
-                sh_centroids = try loadAndDecodeWebP(shN.files[0])
+        // Only load SH data if we have SH bands > 0
+        // Calculate potential SH bands based on texture width
+        if let shN = metadata.shN, shN.files.count >= 2 {
+            // First load the centroids to determine SH bands
+            let tempCentroids = try loadAndDecodeWebP(shN.files[0])
+            let shBands = calculateSHBands(width: tempCentroids.width)
+            
+            if shBands > 0 {
+                sh_centroids = tempCentroids
                 sh_labels = try loadAndDecodeWebP(shN.files[1])
+                print("SplatSOGSSceneReader: Loaded SH data with \(shBands) bands")
+            } else {
+                print("SplatSOGSSceneReader: Skipping SH data loading - no valid bands detected")
             }
         }
         
@@ -231,6 +240,17 @@ public class SplatSOGSSceneReader: SplatSceneReader {
         
         print("SplatSOGSSceneReader: Successfully decompressed \(points.count) points")
         return points
+    }
+    
+    private func calculateSHBands(width: Int) -> Int {
+        // Based on the PlayCanvas implementation:
+        // 192: 1 band (64 * 3), 512: 2 bands (64 * 8), 960: 3 bands (64 * 15)
+        switch width {
+        case 192: return 1
+        case 512: return 2
+        case 960: return 3
+        default: return 0
+        }
     }
 }
 

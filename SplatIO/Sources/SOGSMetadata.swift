@@ -117,7 +117,19 @@ public struct SOGSIterator {
         let position = readPosition(x: x, y: y)
         let rotation = readRotation(x: x, y: y) 
         let scale = readScale(x: x, y: y)
-        let (color, opacity) = readColorAndOpacity(x: x, y: y)
+        let (baseColor, opacity, sh0Coeffs) = readColorAndOpacity(x: x, y: y)
+        
+        // Read additional spherical harmonics if available
+        var color = baseColor
+        if data.shBands > 0,
+           let sh_centroids = data.sh_centroids,
+           let sh_labels = data.sh_labels {
+            let shCoeffs = readSphericalHarmonics(x: x, y: y, centroids: sh_centroids, labels: sh_labels)
+            // Combine base SH coefficients with additional bands
+            var allCoeffs = sh0Coeffs
+            allCoeffs.append(contentsOf: shCoeffs)
+            color = SplatScenePoint.Color.sphericalHarmonic(allCoeffs)
+        }
         
         return SplatScenePoint(
             position: position,
@@ -135,19 +147,19 @@ public struct SOGSIterator {
             return SIMD3<Float>(0, 0, 0)
         }
         
-        // Get pixel values from both textures
-        let uPixel = WebPDecoder.getPixelFloat(from: data.means_u, x: x, y: y)
-        let lPixel = WebPDecoder.getPixelFloat(from: data.means_l, x: x, y: y)
+        // Get pixel values from both textures as raw bytes
+        let uPixel = WebPDecoder.getPixelUInt8(from: data.means_u, x: x, y: y)
+        let lPixel = WebPDecoder.getPixelUInt8(from: data.means_l, x: x, y: y)
         
-        // Reconstruct 16-bit values from 8-bit low and high parts
-        let wx = ((uPixel.x * 255.0) * 256.0) + (lPixel.x * 255.0)
-        let wy = ((uPixel.y * 255.0) * 256.0) + (lPixel.y * 255.0)
-        let wz = ((uPixel.z * 255.0) * 256.0) + (lPixel.z * 255.0)
+        // Reconstruct 16-bit values from 8-bit low and high parts using proper bit manipulation
+        let wx = (UInt16(uPixel.x) << 8) | UInt16(lPixel.x)
+        let wy = (UInt16(uPixel.y) << 8) | UInt16(lPixel.y)
+        let wz = (UInt16(uPixel.z) << 8) | UInt16(lPixel.z)
         
         // Normalize to [0,1] range
-        let nx = lerp(mins[0], maxs[0], wx / 65535.0)
-        let ny = lerp(mins[1], maxs[1], wy / 65535.0)
-        let nz = lerp(mins[2], maxs[2], wz / 65535.0)
+        let nx = lerp(mins[0], maxs[0], Float(wx) / 65535.0)
+        let ny = lerp(mins[1], maxs[1], Float(wy) / 65535.0)
+        let nz = lerp(mins[2], maxs[2], Float(wz) / 65535.0)
         
         // Apply exponential mapping as in the original SOGS implementation
         return SIMD3<Float>(
@@ -192,12 +204,12 @@ public struct SOGSIterator {
         return .exponent(SIMD3<Float>(sx, sy, sz))
     }
     
-    private func readColorAndOpacity(x: Int, y: Int) -> (SplatScenePoint.Color, SplatScenePoint.Opacity) {
+    private func readColorAndOpacity(x: Int, y: Int) -> (SplatScenePoint.Color, SplatScenePoint.Opacity, [SIMD3<Float>]) {
         let metadata = data.metadata.sh0
         guard let mins = metadata.mins, let maxs = metadata.maxs else {
             let color = SplatScenePoint.Color.sphericalHarmonic([SIMD3<Float>(0, 0, 0)])
             let opacity = SplatScenePoint.Opacity.linearFloat(0.5)
-            return (color, opacity)
+            return (color, opacity, [SIMD3<Float>(0, 0, 0)])
         }
         
         let sh0Pixel = WebPDecoder.getPixelFloat(from: data.sh0, x: x, y: y)
@@ -211,19 +223,20 @@ public struct SOGSIterator {
         // Convert opacity from logit to linear
         let linearOpacity = 1.0 / (1.0 + exp(-a))
         
-        // The compressed data contains SH coefficients
-        // Convert to linear color using the SOGS formula: 0.5 + sh * SH_C0
-        let linearR = 0.5 + r * SH_C0
-        let linearG = 0.5 + g * SH_C0  
-        let linearB = 0.5 + b * SH_C0
+        // Store the raw SH coefficients (DC term)
+        let sh0Coeffs = [SIMD3<Float>(r, g, b)]
         
-        // Clamp to valid color range
-        let clampedR = max(0.0, min(1.0, linearR))
-        let clampedG = max(0.0, min(1.0, linearG))
-        let clampedB = max(0.0, min(1.0, linearB))
+        // For now, return as spherical harmonic color with just the DC term
+        // If no additional SH bands, this will be converted to linear color in the caller
+        let color = data.shBands > 0 ? 
+            SplatScenePoint.Color.sphericalHarmonic(sh0Coeffs) :
+            SplatScenePoint.Color.linearFloat(SIMD3<Float>(
+                max(0.0, min(1.0, 0.5 + r * SH_C0)),
+                max(0.0, min(1.0, 0.5 + g * SH_C0)),
+                max(0.0, min(1.0, 0.5 + b * SH_C0))
+            ))
         
-        let color = SplatScenePoint.Color.linearFloat(SIMD3<Float>(clampedR, clampedG, clampedB))
-        return (color, .linearFloat(linearOpacity))
+        return (color, .linearFloat(linearOpacity), sh0Coeffs)
     }
     
     private func readSphericalHarmonics(x: Int, y: Int, centroids: WebPDecoder.DecodedImage, labels: WebPDecoder.DecodedImage) -> [SIMD3<Float>] {
