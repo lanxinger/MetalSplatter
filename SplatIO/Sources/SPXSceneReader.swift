@@ -2,6 +2,23 @@ import Foundation
 import Compression
 import simd
 
+// Extensions to support validation
+extension SIMD3 where Scalar == Float {
+    var isFinite: Bool {
+        return x.isFinite && y.isFinite && z.isFinite
+    }
+    
+    var allFinite: Bool {
+        return isFinite
+    }
+}
+
+extension SIMD4 where Scalar == Float {
+    var isFinite: Bool {
+        return x.isFinite && y.isFinite && z.isFinite && w.isFinite
+    }
+}
+
 /**
  * Reader for SPX format Gaussian splat scenes.
  * SPX is a flexible, extensible format for 3D Gaussian Splatting models with:
@@ -288,6 +305,10 @@ public class SPXSceneReader: SplatSceneReader {
         guard let header = header else {
             throw SPXFileFormatError.invalidHeader
         }
+        
+        // Validate expected data size
+        let expectedSize = count * 20
+        try SplatDataValidator.validateDataBounds(data: data, offset: 0, size: expectedSize)
 
         // Bounding box for coordinate transformation
         let boundsMin = SIMD3<Float>(header.minX, header.minY, header.minZ)
@@ -302,11 +323,21 @@ public class SPXSceneReader: SplatSceneReader {
         // Rotations: count * 1 byte each for W, X, Y, Z
         
         for i in 0..<count {
+            // Validate bounds for each array access
+            try SplatDataValidator.validateDataBounds(data: data, offset: i * 3, size: 3) // position X
+            try SplatDataValidator.validateDataBounds(data: data, offset: count * 3 + i * 3, size: 3) // position Y
+            try SplatDataValidator.validateDataBounds(data: data, offset: count * 6 + i * 3, size: 3) // position Z
+            
             // Position (3 bytes each for X, Y, Z - stored in separate arrays)
             let posX = decodeSpxPosition(from: data, at: i * 3)
             let posY = decodeSpxPosition(from: data, at: count * 3 + i * 3)
             let posZ = decodeSpxPosition(from: data, at: count * 6 + i * 3)
             var position = SIMD3<Float>(posX, posY, posZ)
+            
+            // Validate bounds for scale array access
+            try SplatDataValidator.validateDataBounds(data: data, offset: count * 9 + i, size: 1)
+            try SplatDataValidator.validateDataBounds(data: data, offset: count * 10 + i, size: 1)
+            try SplatDataValidator.validateDataBounds(data: data, offset: count * 11 + i, size: 1)
             
             // Scale (1 byte each for X, Y, Z - stored in separate arrays)
             // SPX stores scales in log space, convert to linear space with exp()
@@ -320,12 +351,24 @@ public class SPXSceneReader: SplatSceneReader {
             let scaleZ = max(0.0001, min(100.0, exp(scaleZLog)))
             let scale = SIMD3<Float>(scaleX, scaleY, scaleZ)
             
+            // Validate bounds for color array access
+            try SplatDataValidator.validateDataBounds(data: data, offset: count * 12 + i, size: 1)
+            try SplatDataValidator.validateDataBounds(data: data, offset: count * 13 + i, size: 1)
+            try SplatDataValidator.validateDataBounds(data: data, offset: count * 14 + i, size: 1)
+            try SplatDataValidator.validateDataBounds(data: data, offset: count * 15 + i, size: 1)
+            
             // Color (1 byte each for R, G, B, A - stored in separate arrays)
             let r = Float(data[count * 12 + i]) / 255.0
             let g = Float(data[count * 13 + i]) / 255.0
             let b = Float(data[count * 14 + i]) / 255.0
             let opacity = Float(data[count * 15 + i]) / 255.0
             let color = SIMD3<Float>(r, g, b)
+            
+            // Validate bounds for rotation array access
+            try SplatDataValidator.validateDataBounds(data: data, offset: count * 16 + i, size: 1)
+            try SplatDataValidator.validateDataBounds(data: data, offset: count * 17 + i, size: 1)
+            try SplatDataValidator.validateDataBounds(data: data, offset: count * 18 + i, size: 1)
+            try SplatDataValidator.validateDataBounds(data: data, offset: count * 19 + i, size: 1)
             
             // Rotation (1 byte each for W, X, Y, Z - stored in separate arrays)
             let rotW = data[count * 16 + i]
@@ -363,6 +406,35 @@ public class SPXSceneReader: SplatSceneReader {
             if i == 0 {
                 print("SPXSceneReader: Final position 0: \(position)")
                 print("SPXSceneReader: Point 0 - Pos: \(position), Scale: \(scale), Color: (\(Int(r*255)), \(Int(g*255)), \(Int(b*255)), \(Int(opacity*255))), Opacity: \(opacity)")
+            }
+
+            // Validate the parsed data before creating the point
+            do {
+                try SplatDataValidator.validatePosition(position)
+                try SplatDataValidator.validateScale(scale)
+                try SplatDataValidator.validateColor(color)
+                try SplatDataValidator.validateOpacity(opacity)
+                try SplatDataValidator.validateRotation(rotation)
+            } catch {
+                // Log the validation error but continue parsing with corrected values
+                print("SPXSceneReader: Validation error for point \(i): \(error)")
+                
+                // Apply corrections to invalid values
+                let correctedPosition = position.isFinite ? position : SIMD3<Float>(0, 0, 0)
+                let correctedScale = scale.allFinite && scale.min() > 0 ? scale : SIMD3<Float>(1, 1, 1)
+                let correctedColor = color.isFinite && color.min() >= 0 && color.max() <= 1 ? color : SIMD3<Float>(0.5, 0.5, 0.5)
+                let correctedOpacity = opacity.isFinite && opacity >= 0 && opacity <= 1 ? opacity : 0.5
+                let correctedRotation = rotation.vector.isFinite ? rotation : simd_quatf()
+                
+                let correctedPoint = SplatScenePoint(
+                    position: correctedPosition,
+                    color: .linearFloat(correctedColor),
+                    opacity: .linearFloat(correctedOpacity),
+                    scale: .linearFloat(correctedScale),
+                    rotation: correctedRotation
+                )
+                newPoints.append(correctedPoint)
+                continue
             }
 
             let point = SplatScenePoint(

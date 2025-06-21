@@ -24,6 +24,9 @@ public class SPZSceneWriter: SplatSceneWriter {
     private var outputURL: URL?
     
     public func write(_ points: [SplatScenePoint]) throws {
+        // Validate points before storing
+        try SplatDataValidator.validatePoints(points)
+        
         // Store points for later writing when close() is called
         self.points = points
     }
@@ -47,6 +50,9 @@ public class SPZSceneWriter: SplatSceneWriter {
     
     // Direct writing method
     public func writeScene(_ points: [SplatScenePoint], to url: URL) throws {
+        // Validate points before writing
+        try SplatDataValidator.validatePoints(points)
+        
         let packed = packGaussians(points)
         let serialized = packed.serialize()
         

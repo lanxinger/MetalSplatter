@@ -70,6 +70,9 @@ public class SplatPLYSceneWriter: SplatSceneWriter {
         guard points.count + pointsWritten <= totalPointCount else {
             throw Error.unexpectedPoints
         }
+        
+        // Validate points before writing
+        try SplatDataValidator.validatePoints(points)
 
         var elementBufferOffset = 0
         for (i, point) in points.enumerated() {

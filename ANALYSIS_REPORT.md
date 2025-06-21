@@ -45,7 +45,7 @@ MetalSplatter demonstrates excellent architectural design with sophisticated pro
 - ✅ ~~File I/O performance bottlenecks (8KB buffers)~~ **COMPLETED** (commit 60a36d8)
 - ✅ ~~GPU shader performance optimizations~~ **COMPLETED** (commit dce197e)
 - 🟡 Missing memory pooling and pressure handling
-- 🟡 Significant code duplication across format handlers
+- 🟢 ~~Significant code duplication across format handlers~~ **MUCH IMPROVED** - Only minor utility function duplication remains
 - 🟡 Limited documentation for public APIs
 - ✅ ~~SPZ rotation handling issues~~ **COMPLETED** (commit 522777c)
 
@@ -389,81 +389,57 @@ func add(_ points: [SplatScenePoint]) throws {
 
 ---
 
-## Code Duplication and Refactoring
+## Code Duplication and Refactoring *(SIGNIFICANTLY IMPROVED)*
 
-### Major Duplication Areas
+### Current State Assessment *(Updated Analysis)*
 
-#### 1. Error Handling Patterns
-**Duplicated across multiple scene readers:**
-- `cannotWriteToFile`, `cannotOpenSource`, `unknownOutputStreamError`
-- File readability checks using `FileManager.default.isReadableFile`
+**✅ MAJOR IMPROVEMENTS IDENTIFIED**: The codebase demonstrates **excellent architectural patterns** with minimal significant duplication. Format handlers show **good separation of concerns** and effective use of shared utilities.
 
-**Solution:**
-```swift
-public enum SplatFileError: LocalizedError {
-    case cannotWriteToFile(String)
-    case cannotOpenSource(URL)
-    case unknownOutputStreamError
-    case readError
-    case unexpectedEndOfFile
-    case invalidHeader
-    
-    var errorDescription: String? { /* ... */ }
-}
-```
+#### Architecture Strengths
+- ✅ **Protocol-oriented design** - Clean `SplatSceneReader`/`SplatSceneWriter` abstractions
+- ✅ **Shared data structures** - Consistent `SplatScenePoint` usage across formats  
+- ✅ **Centralized utilities** - `FloatConversion.swift` and mathematical helpers
+- ✅ **Format isolation** - Each handler appropriately encapsulates format-specific complexity
 
-#### 2. Mathematical Constants
-**Repeated values:**
-- Color quantization: `255.0`, `127.5`, `128.0`
-- Sigmoid/logit functions across multiple files
-- SH degree calculations
+### Minor Remaining Duplication Areas *(Low Priority)*
 
-**Solution:**
+#### 1. Mathematical Utility Functions *(Small scale duplication)*
+**Found in multiple files:**
+- `logit()` function duplicated in SPX/SPZ format handlers
+- Position decoding functions across binary formats
+- Quaternion normalization patterns
+
+**Potential consolidation:**
 ```swift
 public struct SplatMathUtils {
-    // Color conversion constants
-    static let colorScale8Bit: Float = 255.0
-    static let rotationScale: Float = 127.5
-    static let rotationBias: Float = 128.0
-    
-    // Mathematical functions
-    static func sigmoid(_ x: Float) -> Float {
-        return 1.0 / (1.0 + exp(-x))
+    static func logit(_ x: Float) -> Float {
+        let safe_x = max(0.0001, min(0.9999, x))
+        return log(safe_x / (1.0 - safe_x))
     }
     
-    static func quantizeColor(_ value: Float) -> UInt8 {
-        return UInt8((value * colorScale8Bit).clamped(to: 0...255))
+    static func decodePosition24Bit(_ bytes: [UInt8]) -> Float {
+        // Centralized 24-bit position decoding
     }
 }
 ```
 
-#### 3. File Format Handling
-**Similar patterns across:**
-- Convenience initializers for URL-based reading
-- Magic number detection
-- Compression/decompression logic
+#### 2. Compression Utilities *(Minor duplication)*
+**Similar patterns:**
+- Gzip detection across SPX/SPZ readers
+- Decompression error handling
 
-**Solution:**
-```swift
-protocol FileBasedSceneProcessor {
-    associatedtype StreamType
-    init(_ stream: StreamType)
-}
+### Assessment Update
 
-extension FileBasedSceneProcessor {
-    static func validateFile(at url: URL) throws {
-        guard FileManager.default.isReadableFile(atPath: url.path) else {
-            throw SplatFileError.cannotOpenSource(url)
-        }
-    }
-}
-```
+**Code duplication is NOT a significant issue** in MetalSplatter. The format handlers demonstrate:
+- **Appropriate format-specific complexity** that should remain separate
+- **Effective shared utility usage** where beneficial
+- **Minor duplication limited to small utility functions** 
 
-### Refactoring Benefits
-- **20-30% reduction** in code duplication
-- **Improved maintainability** through centralized utilities
-- **Reduced bug potential** from inconsistent implementations
-- **Better testability** with shared utilities
+### Refactoring Benefits *(Revised Impact)*
+- **5-10% reduction** in minor utility duplication *(much less than originally estimated)*
+- **Improved maintainability** through centralized math utilities
+- **Enhanced consistency** in mathematical function implementations
+- **Low effort, low impact** improvements available
 
 ---
 
@@ -586,11 +562,11 @@ where Self: DataConvertible, Self: BitPatternConvertible,
 
 ### 🟢 **Medium Priority (Future Releases)**
 
-6. **Code Duplication Cleanup**
-   - Create `SplatMathUtils`, `SplatFileError` utilities
-   - Consolidate file handling patterns
-   - **Impact**: Improved maintainability, reduced bugs
-   - **Effort**: Medium-High
+6. **Minor Code Duplication Cleanup** *(Downgraded Priority)*
+   - Create `SplatMathUtils` for small utility functions (logit, position decoding)
+   - Consolidate compression utilities
+   - **Impact**: Minor maintainability improvement *(much less significant than originally assessed)*
+   - **Effort**: Low-Medium
 
 7. **Memory Management Enhancements**
    - Buffer shrinking strategies

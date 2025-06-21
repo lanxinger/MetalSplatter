@@ -38,43 +38,63 @@ struct SPXHeader {
             throw SPXFileFormatError.invalidHeader
         }
         
+        // Validate data bounds for magic number access
+        try SplatDataValidator.validateDataBounds(data: data, offset: 0, size: 3)
         let magicBytes = Array(data[0..<3])
         guard magicBytes == SPXHeader.magic else {
             throw SPXFileFormatError.invalidMagicNumber
         }
         self.magic = magicBytes
         
+        // Validate bounds for version access
+        try SplatDataValidator.validateDataBounds(data: data, offset: 3, size: 1)
         self.version = data[3]
         
-        // Use withUnsafeBytes for safe, alignment-unaware memory access.
-        self.splatCount = data.withUnsafeBytes { $0.load(fromByteOffset: 4, as: UInt32.self).littleEndian }
+        // Use safe data access with bounds checking
+        self.splatCount = try SplatDataValidator.safeDataAccess(data: data, offset: 4, type: UInt32.self).littleEndian
         
-        self.minX = data.withUnsafeBytes { Float(bitPattern: $0.load(fromByteOffset: 8, as: UInt32.self).littleEndian) }
-        self.maxX = data.withUnsafeBytes { Float(bitPattern: $0.load(fromByteOffset: 12, as: UInt32.self).littleEndian) }
-        self.minY = data.withUnsafeBytes { Float(bitPattern: $0.load(fromByteOffset: 16, as: UInt32.self).littleEndian) }
-        self.maxY = data.withUnsafeBytes { Float(bitPattern: $0.load(fromByteOffset: 20, as: UInt32.self).littleEndian) }
-        self.minZ = data.withUnsafeBytes { Float(bitPattern: $0.load(fromByteOffset: 24, as: UInt32.self).littleEndian) }
-        self.maxZ = data.withUnsafeBytes { Float(bitPattern: $0.load(fromByteOffset: 28, as: UInt32.self).littleEndian) }
+        self.minX = Float(bitPattern: try SplatDataValidator.safeDataAccess(data: data, offset: 8, type: UInt32.self).littleEndian)
+        self.maxX = Float(bitPattern: try SplatDataValidator.safeDataAccess(data: data, offset: 12, type: UInt32.self).littleEndian)
+        self.minY = Float(bitPattern: try SplatDataValidator.safeDataAccess(data: data, offset: 16, type: UInt32.self).littleEndian)
+        self.maxY = Float(bitPattern: try SplatDataValidator.safeDataAccess(data: data, offset: 20, type: UInt32.self).littleEndian)
+        self.minZ = Float(bitPattern: try SplatDataValidator.safeDataAccess(data: data, offset: 24, type: UInt32.self).littleEndian)
+        self.maxZ = Float(bitPattern: try SplatDataValidator.safeDataAccess(data: data, offset: 28, type: UInt32.self).littleEndian)
+        
+        // Validate bounding box values for NaN/infinity
+        try SplatDataValidator.validateFinite(self.minX, name: "minX")
+        try SplatDataValidator.validateFinite(self.maxX, name: "maxX")
+        try SplatDataValidator.validateFinite(self.minY, name: "minY")
+        try SplatDataValidator.validateFinite(self.maxY, name: "maxY")
+        try SplatDataValidator.validateFinite(self.minZ, name: "minZ")
+        try SplatDataValidator.validateFinite(self.maxZ, name: "maxZ")
         
         print("SPXHeader.init: Parsed BBox - minX: \(self.minX), maxX: \(self.maxX), minY: \(self.minY), maxY: \(self.maxY), minZ: \(self.minZ), maxZ: \(self.maxZ)")
         
-        self.minTopY = data.withUnsafeBytes { Float(bitPattern: $0.load(fromByteOffset: 32, as: UInt32.self).littleEndian) }
-        self.maxTopY = data.withUnsafeBytes { Float(bitPattern: $0.load(fromByteOffset: 36, as: UInt32.self).littleEndian) }
+        self.minTopY = Float(bitPattern: try SplatDataValidator.safeDataAccess(data: data, offset: 32, type: UInt32.self).littleEndian)
+        self.maxTopY = Float(bitPattern: try SplatDataValidator.safeDataAccess(data: data, offset: 36, type: UInt32.self).littleEndian)
         
-        self.createDate = data.withUnsafeBytes { $0.load(fromByteOffset: 40, as: UInt32.self).littleEndian }
-        self.createrId = data.withUnsafeBytes { $0.load(fromByteOffset: 44, as: UInt32.self).littleEndian }
-        self.exclusiveId = data.withUnsafeBytes { $0.load(fromByteOffset: 48, as: UInt32.self).littleEndian }
+        // Validate additional float values
+        try SplatDataValidator.validateFinite(self.minTopY, name: "minTopY")
+        try SplatDataValidator.validateFinite(self.maxTopY, name: "maxTopY")
         
+        self.createDate = try SplatDataValidator.safeDataAccess(data: data, offset: 40, type: UInt32.self).littleEndian
+        self.createrId = try SplatDataValidator.safeDataAccess(data: data, offset: 44, type: UInt32.self).littleEndian
+        self.exclusiveId = try SplatDataValidator.safeDataAccess(data: data, offset: 48, type: UInt32.self).littleEndian
+        
+        // Validate bounds for flags access
+        try SplatDataValidator.validateDataBounds(data: data, offset: 52, size: 4)
         self.shDegree = data[52]
         self.flag1 = data[53]
         self.flag2 = data[54]
         self.flag3 = data[55]
         
-        self.reserve1 = data.withUnsafeBytes { $0.load(fromByteOffset: 56, as: UInt32.self).littleEndian }
-        self.reserve2 = data.withUnsafeBytes { $0.load(fromByteOffset: 60, as: UInt32.self).littleEndian }
+        self.reserve1 = try SplatDataValidator.safeDataAccess(data: data, offset: 56, type: UInt32.self).littleEndian
+        self.reserve2 = try SplatDataValidator.safeDataAccess(data: data, offset: 60, type: UInt32.self).littleEndian
         
+        // Validate bounds for comment and hash access
+        try SplatDataValidator.validateDataBounds(data: data, offset: 64, size: 60)
         self.comment = Array(data[64..<124])
-        self.hash = data.withUnsafeBytes { $0.load(fromByteOffset: 124, as: UInt32.self).littleEndian }
+        self.hash = try SplatDataValidator.safeDataAccess(data: data, offset: 124, type: UInt32.self).littleEndian
     }
     
     func serialize() -> Data {

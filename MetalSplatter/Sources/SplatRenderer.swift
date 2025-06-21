@@ -450,6 +450,9 @@ public class SplatRenderer {
     }
 
     public func add(_ points: [SplatScenePoint]) throws {
+        // Validate all points before adding any
+        try SplatDataValidator.validatePoints(points)
+        
         do {
             try ensureAdditionalCapacity(points.count)
         } catch {
@@ -461,6 +464,8 @@ public class SplatRenderer {
     }
 
     public func add(_ point: SplatScenePoint) throws {
+        // Validate single point
+        try SplatDataValidator.validatePoint(point)
         try add([ point ])
     }
     

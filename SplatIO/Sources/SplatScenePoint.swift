@@ -163,6 +163,30 @@ public struct SplatScenePoint {
         self.scale = scale
         self.rotation = rotation
     }
+    
+    /// Creates a validated SplatScenePoint that checks for NaN/infinity and reasonable ranges
+    public init(validatedPosition position: SIMD3<Float>,
+                color: Color,
+                opacity: Opacity,
+                scale: Scale,
+                rotation: simd_quatf) throws {
+        // Create point first
+        self.init(position: position, color: color, opacity: opacity, scale: scale, rotation: rotation)
+        
+        // Then validate it
+        try SplatDataValidator.validatePoint(self)
+    }
+    
+    /// Validates this point's data for NaN/infinity and reasonable ranges
+    public func validate() throws {
+        try SplatDataValidator.validatePoint(self)
+    }
+    
+    /// Returns a validated copy of this point, throwing an error if invalid
+    public func validated() throws -> SplatScenePoint {
+        try validate()
+        return self
+    }
 
     var linearNormalized: SplatScenePoint {
         SplatScenePoint(position: position,

@@ -43,6 +43,9 @@ public class DotSplatSceneWriter: SplatSceneWriter {
         guard let buffer else {
             throw Error.cannotWriteAfterClose
         }
+        
+        // Validate points before writing
+        try SplatDataValidator.validatePoints(points)
 
         var offset = 0
         while offset < points.count {

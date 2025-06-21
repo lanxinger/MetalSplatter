@@ -42,6 +42,9 @@ struct PackedGaussiansHeader {
             throw SplatFileFormatError.invalidHeader
         }
         
+        // Validate bounds for header data access
+        try SplatDataValidator.validateDataBounds(data: data, offset: 0, size: PackedGaussiansHeader.size)
+        
         // Safely load UInt32 values using copyBytes to avoid alignment issues
         _ = withUnsafeMutableBytes(of: &magic) { ptr in
             data[0..<4].copyBytes(to: ptr)
@@ -52,10 +55,30 @@ struct PackedGaussiansHeader {
         _ = withUnsafeMutableBytes(of: &numPoints) { ptr in
             data[8..<12].copyBytes(to: ptr)
         }
+        
+        // Validate magic number
+        guard magic == PackedGaussiansHeader.magic else {
+            throw SplatFileFormatError.invalidHeader
+        }
+        
+        // Validate version
+        guard version == PackedGaussiansHeader.version else {
+            throw SplatFileFormatError.unsupportedVersion
+        }
+        
         shDegree = data[12]
         fractionalBits = data[13]
         flags = data[14]
         reserved = data[15]
+        
+        // Validate reasonable values
+        guard shDegree <= 3 else {
+            throw SplatFileFormatError.invalidData
+        }
+        
+        guard fractionalBits <= 16 else {
+            throw SplatFileFormatError.invalidData
+        }
     }
     
     func serialize() -> Data {
