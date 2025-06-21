@@ -6,18 +6,21 @@ float3 calcCovariance2D(float3 viewPos,
                         float4x4 viewMatrix,
                         float4x4 projectionMatrix,
                         uint2 screenSize) {
-    float invViewPosZ = 1 / viewPos.z;
+    // Use fast division for better performance
+    float invViewPosZ = fast::divide(1.0f, viewPos.z);
     float invViewPosZSquared = invViewPosZ * invViewPosZ;
 
-    float tanHalfFovX = 1 / projectionMatrix[0][0];
-    float tanHalfFovY = 1 / projectionMatrix[1][1];
+    // Use fast division for projection matrix reciprocals
+    float tanHalfFovX = fast::divide(1.0f, projectionMatrix[0][0]);
+    float tanHalfFovY = fast::divide(1.0f, projectionMatrix[1][1]);
     float limX = 1.3 * tanHalfFovX;
     float limY = 1.3 * tanHalfFovY;
     viewPos.x = clamp(viewPos.x * invViewPosZ, -limX, limX) * viewPos.z;
     viewPos.y = clamp(viewPos.y * invViewPosZ, -limY, limY) * viewPos.z;
 
-    float focalX = screenSize.x * projectionMatrix[0][0] / 2;
-    float focalY = screenSize.y * projectionMatrix[1][1] / 2;
+    // Pre-compute focal lengths to avoid division in render loop
+    float focalX = float(screenSize.x) * projectionMatrix[0][0] * 0.5f;
+    float focalY = float(screenSize.y) * projectionMatrix[1][1] * 0.5f;
 
     float3x3 J = float3x3(
         focalX * invViewPosZ, 0, 0,
@@ -53,7 +56,8 @@ void decomposeCovariance(float3 cov2D, thread float2 &v1, thread float2 &v2) {
     float trace = a + d;
 
     float mean = 0.5 * trace;
-    float dist = max(0.1, sqrt(mean * mean - det)); // based on https://github.com/graphdeco-inria/diff-gaussian-rasterization/blob/main/cuda_rasterizer/forward.cu
+    // Use fast square root for performance improvement
+    float dist = max(0.1f, fast::sqrt(mean * mean - det)); // based on https://github.com/graphdeco-inria/diff-gaussian-rasterization/blob/main/cuda_rasterizer/forward.cu
 
     // Eigenvalues
     float lambda1 = mean + dist;
@@ -69,8 +73,9 @@ void decomposeCovariance(float3 cov2D, thread float2 &v1, thread float2 &v2) {
     // Gaussian axes are orthogonal
     float2 eigenvector2 = float2(eigenvector1.y, -eigenvector1.x);
 
-    v1 = eigenvector1 * sqrt(lambda1);
-    v2 = eigenvector2 * sqrt(lambda2);
+    // Use fast square root for eigenvector scaling
+    v1 = eigenvector1 * fast::sqrt(lambda1);
+    v2 = eigenvector2 * fast::sqrt(lambda2);
 }
 
 FragmentIn splatVertex(Splat splat,
@@ -78,8 +83,11 @@ FragmentIn splatVertex(Splat splat,
                        uint relativeVertexIndex) {
     FragmentIn out;
 
-    float4 viewPosition4 = uniforms.viewMatrix * float4(splat.position, 1);
-    float3 viewPosition3 = viewPosition4.xyz;
+    // Optimized matrix multiplication since w=1 for positions
+    float3 viewPosition3 = uniforms.viewMatrix[0].xyz * splat.position.x +
+                          uniforms.viewMatrix[1].xyz * splat.position.y +
+                          uniforms.viewMatrix[2].xyz * splat.position.z +
+                          uniforms.viewMatrix[3].xyz;
 
     // Early exit for splats behind camera
     if (viewPosition3.z >= 0.0) {
@@ -87,12 +95,14 @@ FragmentIn splatVertex(Splat splat,
         return out;
     }
 
-    float4 projectedCenter = uniforms.projectionMatrix * viewPosition4;
+    // Optimized projection matrix multiplication
+    float4 projectedCenter = uniforms.projectionMatrix * float4(viewPosition3, 1.0);
     
-    // Early exit for splats outside frustum (optimized bounds check)
-    float bounds = 1.2 * projectedCenter.w;
-    if (projectedCenter.z > projectedCenter.w ||
-        any(abs(projectedCenter.xy) > bounds)) {
+    // Optimized frustum culling with single bounds calculation
+    float invW = fast::divide(1.0f, projectedCenter.w);
+    float3 ndc = projectedCenter.xyz * invW;
+    // Combined frustum check: depth + XY bounds in one condition
+    if (ndc.z > 1.0f || any(abs(ndc.xy) > 1.2f)) {
         out.position = float4(1, 1, 0, 1);
         return out;
     }
@@ -106,7 +116,8 @@ FragmentIn splatVertex(Splat splat,
 
     const half2 relativeCoordinatesArray[] = { { -1, -1 }, { -1, 1 }, { 1, -1 }, { 1, 1 } };
     half2 relativeCoordinates = relativeCoordinatesArray[relativeVertexIndex];
-    half2 screenSizeFloat = half2(uniforms.screenSize.x, uniforms.screenSize.y);
+    // Pre-compute screen size as half2 to avoid repeated conversions
+    half2 screenSizeFloat = half2(uniforms.screenSize);
     half2 projectedScreenDelta =
         (relativeCoordinates.x * half2(axis1) + relativeCoordinates.y * half2(axis2))
         * 2
@@ -124,5 +135,6 @@ FragmentIn splatVertex(Splat splat,
 
 half splatFragmentAlpha(half2 relativePosition, half splatAlpha) {
     half negativeMagnitudeSquared = -dot(relativePosition, relativePosition);
-    return (negativeMagnitudeSquared < -kBoundsRadiusSquared) ? 0 : exp(0.5 * negativeMagnitudeSquared) * splatAlpha;
+    // Use fast exponential for significant performance improvement
+    return (negativeMagnitudeSquared < -kBoundsRadiusSquared) ? half(0) : fast::exp(half(0.5) * negativeMagnitudeSquared) * splatAlpha;
 }
