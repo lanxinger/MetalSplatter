@@ -52,6 +52,7 @@ public class PLYReader {
     }
 
     private var inputStream: InputStream
+    private var sourceURL: URL? = nil
     private var header: PLYHeader? = nil
     private var body = Data()
     private var bodyOffset: Int = 0
@@ -68,6 +69,7 @@ public class PLYReader {
             throw Error.cannotOpenSource(url)
         }
         self.init(inputStream)
+        self.sourceURL = url
     }
 
     public func read(to delegate: PLYReaderDelegate) {
@@ -77,7 +79,23 @@ public class PLYReader {
         currentElementGroup = 0
         currentElementCountInGroup = 0
 
-        let bufferSize = 8*1024
+        // Use adaptive buffer sizing based on file size when available
+        let bufferSize: Int
+        if let url = sourceURL,
+           let resourceValues = try? url.resourceValues(forKeys: [.fileSizeKey]),
+           let size = resourceValues.fileSize {
+            // Adaptive buffering: larger files get larger buffers
+            switch size {
+            case 0..<(1024 * 1024):  // < 1MB
+                bufferSize = 8 * 1024    // 8KB for small files
+            case (1024 * 1024)..<(10 * 1024 * 1024):  // 1MB - 10MB
+                bufferSize = 256 * 1024  // 256KB for medium files
+            default:  // > 10MB
+                bufferSize = 1024 * 1024 // 1MB for large files
+            }
+        } else {
+            bufferSize = 256 * 1024  // 256KB default (32x improvement from 8KB)
+        }
         let buffer = UnsafeMutablePointer<UInt8>.allocate(capacity: bufferSize)
         defer { buffer.deallocate() }
         var headerData = Data()

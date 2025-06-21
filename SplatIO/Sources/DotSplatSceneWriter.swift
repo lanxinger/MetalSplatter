@@ -1,5 +1,4 @@
 import Foundation
-import PLYIO
 import simd
 
 /// A writer for Gaussian Splat files in the ".splat" format, created by https://github.com/antimatter15/splat/

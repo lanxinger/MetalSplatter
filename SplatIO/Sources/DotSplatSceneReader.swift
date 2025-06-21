@@ -24,7 +24,7 @@ public class DotSplatSceneReader: SplatSceneReader {
     }
 
     public func read(to delegate: any SplatSceneReaderDelegate) {
-        let bufferSize = 64*1024
+        let bufferSize = 64*1024  // 64KB buffer for streaming
         let buffer = UnsafeMutablePointer<UInt8>.allocate(capacity: bufferSize)
         defer { buffer.deallocate() }
 

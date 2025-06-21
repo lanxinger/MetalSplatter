@@ -30,7 +30,8 @@ extension Data {
             stream.avail_in = uInt(self.count)
             
             // Prepare for output
-            let bufferSize = 16384
+            // Increased from 16KB to 128KB for better decompression performance
+            let bufferSize = self.count > (10 * 1024 * 1024) ? (256 * 1024) : (128 * 1024)
             let buffer = UnsafeMutablePointer<Bytef>.allocate(capacity: bufferSize)
             defer { buffer.deallocate() }
             
