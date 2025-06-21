@@ -115,34 +115,23 @@ public class SPZSceneWriter: SplatSceneWriter {
             packed.scales[scaleBaseIdx + j] = packedScale
         }
         
-        // Pack rotation
+        // Pack rotation using C++ reference algorithm (load-spz.cc:251-263)
         let rotation = normalizedPoint.rotation
         let rotationBaseIdx = index * 3
         
-        // Choose the largest component to drop (we store 3 of 4 quaternion components)
-        let absRotation = simd_abs(rotation.vector)
-        let maxComponent = absRotation.max()
-        var largestIndex = 0
-        for j in 0..<4 {
-            if absRotation[j] == maxComponent {
-                largestIndex = j
-                break
-            }
+        // C++ reference: normalize quaternion, make w positive, then store xyz
+        var q = rotation.normalized
+        // Make w component positive (C++: q = times(q, (q[3] < 0 ? -127.5f : 127.5f)))
+        if q.real < 0 {
+            q = simd_quatf(ix: -q.imag.x, iy: -q.imag.y, iz: -q.imag.z, r: -q.real)
         }
         
-        // Reconstruct sign of largest component
-        let sign: Float = rotation.vector[largestIndex] >= 0 ? 1.0 : -1.0
+        // Pack xyz components: q = times(q, 127.5f) then q = plus(q, {127.5, 127.5, 127.5, 127.5})
+        let xyz = q.imag * 127.5 + SIMD3<Float>(127.5, 127.5, 127.5)
         
-        // Pack the 3 smallest components to 8-bit
-        var idx = 0
-        for j in 0..<4 {
-            if j != largestIndex {
-                // Scale from [-1, 1] to [0, 255]
-                let scaledValue = (sign * rotation.vector[j] + 1.0) * 127.5
-                packed.rotations[rotationBaseIdx + idx] = UInt8(min(255, max(0, Int(scaledValue))))
-                idx += 1
-            }
-        }
+        packed.rotations[rotationBaseIdx + 0] = UInt8(min(255, max(0, Int(xyz.x))))
+        packed.rotations[rotationBaseIdx + 1] = UInt8(min(255, max(0, Int(xyz.y))))
+        packed.rotations[rotationBaseIdx + 2] = UInt8(min(255, max(0, Int(xyz.z))))
         
         // Pack alpha (opacity)
         let alpha = normalizedPoint.opacity.asLinearFloat

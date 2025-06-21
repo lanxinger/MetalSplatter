@@ -182,15 +182,15 @@ public class SPZSceneReader: SplatSceneReader {
         // Implementation based on the original C++ code with SIMD optimizations
         var results = [SplatScenePoint]()
         
-        // Add safety checks, similar to the C++ implementation
-        let maxPointsToRead = 10000000
+        // Safety checks matching C++ reference implementation  
+        let maxPointsToRead = 10000000  // C++ constant: constexpr int32_t maxPointsToRead = 10000000;
         if packedGaussians.numPoints > maxPointsToRead {
             print("SPZSceneReader: Too many points: \(packedGaussians.numPoints), capping at \(maxPointsToRead)")
         }
         if packedGaussians.shDegree > 3 {
-            print("SPZSceneReader: Unsupported SH degree: \(packedGaussians.shDegree), limiting to 3")
+            print("SPZSceneReader: Unsupported SH degree: \(packedGaussians.shDegree), SPZ spec allows 0-3")
         }
-        let safeNumPoints = min(packedGaussians.numPoints, maxPointsToRead) // Safety cap at 10 million points
+        let safeNumPoints = min(packedGaussians.numPoints, maxPointsToRead)
         print("SPZSceneReader: Unpacking \(safeNumPoints) points with SH degree \(packedGaussians.shDegree)")
         
         // Validate the data format matches the C++ implementation expectations
@@ -289,6 +289,7 @@ public class SPZSceneReader: SplatSceneReader {
     }
     
     // Process a chunk of points using SIMD operations for better performance
+    // Uses C++ reference coordinate conversion: RUB (SPZ internal) -> target coordinate system
     private func processPointChunk(packedGaussians: PackedGaussians, 
                                  range: Range<Int>,
                                  positionStride: Int,
@@ -296,6 +297,10 @@ public class SPZSceneReader: SplatSceneReader {
                                  shStride: Int) -> [SplatScenePoint] {
         var chunkResults = [SplatScenePoint]()
         chunkResults.reserveCapacity(range.count)
+        
+        // SPZ uses RUB coordinate system internally, convert to target system
+        // For now, assume we want RDF (PLY) coordinate system for compatibility
+        let coordinateConverter = CoordinateConverter.converter(from: .rub, to: .rdf)
         
         // Color scale factor from original C++ implementation
         let colorScale: Float = 0.15
@@ -328,11 +333,10 @@ public class SPZSceneReader: SplatSceneReader {
                     // Use the optimized FloatConversion utility which uses SIMD operations
                     let convertedVals = FloatConversion.convertFloat16PositionsToFloat32(posData, count: 1)
                     if !convertedVals.isEmpty {
-                        // Fix the Y coordinate to handle upside-down display
                         position = SIMD3<Float>(
-                            convertedVals[0].x,
-                            -convertedVals[0].y, // Flip Y coordinate
-                            convertedVals[0].z
+                            convertedVals[0].x * coordinateConverter.flipP[0],
+                            convertedVals[0].y * coordinateConverter.flipP[1],
+                            convertedVals[0].z * coordinateConverter.flipP[2]
                         )
                     }
                 }
@@ -353,18 +357,13 @@ public class SPZSceneReader: SplatSceneReader {
                             fixed32 |= Int32(bitPattern: 0xFF000000)
                         }
                         
-                        // Apply the coordinate transform - need to flip Y axis
-                        if j == 1 { // Y coordinate
-                            position[j] = -Float(fixed32) * scale // Flip the Y coordinate
-                        } else {
-                            position[j] = Float(fixed32) * scale
-                        }
+                        position[j] = Float(fixed32) * scale * coordinateConverter.flipP[j]
                     }
                 } else {
                     // Use a fallback position if we can't decode properly
                     position = SIMD3<Float>(
                         Float(i % 100) * 0.1,
-                        -Float(i / 100 % 100) * 0.1, // Flip Y coordinate in fallback position
+                        Float(i / 100 % 100) * 0.1,
                         Float(i / 10000) * 0.1
                     )
                 }
@@ -382,20 +381,24 @@ public class SPZSceneReader: SplatSceneReader {
                 scale = scaleBytes / 16.0 - 10.0
             }
             
-            // Extract rotation (quaternion from 3 bytes)
+            // Extract rotation (quaternion from 3 bytes) - matches C++ reference algorithm
             var rotation = simd_quatf(ix: 0, iy: 0, iz: 0, r: 1) // Default identity quaternion
             if rotOffset + 2 < packedGaussians.rotations.count {
-                // Convert all rotation components using SIMD
+                // Convert using C++ reference algorithm: load-spz.cc:325-334
                 let rotBytes = SIMD3<Float>(
                     Float(packedGaussians.rotations[rotOffset]),
                     Float(packedGaussians.rotations[rotOffset + 1]),
                     Float(packedGaussians.rotations[rotOffset + 2])
                 )
-                let xyz = rotBytes / 127.5 - 1.0
+                // C++ formula: xyz = (bytes * (1.0f / 127.5f)) + Vec3f{-1, -1, -1}
+                var xyz = rotBytes * (1.0 / 127.5) + SIMD3<Float>(-1, -1, -1)
                 
-                // Calculate w component to ensure unit quaternion
-                let xyzSquaredSum = xyz.x*xyz.x + xyz.y*xyz.y + xyz.z*xyz.z
-                let w = xyzSquaredSum < 1.0 ? sqrt(1.0 - xyzSquaredSum) : 0.0
+                // Apply coordinate system conversion to rotation
+                xyz = xyz * coordinateConverter.flipQ
+                
+                // Compute w component - quaternion is normalized and w is non-negative
+                let squaredNorm = xyz.x*xyz.x + xyz.y*xyz.y + xyz.z*xyz.z
+                let w = sqrt(max(0.0, 1.0 - squaredNorm))
                 
                 rotation = simd_quatf(ix: xyz.x, iy: xyz.y, iz: xyz.z, r: w)
             }
@@ -440,9 +443,10 @@ public class SPZSceneReader: SplatSceneReader {
                             Float(packedGaussians.sh[idx + 2])  // B component
                         )
                         
-                        // Use SIMD to unquantize all components at once
+                        // Use SIMD to unquantize all components at once and apply coordinate conversion
                         let shCoeffs = (shBytes - 128.0) / 128.0
-                        sphericalHarmonics.append(shCoeffs)
+                        let flip = coordinateConverter.flipSh[j]
+                        sphericalHarmonics.append(shCoeffs * flip)
                     }
                 }
             }

@@ -242,7 +242,9 @@ struct PackedGaussians {
     var sh: [UInt8] = []
     
     var usesFloat16: Bool {
-        positions.count == numPoints * 3 * 2
+        // C++ reference: version 1 uses float16, version 2+ uses fixed-point
+        // For compatibility, also check data size as fallback
+        return positions.count == numPoints * 3 * 2
     }
     
     // Helper to calculate SH coefficient count (matching Niantic reference)
@@ -324,30 +326,19 @@ struct PackedGaussians {
             return result
         }
         
-        // Copy SH data (organized as: color channel is inner axis, coefficient is outer axis)
-        // For degree 1: sh1n1_r, sh1n1_g, sh1n1_b, sh10_r, sh10_g, sh10_b, sh1p1_r, sh1p1_g, sh1p1_b
+        // Copy SH data - matches C++ reference load-spz.cc:363-373
+        // Data layout: color channel is inner axis, coefficient is outer axis
         for j in 0..<shDim {
-            // Check if j is within bounds of the arrays
-            guard j < result.shR.count && j < result.shG.count && j < result.shB.count else {
-                break
-            }
-            
             let idx = shStart + j * 3
-            if idx + 2 < sh.count {
-                result.shR[j] = sh[idx]
-                result.shG[j] = sh[idx + 1]
-                result.shB[j] = sh[idx + 2]
-            } else {
-                // Handle case where we don't have complete data for this SH coefficient
-                result.shR[j] = 128
-                result.shG[j] = 128
-                result.shB[j] = 128
-                // Break out of the loop since we're out of data
+            guard j < result.shR.count && (idx + 2) < sh.count else {
                 break
             }
+            result.shR[j] = sh[idx]
+            result.shG[j] = sh[idx + 1] 
+            result.shB[j] = sh[idx + 2]
         }
         
-        // Fill remaining SH coefficients with neutral value
+        // Fill remaining coefficients with neutral value (128 = 0 after unquantization)
         for j in shDim..<15 {
             result.shR[j] = 128
             result.shG[j] = 128
@@ -464,11 +455,12 @@ struct PackedGaussians {
             throw error
         }
         
-        // Extract header fields
+        // Extract header fields with C++ reference validation
         let numPoints = Int(header.numPoints)
         print("PackedGaussians.deserialize: Number of points: \(numPoints)")
-        if numPoints <= 0 || numPoints > 100000000 { // Sanity check for reasonableness
-            print("PackedGaussians.deserialize: Unreasonable point count: \(numPoints)")
+        // C++ check: maxPointsToRead = 10000000
+        if numPoints <= 0 || numPoints > 10000000 {
+            print("PackedGaussians.deserialize: Invalid point count: \(numPoints), must be 1-10M")
             throw SplatFileFormatError.invalidData
         }
         
@@ -480,8 +472,9 @@ struct PackedGaussians {
         }
         
         let shDim = shDimForDegree(shDegree)
-        let usesFloat16 = (header.flags & 0x2) != 0
-        print("PackedGaussians.deserialize: Uses Float16: \(usesFloat16)")
+        // C++ reference: version 1 uses float16, version 2+ uses fixed-point with flags
+        let usesFloat16 = (header.version == 1) || (header.flags & PackedGaussiansHeader.FlagUsesFloat16) != 0
+        print("PackedGaussians.deserialize: Uses Float16: \(usesFloat16) (version: \(header.version), flags: 0x\(String(format: "%02X", header.flags)))")
         
         // Calculate component sizes
         let positionBytes = usesFloat16 ? (numPoints * 3 * 2) : (numPoints * 3 * 3)
@@ -661,7 +654,7 @@ func float16ToFloat32(_ half: UInt16) -> Float {
 
 // MARK: - Coordinate System Support (matching Niantic reference)
 
-enum CoordinateSystem: Int {
+public enum CoordinateSystem: Int {
     case unspecified = 0
     case ldb = 1  // Left Down Back
     case rdb = 2  // Right Down Back
@@ -673,12 +666,12 @@ enum CoordinateSystem: Int {
     case ruf = 8  // Right Up Front, Unity coordinate system
 }
 
-struct CoordinateConverter {
+public struct CoordinateConverter {
     let flipP: SIMD3<Float>  // x, y, z flips for positions
     let flipQ: SIMD3<Float>  // x, y, z flips for quaternions (w is never flipped)
     let flipSh: [Float]      // Flips for the 15 spherical harmonics coefficients
     
-    static func converter(from: CoordinateSystem, to: CoordinateSystem) -> CoordinateConverter {
+    public static func converter(from: CoordinateSystem, to: CoordinateSystem) -> CoordinateConverter {
         let (xMatch, yMatch, zMatch) = axesMatch(from, to)
         let x: Float = xMatch ? 1.0 : -1.0
         let y: Float = yMatch ? 1.0 : -1.0
