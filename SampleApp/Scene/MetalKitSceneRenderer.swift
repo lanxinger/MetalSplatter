@@ -31,7 +31,7 @@ private func smoothStep<T: FloatingPoint>(_ t: T) -> T {
 @MainActor
 class MetalKitSceneRenderer: NSObject, MTKViewDelegate {
     private static let log =
-        Logger(subsystem: Bundle.main.bundleIdentifier!,
+        Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.metalsplatter.sampleapp",
                category: "MetalKitSceneRenderer")
 
     let metalKitView: MTKView
@@ -69,7 +69,8 @@ class MetalKitSceneRenderer: NSObject, MTKViewDelegate {
     private var startTranslation: SIMD2<Float> = .zero
 
     init?(_ metalKitView: MTKView) {
-        self.device = metalKitView.device!
+        guard let device = metalKitView.device else { return nil }
+        self.device = device
         guard let queue = self.device.makeCommandQueue() else { return nil }
         self.commandQueue = queue
         self.metalKitView = metalKitView
@@ -108,12 +109,17 @@ class MetalKitSceneRenderer: NSObject, MTKViewDelegate {
                 await optimizeViewportForModel(splat)
             }
         case .sampleBox:
-            modelRenderer = try! SampleBoxRenderer(device: device,
-                                                   colorFormat: metalKitView.colorPixelFormat,
-                                                   depthFormat: metalKitView.depthStencilPixelFormat,
-                                                   sampleCount: metalKitView.sampleCount,
-                                                   maxViewCount: 1,
-                                                   maxSimultaneousRenders: Constants.maxSimultaneousRenders)
+            do {
+                modelRenderer = try SampleBoxRenderer(device: device,
+                                                     colorFormat: metalKitView.colorPixelFormat,
+                                                     depthFormat: metalKitView.depthStencilPixelFormat,
+                                                     sampleCount: metalKitView.sampleCount,
+                                                     maxViewCount: 1,
+                                                     maxSimultaneousRenders: Constants.maxSimultaneousRenders)
+            } catch {
+                Self.log.error("Failed to create SampleBoxRenderer: \(error)")
+                return
+            }
         case .none:
             break
         }

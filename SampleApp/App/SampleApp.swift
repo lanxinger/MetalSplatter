@@ -20,14 +20,14 @@ struct SampleApp: App {
 #if os(visionOS)
         ImmersiveSpace(for: ModelIdentifier.self) { modelIdentifier in
             CompositorLayer(configuration: ContentStageConfiguration()) { layerRenderer in
-                let renderer = VisionSceneRenderer(layerRenderer)
                 Task {
                     do {
+                        let renderer = try VisionSceneRenderer(layerRenderer)
                         try await renderer.load(modelIdentifier.wrappedValue)
+                        renderer.startRenderLoop()
                     } catch {
-                        print("Error loading model: \(error.localizedDescription)")
+                        print("Error initializing or loading renderer: \(error.localizedDescription)")
                     }
-                    renderer.startRenderLoop()
                 }
             }
         }

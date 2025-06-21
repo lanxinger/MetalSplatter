@@ -9,6 +9,40 @@ typealias Float16 = Float
 #warning("x86_64 targets are unsupported by MetalSplatter and will fail at runtime. MetalSplatter builds on x86_64 only because Xcode builds Swift Packages as universal binaries and provides no way to override this. When Swift supports Float16 on x86_64, this may be revisited.")
 #endif
 
+// MARK: - Error Types
+
+public enum SplatRendererError: LocalizedError {
+    case metalDeviceUnavailable
+    case failedToCreateBuffer(length: Int)
+    case failedToCreateLibrary(underlying: Error)
+    case failedToCreateDepthStencilState
+    case failedToLoadShaderFunction(name: String)
+    case failedToCreateComputePipelineState(functionName: String, underlying: Error)
+    case failedToCreateRenderPipelineState(label: String, underlying: Error)
+    case bundleIdentifierUnavailable
+    
+    public var errorDescription: String? {
+        switch self {
+        case .metalDeviceUnavailable:
+            return "Metal rendering is not available on this device"
+        case .failedToCreateBuffer(let length):
+            return "Failed to create Metal buffer with length \(length) bytes"
+        case .failedToCreateLibrary(let underlying):
+            return "Failed to create Metal shader library: \(underlying.localizedDescription)"
+        case .failedToCreateDepthStencilState:
+            return "Failed to create Metal depth stencil state"
+        case .failedToLoadShaderFunction(let name):
+            return "Failed to load required shader function: \"\(name)\""
+        case .failedToCreateComputePipelineState(let functionName, let underlying):
+            return "Failed to create compute pipeline state for function \"\(functionName)\": \(underlying.localizedDescription)"
+        case .failedToCreateRenderPipelineState(let label, let underlying):
+            return "Failed to create render pipeline state \"\(label)\": \(underlying.localizedDescription)"
+        case .bundleIdentifierUnavailable:
+            return "Bundle identifier is not available"
+        }
+    }
+}
+
 public class SplatRenderer {
     enum Constants {
         // Keep in sync with Shaders.metal : maxViewCount
@@ -33,7 +67,7 @@ public class SplatRenderer {
     }
 
     private static let log =
-        Logger(subsystem: Bundle.module.bundleIdentifier!,
+        Logger(subsystem: Bundle.module.bundleIdentifier ?? "com.metalsplatter.unknown",
                category: "SplatRenderer")
     
     private var computeDepthsPipelineState: MTLComputePipelineState?
@@ -219,8 +253,11 @@ public class SplatRenderer {
         self.maxSimultaneousRenders = maxSimultaneousRenders
 
         let dynamicUniformBuffersSize = UniformsArray.alignedSize * maxSimultaneousRenders
-        self.dynamicUniformBuffers = device.makeBuffer(length: dynamicUniformBuffersSize,
-                                                       options: .storageModeShared)!
+        guard let dynamicUniformBuffers = device.makeBuffer(length: dynamicUniformBuffersSize,
+                                                           options: .storageModeShared) else {
+            throw SplatRendererError.failedToCreateBuffer(length: dynamicUniformBuffersSize)
+        }
+        self.dynamicUniformBuffers = dynamicUniformBuffers
         self.dynamicUniformBuffers.label = "Uniform Buffers"
         self.uniforms = UnsafeMutableRawPointer(dynamicUniformBuffers.contents()).bindMemory(to: UniformsArray.self, capacity: 1)
 
@@ -231,13 +268,15 @@ public class SplatRenderer {
         do {
             library = try device.makeDefaultLibrary(bundle: Bundle.module)
         } catch {
-            fatalError("Unable to initialize SplatRenderer: \(error)")
+            throw SplatRendererError.failedToCreateLibrary(underlying: error)
         }
         
         // Initialize compute pipeline for distance calculation
         do {
-            let computeFunction = library.makeFunction(name: "computeSplatDistances")
-            computeDistancesPipelineState = try device.makeComputePipelineState(function: computeFunction!)
+            guard let computeFunction = library.makeFunction(name: "computeSplatDistances") else {
+                throw SplatRendererError.failedToLoadShaderFunction(name: "computeSplatDistances")
+            }
+            computeDistancesPipelineState = try device.makeComputePipelineState(function: computeFunction)
         } catch {
             Self.log.error("Failed to create compute pipeline state: \(error)")
         }
@@ -295,21 +334,20 @@ public class SplatRenderer {
         let pipelineDescriptor = MTLRenderPipelineDescriptor()
 
         pipelineDescriptor.label = "SingleStagePipeline"
-        pipelineDescriptor.vertexFunction = library.makeRequiredFunction(name: "singleStageSplatVertexShader")
-        pipelineDescriptor.fragmentFunction = library.makeRequiredFunction(name: "singleStageSplatFragmentShader")
+        pipelineDescriptor.vertexFunction = try library.makeRequiredFunction(name: "singleStageSplatVertexShader")
+        pipelineDescriptor.fragmentFunction = try library.makeRequiredFunction(name: "singleStageSplatFragmentShader")
 
         pipelineDescriptor.rasterSampleCount = sampleCount
 
-        let colorAttachment = pipelineDescriptor.colorAttachments[0]!
-        colorAttachment.pixelFormat = colorFormat
-        colorAttachment.isBlendingEnabled = true
-        colorAttachment.rgbBlendOperation = .add
-        colorAttachment.alphaBlendOperation = .add
-        colorAttachment.sourceRGBBlendFactor = .one
-        colorAttachment.sourceAlphaBlendFactor = .one
-        colorAttachment.destinationRGBBlendFactor = .oneMinusSourceAlpha
-        colorAttachment.destinationAlphaBlendFactor = .oneMinusSourceAlpha
-        pipelineDescriptor.colorAttachments[0] = colorAttachment
+        let colorAttachment = pipelineDescriptor.colorAttachments[0]
+        colorAttachment?.pixelFormat = colorFormat
+        colorAttachment?.isBlendingEnabled = true
+        colorAttachment?.rgbBlendOperation = .add
+        colorAttachment?.alphaBlendOperation = .add
+        colorAttachment?.sourceRGBBlendFactor = .one
+        colorAttachment?.sourceAlphaBlendFactor = .one
+        colorAttachment?.destinationRGBBlendFactor = .oneMinusSourceAlpha
+        colorAttachment?.destinationAlphaBlendFactor = .oneMinusSourceAlpha
 
         pipelineDescriptor.depthAttachmentPixelFormat = depthFormat
 
@@ -324,7 +362,10 @@ public class SplatRenderer {
         let depthStateDescriptor = MTLDepthStencilDescriptor()
         depthStateDescriptor.depthCompareFunction = MTLCompareFunction.always
         depthStateDescriptor.isDepthWriteEnabled = writeDepth
-        return device.makeDepthStencilState(descriptor: depthStateDescriptor)!
+        guard let depthState = device.makeDepthStencilState(descriptor: depthStateDescriptor) else {
+            throw SplatRendererError.failedToCreateDepthStencilState
+        }
+        return depthState
     }
 
     private func buildInitializePipelineState() throws -> MTLRenderPipelineState {
@@ -333,7 +374,7 @@ public class SplatRenderer {
         let pipelineDescriptor = MTLTileRenderPipelineDescriptor()
 
         pipelineDescriptor.label = "InitializePipeline"
-        pipelineDescriptor.tileFunction = library.makeRequiredFunction(name: "initializeFragmentStore")
+        pipelineDescriptor.tileFunction = try library.makeRequiredFunction(name: "initializeFragmentStore")
         pipelineDescriptor.threadgroupSizeMatchesTileSize = true;
         pipelineDescriptor.colorAttachments[0].pixelFormat = colorFormat
 
@@ -346,8 +387,8 @@ public class SplatRenderer {
         let pipelineDescriptor = MTLRenderPipelineDescriptor()
 
         pipelineDescriptor.label = "DrawSplatPipeline"
-        pipelineDescriptor.vertexFunction = library.makeRequiredFunction(name: "multiStageSplatVertexShader")
-        pipelineDescriptor.fragmentFunction = library.makeRequiredFunction(name: "multiStageSplatFragmentShader")
+        pipelineDescriptor.vertexFunction = try library.makeRequiredFunction(name: "multiStageSplatVertexShader")
+        pipelineDescriptor.fragmentFunction = try library.makeRequiredFunction(name: "multiStageSplatFragmentShader")
 
         pipelineDescriptor.rasterSampleCount = sampleCount
 
@@ -365,7 +406,10 @@ public class SplatRenderer {
         let depthStateDescriptor = MTLDepthStencilDescriptor()
         depthStateDescriptor.depthCompareFunction = MTLCompareFunction.always
         depthStateDescriptor.isDepthWriteEnabled = writeDepth
-        return device.makeDepthStencilState(descriptor: depthStateDescriptor)!
+        guard let depthState = device.makeDepthStencilState(descriptor: depthStateDescriptor) else {
+            throw SplatRendererError.failedToCreateDepthStencilState
+        }
+        return depthState
     }
 
     private func buildPostprocessPipelineState() throws -> MTLRenderPipelineState {
@@ -375,13 +419,13 @@ public class SplatRenderer {
 
         pipelineDescriptor.label = "PostprocessPipeline"
         pipelineDescriptor.vertexFunction =
-            library.makeRequiredFunction(name: "postprocessVertexShader")
+            try library.makeRequiredFunction(name: "postprocessVertexShader")
         pipelineDescriptor.fragmentFunction =
             writeDepth
-            ? library.makeRequiredFunction(name: "postprocessFragmentShader")
-            : library.makeRequiredFunction(name: "postprocessFragmentShaderNoDepth")
+            ? try library.makeRequiredFunction(name: "postprocessFragmentShader")
+            : try library.makeRequiredFunction(name: "postprocessFragmentShaderNoDepth")
 
-        pipelineDescriptor.colorAttachments[0]!.pixelFormat = colorFormat
+        pipelineDescriptor.colorAttachments[0]?.pixelFormat = colorFormat
         pipelineDescriptor.depthAttachmentPixelFormat = depthFormat
 
         pipelineDescriptor.maxVertexAmplificationCount = maxViewCount
@@ -395,7 +439,10 @@ public class SplatRenderer {
         let depthStateDescriptor = MTLDepthStencilDescriptor()
         depthStateDescriptor.depthCompareFunction = MTLCompareFunction.always
         depthStateDescriptor.isDepthWriteEnabled = writeDepth
-        return device.makeDepthStencilState(descriptor: depthStateDescriptor)!
+        guard let depthState = device.makeDepthStencilState(descriptor: depthStateDescriptor) else {
+            throw SplatRendererError.failedToCreateDepthStencilState
+        }
+        return depthState
     }
 
     public func ensureAdditionalCapacity(_ pointCount: Int) throws {
@@ -854,9 +901,9 @@ private extension SIMD4 where Scalar: BinaryFloatingPoint {
 }
 
 private extension MTLLibrary {
-    func makeRequiredFunction(name: String) -> MTLFunction {
+    func makeRequiredFunction(name: String) throws -> MTLFunction {
         guard let result = makeFunction(name: name) else {
-            fatalError("Unable to load required shader function: \"\(name)\"")
+            throw SplatRendererError.failedToLoadShaderFunction(name: name)
         }
         return result
     }

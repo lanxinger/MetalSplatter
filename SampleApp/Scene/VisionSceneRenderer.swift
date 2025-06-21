@@ -16,9 +16,23 @@ extension LayerRenderer.Clock.Instant.Duration {
     }
 }
 
+enum RendererError: LocalizedError {
+    case failedToCreateCommandQueue
+    case failedToCreateRenderer(underlying: Error)
+    
+    var errorDescription: String? {
+        switch self {
+        case .failedToCreateCommandQueue:
+            return "Failed to create Metal command queue"
+        case .failedToCreateRenderer(let underlying):
+            return "Failed to create renderer: \(underlying.localizedDescription)"
+        }
+    }
+}
+
 class VisionSceneRenderer {
     private static let log =
-        Logger(subsystem: Bundle.main.bundleIdentifier!,
+        Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.metalsplatter.sampleapp",
                category: "VisionSceneRenderer")
 
     let layerRenderer: LayerRenderer
@@ -36,10 +50,13 @@ class VisionSceneRenderer {
     let arSession: ARKitSession
     let worldTracking: WorldTrackingProvider
 
-    init(_ layerRenderer: LayerRenderer) {
+    init(_ layerRenderer: LayerRenderer) throws {
         self.layerRenderer = layerRenderer
         self.device = layerRenderer.device
-        self.commandQueue = self.device.makeCommandQueue()!
+        guard let commandQueue = self.device.makeCommandQueue() else {
+            throw RendererError.failedToCreateCommandQueue
+        }
+        self.commandQueue = commandQueue
 
         worldTracking = WorldTrackingProvider()
         arSession = ARKitSession()
@@ -61,12 +78,16 @@ class VisionSceneRenderer {
             try await splat.read(from: url)
             modelRenderer = splat
         case .sampleBox:
-            modelRenderer = try! SampleBoxRenderer(device: device,
-                                                   colorFormat: layerRenderer.configuration.colorFormat,
-                                                   depthFormat: layerRenderer.configuration.depthFormat,
-                                                   sampleCount: 1,
-                                                   maxViewCount: layerRenderer.properties.viewCount,
-                                                   maxSimultaneousRenders: Constants.maxSimultaneousRenders)
+            do {
+                modelRenderer = try SampleBoxRenderer(device: device,
+                                                     colorFormat: layerRenderer.configuration.colorFormat,
+                                                     depthFormat: layerRenderer.configuration.depthFormat,
+                                                     sampleCount: 1,
+                                                     maxViewCount: layerRenderer.properties.viewCount,
+                                                     maxSimultaneousRenders: Constants.maxSimultaneousRenders)
+            } catch {
+                throw RendererError.failedToCreateRenderer(underlying: error)
+            }
         case .none:
             break
         }
