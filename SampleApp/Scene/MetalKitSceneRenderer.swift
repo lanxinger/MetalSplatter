@@ -104,10 +104,13 @@ class MetalKitSceneRenderer: NSObject, MTKViewDelegate {
                 return renderer
             }.value
             
-            // Enable memory optimization for testing
+            // Enable optimizations for testing
             splat.useOptimizedMemoryLayout = true
+            splat.useGPURadixSort = false // Disable for now - needs work for large datasets
+            
             Self.log.info("SplatRenderer loaded - Splat count: \(splat.splatCount)")
             Self.log.info("Memory optimization: \(splat.useOptimizedMemoryLayout ? "ENABLED" : "DISABLED")")
+            Self.log.info("GPU radix sort: \(splat.useGPURadixSort ? "ENABLED" : "DISABLED")")
             
             modelRenderer = splat
             if autoFitEnabled {
