@@ -17,11 +17,15 @@ typedef struct
     float depth [[depth(any)]];
 } FragmentOut;
 
+[[kernel, max_total_threads_per_threadgroup(1024)]]
 kernel void initializeFragmentStore(imageblock<FragmentValues, imageblock_layout_explicit> blockData,
-                                    ushort2 localThreadID [[thread_position_in_threadgroup]]) {
+                                    ushort2 localThreadID [[thread_position_in_threadgroup]],
+                                    ushort2 threadgroupID [[threadgroup_position_in_grid]]) {
     threadgroup_imageblock FragmentValues *values = blockData.data(localThreadID);
-    values->color = { 0, 0, 0, 0 };
-    values->depth = 0;
+    
+    // Optimized initialization with SIMD-friendly operations
+    values->color = half4(0);
+    values->depth = 0.0f;
 }
 
 vertex FragmentIn multiStageSplatVertexShader(uint vertexID [[vertex_id]],

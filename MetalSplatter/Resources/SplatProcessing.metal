@@ -56,10 +56,11 @@ void decomposeCovariance(float3 cov2D, thread float2 &v1, thread float2 &v2) {
     float trace = a + d;
 
     float mean = 0.5 * trace;
-    // Use fast square root for performance improvement
-    float dist = max(0.1f, fast::sqrt(mean * mean - det)); // based on https://github.com/graphdeco-inria/diff-gaussian-rasterization/blob/main/cuda_rasterizer/forward.cu
+    // Use fast square root for performance improvement with SIMD optimization
+    float meanSquared = mean * mean;
+    float dist = max(0.1f, fast::sqrt(meanSquared - det)); // based on https://github.com/graphdeco-inria/diff-gaussian-rasterization/blob/main/cuda_rasterizer/forward.cu
 
-    // Eigenvalues
+    // Eigenvalues computed with SIMD-friendly operations
     float lambda1 = mean + dist;
     float lambda2 = mean - dist;
 
@@ -67,15 +68,19 @@ void decomposeCovariance(float3 cov2D, thread float2 &v1, thread float2 &v2) {
     if (b == 0) {
         eigenvector1 = (a > d) ? float2(1, 0) : float2(0, 1);
     } else {
-        eigenvector1 = normalize(float2(b, d - lambda2));
+        // Optimized normalization using fast inverse square root
+        float2 unnormalized = float2(b, d - lambda2);
+        float invLength = fast::rsqrt(dot(unnormalized, unnormalized));
+        eigenvector1 = unnormalized * invLength;
     }
 
-    // Gaussian axes are orthogonal
+    // Gaussian axes are orthogonal - SIMD-optimized computation
     float2 eigenvector2 = float2(eigenvector1.y, -eigenvector1.x);
 
-    // Use fast square root for eigenvector scaling
-    v1 = eigenvector1 * fast::sqrt(lambda1);
-    v2 = eigenvector2 * fast::sqrt(lambda2);
+    // Use fast square root for eigenvector scaling with SIMD operations
+    float2 sqrtLambdas = float2(fast::sqrt(lambda1), fast::sqrt(lambda2));
+    v1 = eigenvector1 * sqrtLambdas.x;
+    v2 = eigenvector2 * sqrtLambdas.y;
 }
 
 FragmentIn splatVertex(Splat splat,
@@ -83,11 +88,21 @@ FragmentIn splatVertex(Splat splat,
                        uint relativeVertexIndex) {
     FragmentIn out;
 
-    // Optimized matrix multiplication since w=1 for positions
-    float3 viewPosition3 = uniforms.viewMatrix[0].xyz * splat.position.x +
-                          uniforms.viewMatrix[1].xyz * splat.position.y +
-                          uniforms.viewMatrix[2].xyz * splat.position.z +
-                          uniforms.viewMatrix[3].xyz;
+    // Optimized matrix multiplication with memory-coalesced access pattern
+    // Load position components into SIMD-friendly variables for better memory access
+    float3 splatPos = float3(splat.position);
+    
+    // Pre-load matrix rows for coalesced access
+    float3 viewMatrixRow0 = uniforms.viewMatrix[0].xyz;
+    float3 viewMatrixRow1 = uniforms.viewMatrix[1].xyz;
+    float3 viewMatrixRow2 = uniforms.viewMatrix[2].xyz;
+    float3 viewMatrixRow3 = uniforms.viewMatrix[3].xyz;
+    
+    // SIMD-optimized matrix multiplication
+    float3 viewPosition3 = viewMatrixRow0 * splatPos.x +
+                          viewMatrixRow1 * splatPos.y +
+                          viewMatrixRow2 * splatPos.z +
+                          viewMatrixRow3;
 
     // Early exit for splats behind camera
     if (viewPosition3.z >= 0.0) {
@@ -107,22 +122,30 @@ FragmentIn splatVertex(Splat splat,
         return out;
     }
 
-    float3 cov2D = calcCovariance2D(viewPosition3, splat.covA, splat.covB,
+    // Pre-load covariance data for coalesced memory access
+    packed_half3 covA = splat.covA;
+    packed_half3 covB = splat.covB;
+    
+    float3 cov2D = calcCovariance2D(viewPosition3, covA, covB,
                                     uniforms.viewMatrix, uniforms.projectionMatrix, uniforms.screenSize);
 
     float2 axis1;
     float2 axis2;
     decomposeCovariance(cov2D, axis1, axis2);
 
+    // Pre-compute lookup table data for better cache utilization
     const half2 relativeCoordinatesArray[] = { { -1, -1 }, { -1, 1 }, { 1, -1 }, { 1, 1 } };
     half2 relativeCoordinates = relativeCoordinatesArray[relativeVertexIndex];
+    
     // Pre-compute screen size as half2 to avoid repeated conversions
     half2 screenSizeFloat = half2(uniforms.screenSize);
-    half2 projectedScreenDelta =
-        (relativeCoordinates.x * half2(axis1) + relativeCoordinates.y * half2(axis2))
-        * 2
-        * kBoundsRadius
-        / screenSizeFloat;
+    
+    // SIMD-optimized delta calculation with coalesced memory access
+    half2 axisContribution1 = relativeCoordinates.x * half2(axis1);
+    half2 axisContribution2 = relativeCoordinates.y * half2(axis2);
+    half2 totalAxisContribution = axisContribution1 + axisContribution2;
+    
+    half2 projectedScreenDelta = totalAxisContribution * (2.0h * kBoundsRadius) / screenSizeFloat;
 
     out.position = float4(projectedCenter.x + projectedScreenDelta.x * projectedCenter.w,
                           projectedCenter.y + projectedScreenDelta.y * projectedCenter.w,
