@@ -218,13 +218,16 @@ public class SplatRenderer {
     var cameraWorldForward: SIMD3<Float> = .init(x: 0, y: 0, z: -1)
 
     typealias IndexType = UInt32
+    
+    // Buffer pools for efficient memory management
+    private let splatBufferPool: MetalBufferPool<Splat>
+    private let indexBufferPool: MetalBufferPool<UInt32>
+    
     // splatBuffer contains one entry for each gaussian splat
     var splatBuffer: MetalBuffer<Splat>
     // splatBufferPrime is a copy of splatBuffer, which is not currenly in use for rendering.
     // We use this for sorting, and when we're done, swap it with splatBuffer.
-    // There's a good chance that we'll sometimes end up sorting a splatBuffer still in use for
-    // rendering.
-    // TODO: Replace this with a more robust multiple-buffer scheme to guarantee we're never actively sorting a buffer still in use for rendering
+    // Multiple buffers from the pool ensure we're never actively sorting a buffer still in use for rendering
     var splatBufferPrime: MetalBuffer<Splat>
 
     var indexBuffer: MetalBuffer<UInt32>
@@ -261,9 +264,24 @@ public class SplatRenderer {
         self.dynamicUniformBuffers.label = "Uniform Buffers"
         self.uniforms = UnsafeMutableRawPointer(dynamicUniformBuffers.contents()).bindMemory(to: UniformsArray.self, capacity: 1)
 
-        self.splatBuffer = try MetalBuffer(device: device)
-        self.splatBufferPrime = try MetalBuffer(device: device)
-        self.indexBuffer = try MetalBuffer(device: device)
+        // Initialize buffer pools with optimized configurations
+        let splatPoolConfig = MetalBufferPool<Splat>.Configuration(
+            maxPoolSize: 8,  // Allow more splat buffers for complex scenes
+            maxBufferAge: 120.0,  // Keep splat buffers longer as they're expensive
+            memoryPressureThreshold: 0.7  // More aggressive cleanup for large buffers
+        )
+        self.splatBufferPool = MetalBufferPool(device: device, configuration: splatPoolConfig)
+        
+        let indexPoolConfig = MetalBufferPool<UInt32>.Configuration(
+            maxPoolSize: 12,  // Index buffers are smaller, can pool more
+            maxBufferAge: 90.0
+        )
+        self.indexBufferPool = MetalBufferPool(device: device, configuration: indexPoolConfig)
+        
+        // Acquire initial buffers from pools
+        self.splatBuffer = try splatBufferPool.acquire(minimumCapacity: 1)
+        self.splatBufferPrime = try splatBufferPool.acquire(minimumCapacity: 1)
+        self.indexBuffer = try indexBufferPool.acquire(minimumCapacity: 1)
 
         do {
             library = try device.makeDefaultLibrary(bundle: Bundle.module)
@@ -290,10 +308,48 @@ public class SplatRenderer {
             Self.log.error("Failed to create frustum culling pipeline state: \(error)")
         }
     }
+    
+    deinit {
+        // Return buffers to pools for reuse
+        splatBufferPool.release(splatBuffer)
+        splatBufferPool.release(splatBufferPrime)
+        indexBufferPool.release(indexBuffer)
+    }
 
     public func reset() {
-        splatBuffer.count = 0
-        try? splatBuffer.setCapacity(0)
+        // Clear current buffers and return them to pools
+        splatBufferPool.release(splatBuffer)
+        splatBufferPool.release(splatBufferPrime)
+        
+        // Acquire fresh small buffers from pools
+        do {
+            splatBuffer = try splatBufferPool.acquire(minimumCapacity: 1)
+            splatBufferPrime = try splatBufferPool.acquire(minimumCapacity: 1)
+        } catch {
+            Self.log.error("Failed to acquire buffers during reset: \(error)")
+            // Fallback to creating new buffers if pool fails
+            do {
+                splatBuffer = try MetalBuffer(device: device)
+                splatBufferPrime = try MetalBuffer(device: device)
+            } catch {
+                Self.log.error("Failed to create fallback buffers: \(error)")
+            }
+        }
+    }
+    
+    /// Efficiently swaps buffers using the buffer pool to optimize memory allocation
+    private func swapSplatBuffers() {
+        swap(&splatBuffer, &splatBufferPrime)
+    }
+    
+    /// Ensures splatBufferPrime has sufficient capacity, acquiring a new buffer from pool if needed
+    private func ensurePrimeBufferCapacity(_ minimumCapacity: Int) throws {
+        if splatBufferPrime.capacity < minimumCapacity {
+            // Return current prime buffer to pool and acquire a larger one
+            splatBufferPool.release(splatBufferPrime)
+            splatBufferPrime = try splatBufferPool.acquire(minimumCapacity: minimumCapacity)
+        }
+        splatBufferPrime.count = 0
     }
 
     public func read(from url: URL) async throws {
@@ -486,6 +542,30 @@ public class SplatRenderer {
         
         return (min: minBounds, max: maxBounds)
     }
+    
+    // MARK: - Buffer Pool Management
+    
+    /// Returns statistics about buffer pool usage for monitoring and debugging
+    public func getBufferPoolStatistics() -> (splatPoolAvailable: Int, splatPoolLeased: Int, splatPoolMemoryMB: Float,
+                                              indexPoolAvailable: Int, indexPoolLeased: Int, indexPoolMemoryMB: Float) {
+        let splatStats = splatBufferPool.getStatistics()
+        let indexStats = indexBufferPool.getStatistics()
+        
+        return (
+            splatPoolAvailable: splatStats.availableBuffers,
+            splatPoolLeased: splatStats.leasedBuffers,
+            splatPoolMemoryMB: splatStats.totalMemoryMB,
+            indexPoolAvailable: indexStats.availableBuffers,
+            indexPoolLeased: indexStats.leasedBuffers,
+            indexPoolMemoryMB: indexStats.totalMemoryMB
+        )
+    }
+    
+    /// Manually triggers memory pressure cleanup on buffer pools
+    public func trimBufferPools() {
+        splatBufferPool.trimToMemoryPressure()
+        indexBufferPool.trimToMemoryPressure()
+    }
 
     private func switchToNextDynamicBuffer() {
         uniformBufferIndex = (uniformBufferIndex + 1) % maxSimultaneousRenders
@@ -607,8 +687,13 @@ public class SplatRenderer {
         let indexCount = indexedSplatCount * 6
         if indexBuffer.count < indexCount {
             do {
-                try indexBuffer.ensureCapacity(indexCount)
+                // If current buffer is too small, get a larger one from pool
+                if indexBuffer.capacity < indexCount {
+                    indexBufferPool.release(indexBuffer)
+                    indexBuffer = try indexBufferPool.acquire(minimumCapacity: indexCount)
+                }
             } catch {
+                Self.log.error("Failed to acquire larger index buffer: \(error)")
                 return
             }
             indexBuffer.count = indexCount
@@ -766,15 +851,14 @@ public class SplatRenderer {
                 let sortedIndices = indexOutputBuffer.contents().bindMemory(to: Int32.self, capacity: splatCount)
 
                 do {
-                    try self.splatBufferPrime.setCapacity(splatCount)
-                    self.splatBufferPrime.count = 0
+                    try self.ensurePrimeBufferCapacity(splatCount)
                     for newIndex in 0 ..< splatCount {
                         let oldIndex = Int(sortedIndices[newIndex])
                         splatBufferPrime.append(splatBuffer, fromIndex: oldIndex)
                     }
-                    swap(&splatBuffer, &splatBufferPrime)
+                    self.swapSplatBuffers()
                 } catch {
-                    Self.log.error("Failed to set capacity or reorder: \(error)")
+                    Self.log.error("Failed to reorder splats with pooled buffers: \(error)")
                 }
 
 //                let elapsed = Date().timeIntervalSince(startTime)
@@ -809,16 +893,15 @@ public class SplatRenderer {
                 orderAndDepthTempSort.sort { $0.depth > $1.depth }
 
                 do {
-                    try splatBufferPrime.setCapacity(splatCount)
-                    splatBufferPrime.count = 0
+                    try ensurePrimeBufferCapacity(splatCount)
                     for newIndex in 0..<orderAndDepthTempSort.count {
                         let oldIndex = Int(orderAndDepthTempSort[newIndex].index)
                         splatBufferPrime.append(splatBuffer, fromIndex: oldIndex)
                     }
 
-                    swap(&splatBuffer, &splatBufferPrime)
+                    swapSplatBuffers()
                 } catch {
-                    Self.log.error("Failed to set capacity or reorder: \(error)")
+                    Self.log.error("Failed to reorder splats with pooled buffers: \(error)")
                 }
 
 //                let elapsedCPU = -cpuStart.timeIntervalSinceNow
