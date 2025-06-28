@@ -45,6 +45,8 @@ struct MetalKitSceneView: ViewRepresentable {
         let renderer = MetalKitSceneRenderer(metalKitView)
         coordinator.renderer = renderer
         metalKitView.delegate = renderer
+        
+        // Fast SH is configured in the renderer itself
 
         // --- Interactivity: Pan (rotation) and Pinch (zoom) ---
         #if os(iOS)

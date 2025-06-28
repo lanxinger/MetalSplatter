@@ -8,6 +8,11 @@ import SampleBoxRenderer
 import simd
 import SwiftUI
 
+// Fast SH is only available when MetalSplatter includes it
+#if canImport(MetalSplatter)
+// FastSHSettings and FastSHSplatRenderer should be available
+#endif
+
 // Helper function for linear interpolation
 private func lerp<T: FloatingPoint>(_ a: T, _ b: T, _ t: T) -> T {
     return a + (b - a) * t
@@ -40,6 +45,9 @@ class MetalKitSceneRenderer: NSObject, MTKViewDelegate {
 
     var model: ModelIdentifier?
     var modelRenderer: (any ModelRenderer)?
+    
+    // Fast SH Support
+    var fastSHEnabled = true
 
     let inFlightSemaphore = DispatchSemaphore(value: Constants.maxSimultaneousRenders)
 
@@ -85,6 +93,7 @@ class MetalKitSceneRenderer: NSObject, MTKViewDelegate {
         self.model = model
 
         modelRenderer = nil
+        
         switch model {
         case .gaussianSplat(let url):
             // Capture needed values from main actor context
@@ -92,19 +101,44 @@ class MetalKitSceneRenderer: NSObject, MTKViewDelegate {
             let colorPixelFormat = metalKitView.colorPixelFormat
             let depthStencilPixelFormat = metalKitView.depthStencilPixelFormat
             let sampleCount = metalKitView.sampleCount
+            let useFastSH = fastSHEnabled
             
             // Create and read splat entirely in nonisolated context
             let splat = try await Task.detached {
-                let renderer = try SplatRenderer(device: deviceRef,
-                                                colorFormat: colorPixelFormat,
-                                                depthFormat: depthStencilPixelFormat,
-                                                sampleCount: sampleCount,
-                                                maxViewCount: 1,
-                                                maxSimultaneousRenders: Constants.maxSimultaneousRenders)
-                try await renderer.read(from: url)
-                return renderer
+                if useFastSH {
+                    // Use Fast SH renderer
+                    let renderer = try FastSHSplatRenderer(device: deviceRef,
+                                                         colorFormat: colorPixelFormat,
+                                                         depthFormat: depthStencilPixelFormat,
+                                                         sampleCount: sampleCount,
+                                                         maxViewCount: 1,
+                                                         maxSimultaneousRenders: Constants.maxSimultaneousRenders)
+                    try await renderer.read(from: url)
+                    return renderer as SplatRenderer // Cast to base class
+                } else {
+                    // Use regular renderer
+                    let renderer = try SplatRenderer(device: deviceRef,
+                                                    colorFormat: colorPixelFormat,
+                                                    depthFormat: depthStencilPixelFormat,
+                                                    sampleCount: sampleCount,
+                                                    maxViewCount: 1,
+                                                    maxSimultaneousRenders: Constants.maxSimultaneousRenders)
+                    try await renderer.read(from: url)
+                    return renderer
+                }
             }.value
+            
             modelRenderer = splat
+            
+            // Configure Fast SH if using FastSHSplatRenderer
+            if let fastRenderer = splat as? FastSHSplatRenderer {
+                // Configure basic fast SH settings
+                fastRenderer.fastSHConfig.enabled = true
+                fastRenderer.fastSHConfig.useTextureEvaluation = false
+                fastRenderer.fastSHConfig.updateFrequency = 1
+                print("Fast SH enabled for \(url.lastPathComponent)")
+            }
+            
             if autoFitEnabled {
                 await optimizeViewportForModel(splat)
             }
@@ -372,6 +406,8 @@ class MetalKitSceneRenderer: NSObject, MTKViewDelegate {
     private func calculateModelBounds(_ renderer: any ModelRenderer) async -> (min: SIMD3<Float>, max: SIMD3<Float>)? {
         if let splatRenderer = renderer as? SplatRenderer {
             return splatRenderer.calculateBounds()
+        } else if let fastSHRenderer = renderer as? FastSHSplatRenderer {
+            return fastSHRenderer.calculateBounds()
         }
         
         return nil
