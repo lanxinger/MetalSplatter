@@ -6,6 +6,7 @@ import Metal
 import MetalKit
 import SplatIO
 import simd
+import UIKit
 
 public class ARSplatRenderer: NSObject {
     private let device: MTLDevice
@@ -20,15 +21,7 @@ public class ARSplatRenderer: NSObject {
     // Core splat renderer
     private var splatRenderer: SplatRenderer
     
-    // Offscreen textures for compositing
-    private var backgroundTexture: MTLTexture?
-    private var contentTexture: MTLTexture?
-    private var updateTextures = true
-    
-    // Composition pipeline
-    private let compositionPipelineState: MTLRenderPipelineState
-    private let compositionVertexBuffer: MTLBuffer
-    private let compositionIndexBuffer: MTLBuffer
+    // Note: Removed offscreen textures and composition pipeline for single-pass rendering
     
     // Current viewport size
     private var viewportSize = CGSize.zero
@@ -47,10 +40,7 @@ public class ARSplatRenderer: NSObject {
         return frame.camera.trackingState == .normal
     }
     
-    struct CompositionVertex {
-        let position: SIMD2<Float>
-        let texCoord: SIMD2<Float>
-    }
+    // Note: Removed CompositionVertex struct for single-pass rendering
     
     public init(device: MTLDevice,
                 colorFormat: MTLPixelFormat,
@@ -115,28 +105,7 @@ public class ARSplatRenderer: NSObject {
             maxSimultaneousRenders: maxSimultaneousRenders
         )
         
-        // Create composition pipeline
-        self.compositionPipelineState = try Self.createCompositionPipelineState(device: device, library: library, colorFormat: colorFormat)
-        
-        // Create composition geometry
-        let vertices = [
-            CompositionVertex(position: SIMD2<Float>(-1, -1), texCoord: SIMD2<Float>(0, 1)),
-            CompositionVertex(position: SIMD2<Float>( 1, -1), texCoord: SIMD2<Float>(1, 1)),
-            CompositionVertex(position: SIMD2<Float>(-1,  1), texCoord: SIMD2<Float>(0, 0)),
-            CompositionVertex(position: SIMD2<Float>( 1,  1), texCoord: SIMD2<Float>(1, 0))
-        ]
-        
-        let indices: [UInt16] = [0, 1, 2, 1, 3, 2]
-        
-        guard let vertexBuffer = device.makeBuffer(bytes: vertices, length: vertices.count * MemoryLayout<CompositionVertex>.stride, options: []) else {
-            throw ARSplatRendererError.failedToCreateVertexBuffer
-        }
-        self.compositionVertexBuffer = vertexBuffer
-        
-        guard let indexBuffer = device.makeBuffer(bytes: indices, length: indices.count * MemoryLayout<UInt16>.stride, options: []) else {
-            throw ARSplatRendererError.failedToCreateIndexBuffer
-        }
-        self.compositionIndexBuffer = indexBuffer
+        // Note: Removed composition pipeline creation for single-pass rendering
         
         super.init()
         
@@ -323,7 +292,7 @@ public class ARSplatRenderer: NSObject {
             return
         }
         
-        // Fallback: try legacy hit test for compatibility
+        // Fallback: try legacy hit test for compatibility with more types
         let hitTestResults = frame.hitTest(screenPoint, types: [.existingPlaneUsingExtent, .estimatedHorizontalPlane, .featurePoint])
         
         if let result = hitTestResults.first {
@@ -341,35 +310,60 @@ public class ARSplatRenderer: NSObject {
     }
     
     private func screenPointToWorldDirection(_ screenPoint: CGPoint, frame: ARFrame, viewportSize: CGSize) -> SIMD3<Float> {
-        // Convert screen point to normalized coordinates
-        let normalizedX = Float(screenPoint.x / viewportSize.width)
-        let normalizedY = Float(screenPoint.y / viewportSize.height)
+        // Use the same transformation as ARBackgroundRenderer but in reverse
+        let interfaceOrientation = getInterfaceOrientation()
         
-        // Get camera intrinsics
-        let intrinsics = frame.camera.intrinsics
+        // Get the inverse display transform to go from view coordinates to camera image coordinates
+        let displayToCameraTransform = frame.displayTransform(for: interfaceOrientation, viewportSize: viewportSize).inverted()
+        
+        // Convert screen point to normalized coordinates [0,1] in view space
+        let normalizedViewPoint = CGPoint(
+            x: screenPoint.x / viewportSize.width,
+            y: screenPoint.y / viewportSize.height
+        )
+        
+        // Apply the inverse transform to get normalized camera coordinates
+        let normalizedCameraPoint = normalizedViewPoint.applying(displayToCameraTransform)
+        
+        // Convert to camera image pixel coordinates
         let imageResolution = frame.camera.imageResolution
+        let imagePoint = CGPoint(
+            x: normalizedCameraPoint.x * imageResolution.width,
+            y: normalizedCameraPoint.y * imageResolution.height
+        )
         
-        // Convert to image coordinates
-        let imageX = normalizedX * Float(imageResolution.width)
-        let imageY = normalizedY * Float(imageResolution.height)
-        
-        // Unproject to camera space
+        // Unproject using camera intrinsics
+        let intrinsics = frame.camera.intrinsics
         let fx = intrinsics[0][0]
         let fy = intrinsics[1][1]
         let cx = intrinsics[2][0]
         let cy = intrinsics[2][1]
         
-        let x = (imageX - cx) / fx
-        let y = (imageY - cy) / fy
-        let z: Float = -1.0
+        // Convert to camera coordinate system (normalized device coordinates)
+        let x = (Float(imagePoint.x) - cx) / fx
+        let y = (Float(imagePoint.y) - cy) / fy
+        let z: Float = -1.0  // Camera looks down negative Z
         
         let cameraDirection = SIMD3<Float>(x, y, z)
         
-        // Transform to world space
+        // Transform from camera space to world space
         let cameraTransform = frame.camera.transform
         let worldDirection = cameraTransform.upperLeft3x3 * cameraDirection
         
-        return normalize(worldDirection)
+        let normalizedDirection = normalize(worldDirection)
+        
+        print("ARSplatRenderer: screenPoint=\(screenPoint) → normalizedView=\(normalizedViewPoint) → normalizedCamera=\(normalizedCameraPoint) → imagePoint=\(imagePoint) → worldDirection=\(normalizedDirection)")
+        
+        return normalizedDirection
+    }
+    
+    
+    private func getInterfaceOrientation() -> UIInterfaceOrientation {
+        // Get the current interface orientation
+        if let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene {
+            return windowScene.interfaceOrientation
+        }
+        return .portrait // fallback
     }
     public func scaleSplat(factor: Float) {
         splatScale = max(0.1, min(10.0, splatScale * factor)) // Clamp between 0.1x and 10x
@@ -406,31 +400,19 @@ public class ARSplatRenderer: NSObject {
         if self.viewportSize != viewportSize {
             self.viewportSize = viewportSize
             arBackgroundRenderer.resize(viewportSize)
-            updateTextures = true
         }
         
         // Update AR camera
         arCamera.update(viewportSize: viewportSize)
         
-        // Create or update offscreen textures
-        if updateTextures {
-            createOffscreenTextures(size: viewportSize)
-            updateTextures = false
-        }
-        
-        guard let backgroundTexture = backgroundTexture,
-              let contentTexture = contentTexture else {
-            throw ARSplatRendererError.failedToCreateOffscreenTextures
-        }
-        
         guard let commandBuffer = commandQueue.makeCommandBuffer() else {
             throw ARSplatRendererError.failedToCreateCommandBuffer
         }
         
-        // Render AR background to offscreen texture
-        arBackgroundRenderer.render(to: backgroundTexture, with: commandBuffer)
+        // Single-pass rendering: render AR background directly to drawable
+        arBackgroundRenderer.render(to: drawable.texture, with: commandBuffer)
         
-        // Render splats to offscreen texture (if we have splats loaded)
+        // Render splats on top with proper blending (if we have splats loaded)
         if splatRenderer.splatCount > 0 {
             // Auto-place splat once when first loaded
             if !hasBeenPlaced {
@@ -439,19 +421,10 @@ public class ARSplatRenderer: NSObject {
             
             // Only render splats if they've been placed (either auto or manually)
             if hasBeenPlaced {
-                // Render actual splats
-                try renderSplatsToTexture(contentTexture, commandBuffer: commandBuffer)
-            } else {
-                // Clear content texture while waiting for placement
-                clearTexture(contentTexture, commandBuffer: commandBuffer)
+                // Render splats directly to drawable with alpha blending
+                try renderSplatsToDrawable(drawable, commandBuffer: commandBuffer)
             }
-        } else {
-            // Clear content texture if no splats
-            clearTexture(contentTexture, commandBuffer: commandBuffer)
         }
-        
-        // Composite both textures to final drawable
-        compositeToDrawable(drawable, backgroundTexture: backgroundTexture, contentTexture: contentTexture, commandBuffer: commandBuffer)
         
         commandBuffer.present(drawable)
         commandBuffer.commit()
@@ -489,85 +462,48 @@ public class ARSplatRenderer: NSObject {
         }
     }
     
-    private func clearTexture(_ texture: MTLTexture, commandBuffer: MTLCommandBuffer) {
-        let renderPassDescriptor = MTLRenderPassDescriptor()
-        renderPassDescriptor.colorAttachments[0].texture = texture
-        renderPassDescriptor.colorAttachments[0].loadAction = .clear
-        renderPassDescriptor.colorAttachments[0].storeAction = .store
-        renderPassDescriptor.colorAttachments[0].clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 0) // Transparent
+    // Note: Removed clearTexture method for single-pass rendering
+    
+    // Note: Removed renderTestPattern method for single-pass rendering
+    
+    // Note: Removed renderSimpleTestShape method for single-pass rendering
+    
+    // Note: Removed createSolidColorTexture method for single-pass rendering
+    
+    // Note: Removed createOffscreenTextures method for single-pass rendering
+    
+    private func renderSplatsToDrawable(_ drawable: CAMetalDrawable, commandBuffer: MTLCommandBuffer) throws {
+        // Create transform matrix for splat positioning in AR space
+        let translationMatrix = matrix4x4_translation(splatPosition.x, splatPosition.y, splatPosition.z)
+        let rotationMatrix = matrix4x4_rotation(splatRotation)
+        let scaleMatrix = matrix4x4_scale(splatScale, splatScale, splatScale)
         
-        if let renderEncoder = commandBuffer.makeRenderCommandEncoder(descriptor: renderPassDescriptor) {
-            renderEncoder.endEncoding()
-        }
+        // Combine transformations: Translation * Rotation * Scale
+        let modelMatrix = translationMatrix * rotationMatrix * scaleMatrix
+        
+        // Apply AR camera view matrix to the transformed splat
+        let viewMatrix = arCamera.viewMatrix
+        
+        let viewport = SplatRenderer.ViewportDescriptor(
+            viewport: MTLViewport(originX: 0, originY: 0, width: Double(drawable.texture.width), height: Double(drawable.texture.height), znear: 0, zfar: 1),
+            projectionMatrix: arCamera.projectionMatrix,
+            viewMatrix: viewMatrix * modelMatrix,
+            screenSize: SIMD2(x: drawable.texture.width, y: drawable.texture.height)
+        )
+        
+        try splatRenderer.render(
+            viewports: [viewport],
+            colorTexture: drawable.texture,
+            colorLoadAction: .load, // Preserve AR background
+            colorStoreAction: .store,
+            depthTexture: nil, // AR doesn't use depth buffer for composition
+            rasterizationRateMap: nil,
+            renderTargetArrayLength: 0,
+            to: commandBuffer
+        )
     }
     
-    private func renderTestPattern(_ texture: MTLTexture, commandBuffer: MTLCommandBuffer) {
-        let renderPassDescriptor = MTLRenderPassDescriptor()
-        renderPassDescriptor.colorAttachments[0].texture = texture
-        renderPassDescriptor.colorAttachments[0].loadAction = .clear
-        renderPassDescriptor.colorAttachments[0].storeAction = .store
-        renderPassDescriptor.colorAttachments[0].clearColor = MTLClearColor(red: 1, green: 0, blue: 1, alpha: 0.5) // Magenta with transparency
-        
-        if let renderEncoder = commandBuffer.makeRenderCommandEncoder(descriptor: renderPassDescriptor) {
-            renderEncoder.endEncoding()
-        }
-        print("ARSplatRenderer: Rendered magenta test pattern to content texture")
-    }
-    
-    private func renderSimpleTestShape(_ texture: MTLTexture, commandBuffer: MTLCommandBuffer) {
-        // Just clear the content texture to a visible color to test composition
-        let renderPassDescriptor = MTLRenderPassDescriptor()
-        renderPassDescriptor.colorAttachments[0].texture = texture
-        renderPassDescriptor.colorAttachments[0].loadAction = .clear
-        renderPassDescriptor.colorAttachments[0].storeAction = .store
-        renderPassDescriptor.colorAttachments[0].clearColor = MTLClearColor(red: 1, green: 0, blue: 0, alpha: 0.3) // Lower alpha for blending
-        
-        if let renderEncoder = commandBuffer.makeRenderCommandEncoder(descriptor: renderPassDescriptor) {
-            renderEncoder.endEncoding()
-        }
-        print("ARSplatRenderer: Rendered simple red test shape")
-    }
-    
-    private func createSolidColorTexture(red: Float, green: Float, blue: Float, alpha: Float) -> MTLTexture {
-        let descriptor = MTLTextureDescriptor()
-        descriptor.width = 1
-        descriptor.height = 1
-        descriptor.pixelFormat = .bgra8Unorm_srgb
-        descriptor.usage = [.shaderRead]
-        
-        let texture = device.makeTexture(descriptor: descriptor)!
-        let color = [UInt8(red * 255), UInt8(green * 255), UInt8(blue * 255), UInt8(alpha * 255)]
-        texture.replace(region: MTLRegion(origin: MTLOrigin(x: 0, y: 0, z: 0), size: MTLSize(width: 1, height: 1, depth: 1)), 
-                       mipmapLevel: 0, 
-                       withBytes: color, 
-                       bytesPerRow: 4)
-        return texture
-    }
-    
-    private func createOffscreenTextures(size: CGSize) {
-        let width = Int(size.width)
-        let height = Int(size.height)
-        
-        guard width > 0, height > 0 else { return }
-        
-        let descriptor = MTLTextureDescriptor()
-        descriptor.pixelFormat = .bgra8Unorm_srgb
-        descriptor.width = width
-        descriptor.height = height
-        descriptor.textureType = .type2D
-        descriptor.usage = [.renderTarget, .shaderRead]
-        descriptor.storageMode = .private
-        
-        backgroundTexture = device.makeTexture(descriptor: descriptor)
-        backgroundTexture?.label = "AR Background Texture"
-        
-        // Content texture with alpha for blending
-        descriptor.pixelFormat = .bgra8Unorm_srgb
-        contentTexture = device.makeTexture(descriptor: descriptor)
-        contentTexture?.label = "AR Content Texture"
-    }
-    
-    private func renderSplatsToTexture(_ texture: MTLTexture, commandBuffer: MTLCommandBuffer) throws {
+    private func renderSplatsDirectlyToTexture(_ texture: MTLTexture, commandBuffer: MTLCommandBuffer) throws {
         // Create transform matrix for splat positioning in AR space
         let translationMatrix = matrix4x4_translation(splatPosition.x, splatPosition.y, splatPosition.z)
         let rotationMatrix = matrix4x4_rotation(splatRotation)
@@ -589,6 +525,7 @@ public class ARSplatRenderer: NSObject {
         try splatRenderer.render(
             viewports: [viewport],
             colorTexture: texture,
+            colorLoadAction: .load, // Preserve existing content
             colorStoreAction: .store,
             depthTexture: nil, // AR doesn't use depth buffer for composition
             rasterizationRateMap: nil,
@@ -597,67 +534,9 @@ public class ARSplatRenderer: NSObject {
         )
     }
     
-    private func compositeToDrawable(_ drawable: CAMetalDrawable, backgroundTexture: MTLTexture, contentTexture: MTLTexture, commandBuffer: MTLCommandBuffer) {
-        let renderPassDescriptor = MTLRenderPassDescriptor()
-        renderPassDescriptor.colorAttachments[0].texture = drawable.texture
-        renderPassDescriptor.colorAttachments[0].loadAction = .clear
-        renderPassDescriptor.colorAttachments[0].storeAction = .store
-        renderPassDescriptor.colorAttachments[0].clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 1)
-        
-        guard let renderEncoder = commandBuffer.makeRenderCommandEncoder(descriptor: renderPassDescriptor) else {
-            return
-        }
-        
-        renderEncoder.setRenderPipelineState(compositionPipelineState)
-        renderEncoder.setVertexBuffer(compositionVertexBuffer, offset: 0, index: 0)
-        renderEncoder.setFragmentTexture(backgroundTexture, index: 0)
-        renderEncoder.setFragmentTexture(contentTexture, index: 1)
-        
-        renderEncoder.drawIndexedPrimitives(type: .triangle,
-                                           indexCount: 6,
-                                           indexType: .uint16,
-                                           indexBuffer: compositionIndexBuffer,
-                                           indexBufferOffset: 0)
-        
-        renderEncoder.endEncoding()
-    }
+    // Note: Removed compositeToDrawable method for single-pass rendering
     
-    private static func createCompositionPipelineState(device: MTLDevice, library: MTLLibrary, colorFormat: MTLPixelFormat) throws -> MTLRenderPipelineState {
-        guard let vertexFunction = library.makeFunction(name: "ar_composition_vertex"),
-              let fragmentFunction = library.makeFunction(name: "ar_composition_fragment") else {
-            throw ARSplatRendererError.failedToCreateShaderFunctions
-        }
-        
-        let descriptor = MTLRenderPipelineDescriptor()
-        descriptor.vertexFunction = vertexFunction
-        descriptor.fragmentFunction = fragmentFunction
-        descriptor.colorAttachments[0].pixelFormat = colorFormat
-        
-        // Enable alpha blending for splats over background
-        descriptor.colorAttachments[0].isBlendingEnabled = true
-        descriptor.colorAttachments[0].sourceRGBBlendFactor = .sourceAlpha
-        descriptor.colorAttachments[0].destinationRGBBlendFactor = .oneMinusSourceAlpha
-        descriptor.colorAttachments[0].sourceAlphaBlendFactor = .one
-        descriptor.colorAttachments[0].destinationAlphaBlendFactor = .zero
-        
-        // Vertex descriptor
-        let vertexDescriptor = MTLVertexDescriptor()
-        vertexDescriptor.attributes[0].format = .float2
-        vertexDescriptor.attributes[0].offset = 0
-        vertexDescriptor.attributes[0].bufferIndex = 0
-        
-        vertexDescriptor.attributes[1].format = .float2
-        vertexDescriptor.attributes[1].offset = MemoryLayout<SIMD2<Float>>.stride
-        vertexDescriptor.attributes[1].bufferIndex = 0
-        
-        vertexDescriptor.layouts[0].stride = MemoryLayout<CompositionVertex>.stride
-        vertexDescriptor.layouts[0].stepRate = 1
-        vertexDescriptor.layouts[0].stepFunction = .perVertex
-        
-        descriptor.vertexDescriptor = vertexDescriptor
-        
-        return try device.makeRenderPipelineState(descriptor: descriptor)
-    }
+    // Note: Removed createCompositionPipelineState method for single-pass rendering
 }
 
 // MARK: - ARSessionDelegate
@@ -694,8 +573,8 @@ extension ARSplatRenderer: ARSessionDelegate {
         let viewportSize = CGSize(width: colorTexture.width, height: colorTexture.height)
         
         guard let drawable = colorTexture as? CAMetalDrawable else {
-            // If not a drawable, fall back to direct rendering
-            try renderSplatsToTexture(colorTexture, commandBuffer: commandBuffer)
+            // If not a drawable, fall back to direct rendering to texture
+            try renderSplatsDirectlyToTexture(colorTexture, commandBuffer: commandBuffer)
             return
         }
         

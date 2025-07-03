@@ -102,6 +102,22 @@ public class ARBackgroundRenderer {
     public func render(to texture: MTLTexture, with commandBuffer: MTLCommandBuffer) {
         update()
         
+        // Only render if we have valid camera textures
+        guard let textureY = capturedImageTextureY,
+              let textureCbCr = capturedImageTextureCbCr else {
+            // No camera data available yet - just clear to black and return
+            let renderPassDescriptor = MTLRenderPassDescriptor()
+            renderPassDescriptor.colorAttachments[0].texture = texture
+            renderPassDescriptor.colorAttachments[0].loadAction = .clear
+            renderPassDescriptor.colorAttachments[0].storeAction = .store
+            renderPassDescriptor.colorAttachments[0].clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 1)
+            
+            if let renderEncoder = commandBuffer.makeRenderCommandEncoder(descriptor: renderPassDescriptor) {
+                renderEncoder.endEncoding()
+            }
+            return
+        }
+        
         let renderPassDescriptor = MTLRenderPassDescriptor()
         renderPassDescriptor.colorAttachments[0].texture = texture
         renderPassDescriptor.colorAttachments[0].loadAction = .clear
@@ -115,12 +131,9 @@ public class ARBackgroundRenderer {
         renderEncoder.setRenderPipelineState(renderPipelineState)
         renderEncoder.setVertexBuffer(vertexBuffer, offset: 0, index: 0)
         
-        // Set captured image textures
-        if let textureY = capturedImageTextureY,
-           let textureCbCr = capturedImageTextureCbCr {
-            renderEncoder.setFragmentTexture(CVMetalTextureGetTexture(textureY), index: 0)
-            renderEncoder.setFragmentTexture(CVMetalTextureGetTexture(textureCbCr), index: 1)
-        }
+        // Set captured image textures (guaranteed to exist due to guard above)
+        renderEncoder.setFragmentTexture(CVMetalTextureGetTexture(textureY), index: 0)
+        renderEncoder.setFragmentTexture(CVMetalTextureGetTexture(textureCbCr), index: 1)
         
         renderEncoder.drawIndexedPrimitives(type: .triangle,
                                            indexCount: 6,

@@ -43,10 +43,15 @@ struct ARContentView: View {
                 .onReceive(NotificationCenter.default.publisher(for: .init("ARRendererReady"))) { _ in
                     // This will be triggered when the renderer is ready
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-                        if !permissionDenied && arSceneRenderer != nil {
+                        if !permissionDenied && arSceneRenderer != nil && !isARSessionActive {
                             print("AR: Starting AR session after renderer ready")
-                            arSceneRenderer?.startARSession()
-                            isARSessionActive = true
+                            // Check camera permission again before starting
+                            if AVCaptureDevice.authorizationStatus(for: .video) == .authorized {
+                                arSceneRenderer?.startARSession()
+                                isARSessionActive = true
+                            } else {
+                                print("AR: Camera permission not available when renderer ready")
+                            }
                         }
                     }
                 }
@@ -172,6 +177,9 @@ struct ARContentView: View {
         .navigationBarTitleDisplayMode(.inline)
         .onAppear {
             print("AR: ARContentView appeared")
+            // Reset state when view appears
+            permissionDenied = false
+            arError = nil
             checkARAvailability()
         }
         .onDisappear {
@@ -202,8 +210,14 @@ struct ARContentView: View {
         switch AVCaptureDevice.authorizationStatus(for: .video) {
         case .authorized:
             print("AR: Camera permission already granted")
-            // Permission already granted
-            break
+            // Permission already granted - start AR session if renderer is ready
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                if self.arSceneRenderer != nil && !self.isARSessionActive {
+                    print("AR: Starting AR session after view appeared with existing permissions")
+                    self.arSceneRenderer?.startARSession()
+                    self.isARSessionActive = true
+                }
+            }
         case .notDetermined:
             print("AR: Camera permission not determined, requesting...")
             requestCameraPermission()
@@ -280,16 +294,37 @@ struct ARMetalKitView: UIViewRepresentable {
     }
     
     func updateUIView(_ uiView: MTKView, context: Context) {
+        print("AR: updateUIView called - renderer: \(renderer != nil ? "exists" : "nil")")
         Task { @MainActor in
             if let model = model {
                 do {
                     try await renderer?.load(model)
                     print("AR: Successfully loaded model \(model)")
+                    // Trigger AR session start after model load if not already active
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                        if let renderer = self.renderer, !self.isARActive {
+                            if AVCaptureDevice.authorizationStatus(for: .video) == .authorized {
+                                print("AR: Starting AR session after model load")
+                                renderer.startARSession()
+                                self.isARActive = true
+                            }
+                        }
+                    }
                 } catch {
                     print("AR: Failed to load model \(model): \(error)")
                 }
             } else {
                 print("AR: No model provided, using sample box")
+                // Still try to start AR session for sample box
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                    if let renderer = self.renderer, !self.isARActive {
+                        if AVCaptureDevice.authorizationStatus(for: .video) == .authorized {
+                            print("AR: Starting AR session for sample box")
+                            renderer.startARSession()
+                            self.isARActive = true
+                        }
+                    }
+                }
             }
         }
     }

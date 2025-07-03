@@ -604,6 +604,7 @@ public class SplatRenderer {
     func renderEncoder(multiStage: Bool,
                        viewports: [ViewportDescriptor],
                        colorTexture: MTLTexture,
+                       colorLoadAction: MTLLoadAction = .clear,
                        colorStoreAction: MTLStoreAction,
                        depthTexture: MTLTexture?,
                        rasterizationRateMap: MTLRasterizationRateMap?,
@@ -611,7 +612,7 @@ public class SplatRenderer {
                        for commandBuffer: MTLCommandBuffer) -> MTLRenderCommandEncoder {
         let renderPassDescriptor = MTLRenderPassDescriptor()
         renderPassDescriptor.colorAttachments[0].texture = colorTexture
-        renderPassDescriptor.colorAttachments[0].loadAction = .clear
+        renderPassDescriptor.colorAttachments[0].loadAction = colorLoadAction
         renderPassDescriptor.colorAttachments[0].storeAction = colorStoreAction
         renderPassDescriptor.colorAttachments[0].clearColor = clearColor
         if let depthTexture {
@@ -655,6 +656,7 @@ public class SplatRenderer {
 
     public func render(viewports: [ViewportDescriptor],
                        colorTexture: MTLTexture,
+                       colorLoadAction: MTLLoadAction = .clear,
                        colorStoreAction: MTLStoreAction,
                        depthTexture: MTLTexture?,
                        rasterizationRateMap: MTLRasterizationRateMap?,
@@ -678,6 +680,7 @@ public class SplatRenderer {
         let renderEncoder = renderEncoder(multiStage: multiStage,
                                           viewports: viewports,
                                           colorTexture: colorTexture,
+                                          colorLoadAction: colorLoadAction,
                                           colorStoreAction: colorStoreAction,
                                           depthTexture: depthTexture,
                                           rasterizationRateMap: rasterizationRateMap,
