@@ -5,6 +5,7 @@ import UniformTypeIdentifiers
 struct ContentView: View {
     @State private var isPickingFile = false
     @State private var isPickingSOGSFolder = false
+    @State private var lastLoadedModel: ModelIdentifier?
 
 #if os(macOS)
     @Environment(\.openWindow) private var openWindow
@@ -43,6 +44,10 @@ struct ContentView: View {
                 .navigationDestination(for: ModelIdentifier.self) { modelIdentifier in
                     MetalKitSceneView(modelIdentifier: modelIdentifier)
                         .navigationTitle(modelIdentifier.description)
+                }
+                .navigationDestination(for: ARModelIdentifier.self) { arModelIdentifier in
+                    ARContentView(model: arModelIdentifier.model)
+                        .navigationTitle("AR \(arModelIdentifier.model?.description ?? "View")")
                 }
         }
 #endif // os(iOS)
@@ -94,7 +99,9 @@ struct ContentView: View {
                         try await Task.sleep(for: .seconds(10))
                         url.stopAccessingSecurityScopedResource()
                     }
-                    openWindow(value: ModelIdentifier.gaussianSplat(url))
+                    let model = ModelIdentifier.gaussianSplat(url)
+                    lastLoadedModel = model
+                    openWindow(value: model)
                 case .failure:
                     break
                 }
@@ -125,6 +132,23 @@ struct ContentView: View {
             }
 
             Spacer()
+
+#if os(iOS)
+            Button("Open in AR") {
+                // Use the most recently loaded model, or default to sample box
+                if let lastModel = lastLoadedModel {
+                    navigationPath.append(ARModelIdentifier(model: lastModel))
+                } else {
+                    // Default to sample box if no models have been loaded
+                    navigationPath.append(ARModelIdentifier(model: .sampleBox))
+                }
+            }
+            .padding()
+            .buttonStyle(.bordered)
+            .opacity(lastLoadedModel != nil ? 1.0 : 0.7)
+
+            Spacer()
+#endif
 
             Button("Show Sample Box") {
                 openWindow(value: ModelIdentifier.sampleBox)
@@ -205,6 +229,8 @@ struct ContentView: View {
             }
         }
         
-        openWindow(value: ModelIdentifier.gaussianSplat(metaURL))
+        let model = ModelIdentifier.gaussianSplat(metaURL)
+        lastLoadedModel = model
+        openWindow(value: model)
     }
 }

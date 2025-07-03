@@ -161,3 +161,77 @@ half splatFragmentAlpha(half2 relativePosition, half splatAlpha) {
     // Use fast exponential for significant performance improvement
     return (negativeMagnitudeSquared < -kBoundsRadiusSquared) ? half(0) : fast::exp(half(0.5) * negativeMagnitudeSquared) * splatAlpha;
 }
+
+// MARK: - AR Background Rendering
+
+struct ARBackgroundVertex {
+    float2 position [[attribute(0)]];
+    float2 texCoord [[attribute(1)]];
+};
+
+struct ARBackgroundVertexOut {
+    float4 position [[position]];
+    float2 texCoord;
+};
+
+vertex ARBackgroundVertexOut ar_background_vertex(const ARBackgroundVertex in [[stage_in]]) {
+    ARBackgroundVertexOut out;
+    out.position = float4(in.position, 0.0, 1.0);
+    out.texCoord = in.texCoord;
+    return out;
+}
+
+fragment float4 ar_background_fragment(ARBackgroundVertexOut in [[stage_in]],
+                                      texture2d<float> capturedImageTextureY [[texture(0)]],
+                                      texture2d<float> capturedImageTextureCbCr [[texture(1)]]) {
+    constexpr sampler colorSampler(mip_filter::linear, mag_filter::linear, min_filter::linear);
+    
+    // Use the same YUV to RGB conversion as the reference implementation
+    const float4x4 ycbcrToRGBTransform = float4x4(float4(+1.0000f, +1.0000f, +1.0000f, +0.0000f),
+                                                  float4(+0.0000f, -0.3441f, +1.7720f, +0.0000f),
+                                                  float4(+1.4020f, -0.7141f, +0.0000f, +0.0000f),
+                                                  float4(-0.7010f, +0.5291f, -0.8860f, +1.0000f));
+
+    float4 color = ycbcrToRGBTransform * float4(capturedImageTextureY.sample(colorSampler, in.texCoord).r, 
+                                               capturedImageTextureCbCr.sample(colorSampler, in.texCoord).rg, 
+                                               1.0);
+    
+    // Apply gamma correction for better color representation
+    color.rgb = pow(color.rgb, 2.2);
+    
+    return color;
+}
+
+// MARK: - AR Composition
+
+struct ARCompositionVertex {
+    float2 position [[attribute(0)]];
+    float2 texCoord [[attribute(1)]];
+};
+
+struct ARCompositionVertexOut {
+    float4 position [[position]];
+    float2 texCoord;
+};
+
+vertex ARCompositionVertexOut ar_composition_vertex(const ARCompositionVertex in [[stage_in]]) {
+    ARCompositionVertexOut out;
+    out.position = float4(in.position, 0.0, 1.0);
+    out.texCoord = in.texCoord;
+    return out;
+}
+
+fragment float4 ar_composition_fragment(ARCompositionVertexOut in [[stage_in]],
+                                       texture2d<float> backgroundTexture [[texture(0)]],
+                                       texture2d<float> contentTexture [[texture(1)]]) {
+    constexpr sampler textureSampler(mip_filter::linear, mag_filter::linear, min_filter::linear);
+    
+    // Sample both textures
+    float4 background = backgroundTexture.sample(textureSampler, in.texCoord);
+    float4 content = contentTexture.sample(textureSampler, in.texCoord);
+    
+    // Proper alpha blending: content over background
+    float3 finalColor = mix(background.rgb, content.rgb, content.a);
+    
+    return float4(finalColor, 1.0);
+}
