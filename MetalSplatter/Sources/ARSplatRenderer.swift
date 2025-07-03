@@ -140,6 +140,9 @@ public class ARSplatRenderer: NSObject {
         
         super.init()
         
+        // Log device AR capabilities
+        logARCapabilities()
+        
         // Configure AR session
         setupARSession()
     }
@@ -213,11 +216,45 @@ public class ARSplatRenderer: NSObject {
     public func startARSession() {
         print("ARSplatRenderer: Starting AR session...")
         let configuration = ARWorldTrackingConfiguration()
+        
+        // Enable all plane detection for maximum surface coverage
         configuration.planeDetection = [.horizontal, .vertical]
-        session.run(configuration)
+        
+        // Enable scene reconstruction if available (LiDAR devices)
+        if ARWorldTrackingConfiguration.supportsSceneReconstruction(.mesh) {
+            configuration.sceneReconstruction = .mesh
+            print("ARSplatRenderer: ✅ LiDAR scene reconstruction enabled")
+        } else {
+            print("ARSplatRenderer: ⚠️ LiDAR not available, using visual-inertial tracking")
+        }
+        
+        // Enable frame semantics for better understanding
+        if ARWorldTrackingConfiguration.supportsFrameSemantics(.personSegmentationWithDepth) {
+            configuration.frameSemantics.insert(.personSegmentationWithDepth)
+            print("ARSplatRenderer: ✅ Person segmentation with depth enabled")
+        }
+        
+        // Enable automatic image stabilization for better tracking
+        configuration.isAutoFocusEnabled = true
+        
+        // Use the highest quality video format available
+        let videoFormats = ARWorldTrackingConfiguration.supportedVideoFormats
+        if let highestResFormat = videoFormats.max(by: { 
+            $0.imageResolution.width * $0.imageResolution.height < $1.imageResolution.width * $1.imageResolution.height 
+        }) {
+            configuration.videoFormat = highestResFormat
+            print("ARSplatRenderer: ✅ High resolution camera enabled (\(Int(highestResFormat.imageResolution.width))x\(Int(highestResFormat.imageResolution.height)))")
+        }
+        
+        session.run(configuration, options: [.resetTracking, .removeExistingAnchors])
         arSessionStartTime = CACurrentMediaTime() // Record when we started the session
         isWaitingForARTracking = true // Reset waiting state
-        print("ARSplatRenderer: AR session started with configuration")
+        
+        print("ARSplatRenderer: AR session started with optimized configuration")
+        print("ARSplatRenderer: - Plane detection: horizontal + vertical")
+        print("ARSplatRenderer: - Scene reconstruction: \(configuration.sceneReconstruction)")
+        print("ARSplatRenderer: - Frame semantics: \(configuration.frameSemantics)")
+        print("ARSplatRenderer: - Auto focus: \(configuration.isAutoFocusEnabled)")
     }
     
     public func stopARSession() {
@@ -234,44 +271,105 @@ public class ARSplatRenderer: NSObject {
             return 
         }
         
-        // First try to hit test existing planes
-        let existingPlaneResults = frame.hitTest(screenPoint, types: .existingPlaneUsingExtent)
+        // Use raycast for more accurate placement (iOS 13+)
+        // First try horizontal planes (most common for object placement)
+        var raycastQuery = ARRaycastQuery(
+            origin: frame.camera.transform.columns.3.xyz,
+            direction: screenPointToWorldDirection(screenPoint, frame: frame, viewportSize: viewportSize),
+            allowing: .existingPlaneGeometry,
+            alignment: .horizontal
+        )
         
-        if let result = existingPlaneResults.first {
-            // Place at hit location on existing plane
+        var results = session.raycast(raycastQuery)
+        
+        if let result = results.first {
             splatPosition = result.worldTransform.columns.3.xyz
             hasBeenPlaced = true
-            print("ARSplatRenderer: Placed splat on existing plane at: \(splatPosition)")
+            print("ARSplatRenderer: ✅ Placed splat on existing horizontal plane at: \(splatPosition)")
             return
         }
         
-        // Try estimated planes
-        let estimatedPlaneResults = frame.hitTest(screenPoint, types: .estimatedHorizontalPlane)
+        // Try vertical planes (walls)
+        raycastQuery = ARRaycastQuery(
+            origin: frame.camera.transform.columns.3.xyz,
+            direction: screenPointToWorldDirection(screenPoint, frame: frame, viewportSize: viewportSize),
+            allowing: .existingPlaneGeometry,
+            alignment: .vertical
+        )
         
-        if let result = estimatedPlaneResults.first {
+        results = session.raycast(raycastQuery)
+        
+        if let result = results.first {
             splatPosition = result.worldTransform.columns.3.xyz
             hasBeenPlaced = true
-            print("ARSplatRenderer: Placed splat on estimated plane at: \(splatPosition)")
+            print("ARSplatRenderer: ✅ Placed splat on existing vertical plane at: \(splatPosition)")
             return
         }
         
-        // Try feature points as last resort
-        let featurePointResults = frame.hitTest(screenPoint, types: .featurePoint)
+        // Try estimated planes if no existing geometry
+        raycastQuery = ARRaycastQuery(
+            origin: frame.camera.transform.columns.3.xyz,
+            direction: screenPointToWorldDirection(screenPoint, frame: frame, viewportSize: viewportSize),
+            allowing: .estimatedPlane,
+            alignment: .horizontal
+        )
         
-        if let result = featurePointResults.first {
+        results = session.raycast(raycastQuery)
+        
+        if let result = results.first {
             splatPosition = result.worldTransform.columns.3.xyz
             hasBeenPlaced = true
-            print("ARSplatRenderer: Placed splat on feature point at: \(splatPosition)")
+            print("ARSplatRenderer: ✅ Placed splat on estimated plane at: \(splatPosition)")
             return
         }
         
-        // If all else fails, place at a fixed distance in front of the camera
-        print("ARSplatRenderer: No AR hit test results, placing in front of camera")
-        let cameraTransform = frame.camera.transform
-        let forward = -cameraTransform.columns.2.xyz
-        splatPosition = cameraTransform.columns.3.xyz + forward * 1.5
+        // Fallback: try legacy hit test for compatibility
+        let hitTestResults = frame.hitTest(screenPoint, types: [.existingPlaneUsingExtent, .estimatedHorizontalPlane, .featurePoint])
+        
+        if let result = hitTestResults.first {
+            splatPosition = result.worldTransform.columns.3.xyz
+            hasBeenPlaced = true
+            print("ARSplatRenderer: ✅ Placed splat using legacy hit test at: \(splatPosition)")
+            return
+        }
+        
+        // Final fallback: place along ray at fixed distance
+        let direction = screenPointToWorldDirection(screenPoint, frame: frame, viewportSize: viewportSize)
+        splatPosition = frame.camera.transform.columns.3.xyz + normalize(direction) * 1.5
         hasBeenPlaced = true
-        print("ARSplatRenderer: Placed splat in front of camera at: \(splatPosition)")
+        print("ARSplatRenderer: ⚠️ No surface found, placed splat along ray at: \(splatPosition)")
+    }
+    
+    private func screenPointToWorldDirection(_ screenPoint: CGPoint, frame: ARFrame, viewportSize: CGSize) -> SIMD3<Float> {
+        // Convert screen point to normalized coordinates
+        let normalizedX = Float(screenPoint.x / viewportSize.width)
+        let normalizedY = Float(screenPoint.y / viewportSize.height)
+        
+        // Get camera intrinsics
+        let intrinsics = frame.camera.intrinsics
+        let imageResolution = frame.camera.imageResolution
+        
+        // Convert to image coordinates
+        let imageX = normalizedX * Float(imageResolution.width)
+        let imageY = normalizedY * Float(imageResolution.height)
+        
+        // Unproject to camera space
+        let fx = intrinsics[0][0]
+        let fy = intrinsics[1][1]
+        let cx = intrinsics[2][0]
+        let cy = intrinsics[2][1]
+        
+        let x = (imageX - cx) / fx
+        let y = (imageY - cy) / fy
+        let z: Float = -1.0
+        
+        let cameraDirection = SIMD3<Float>(x, y, z)
+        
+        // Transform to world space
+        let cameraTransform = frame.camera.transform
+        let worldDirection = cameraTransform.upperLeft3x3 * cameraDirection
+        
+        return normalize(worldDirection)
     }
     public func scaleSplat(factor: Float) {
         splatScale = max(0.1, min(10.0, splatScale * factor)) // Clamp between 0.1x and 10x
@@ -361,6 +459,34 @@ public class ARSplatRenderer: NSObject {
     
     private func setupARSession() {
         session.delegate = self
+    }
+    
+    private func logARCapabilities() {
+        print("ARSplatRenderer: 📱 Device AR Capabilities:")
+        print("  - World Tracking: \(ARWorldTrackingConfiguration.isSupported)")
+        print("  - Scene Reconstruction: \(ARWorldTrackingConfiguration.supportsSceneReconstruction(.mesh))")
+        print("  - Person Segmentation: \(ARWorldTrackingConfiguration.supportsFrameSemantics(.personSegmentationWithDepth))")
+        
+        let videoFormats = ARWorldTrackingConfiguration.supportedVideoFormats
+        print("  - Video Formats Available: \(videoFormats.count)")
+        
+        // Find and log the highest resolution format
+        if let highestResFormat = videoFormats.max(by: { 
+            $0.imageResolution.width * $0.imageResolution.height < $1.imageResolution.width * $1.imageResolution.height 
+        }) {
+            print("  - Max Resolution: \(Int(highestResFormat.imageResolution.width))x\(Int(highestResFormat.imageResolution.height)) @ \(highestResFormat.framesPerSecond)fps")
+        }
+        
+        // Log first few formats
+        for format in videoFormats.prefix(3) {
+            print("    • \(Int(format.imageResolution.width))x\(Int(format.imageResolution.height)) @ \(format.framesPerSecond)fps")
+        }
+        
+        if ARWorldTrackingConfiguration.supportsSceneReconstruction(.mesh) {
+            print("  🚀 LiDAR detected - enabling advanced features!")
+        } else {
+            print("  📷 Using visual-inertial tracking")
+        }
     }
     
     private func clearTexture(_ texture: MTLTexture, commandBuffer: MTLCommandBuffer) {
