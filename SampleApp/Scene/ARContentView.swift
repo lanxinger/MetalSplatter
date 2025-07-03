@@ -31,6 +31,7 @@ struct ARContentView: View {
     @State private var showingPermissionAlert = false
     @State private var permissionDenied = false
     @State private var arError: String?
+    @State private var isARTrackingReady = false
     
     let model: ModelIdentifier?
     
@@ -49,6 +50,12 @@ struct ARContentView: View {
                         }
                     }
                 }
+                .onReceive(Timer.publish(every: 0.5, on: .main, in: .common).autoconnect()) { _ in
+                    // Check AR tracking status periodically
+                    if isARSessionActive, let renderer = arSceneRenderer {
+                        isARTrackingReady = renderer.isARTrackingNormal()
+                    }
+                }
             
             // AR Controls overlay
             VStack {
@@ -65,10 +72,10 @@ struct ARContentView: View {
                             Text("• Pinch to scale")
                                 .font(.caption)
                                 .foregroundColor(.white.opacity(0.8))
-                            Text("• Pan to move")
+                            Text("• Two-finger drag to move")
                                 .font(.caption)
                                 .foregroundColor(.white.opacity(0.8))
-                            Text("• Rotate to turn")
+                            Text("• Two-finger twist to rotate")
                                 .font(.caption)
                                 .foregroundColor(.white.opacity(0.8))
                         }
@@ -82,30 +89,34 @@ struct ARContentView: View {
                 }
                 
                 Spacer()
-                
-                HStack {
+            }
+            
+            // Loading overlay while AR is initializing
+            if isARSessionActive && !isARTrackingReady {
+                VStack {
                     Spacer()
                     
-                    // AR Session toggle button
-                    Button(action: toggleARSession) {
-                        VStack(spacing: 4) {
-                            Image(systemName: isARSessionActive ? "stop.fill" : "play.fill")
-                                .font(.title2)
-                                .foregroundColor(.white)
-                            Text(isARSessionActive ? "Stop" : "Start")
-                                .font(.caption2)
-                                .foregroundColor(.white)
-                        }
-                        .frame(width: 70, height: 70)
-                        .background(isARSessionActive ? Color.red.opacity(0.8) : Color.green.opacity(0.8))
-                        .clipShape(RoundedRectangle(cornerRadius: 15))
-                        .shadow(radius: 5)
+                    VStack(spacing: 20) {
+                        ProgressView()
+                            .progressViewStyle(CircularProgressViewStyle(tint: .white))
+                            .scaleEffect(1.5)
+                        
+                        Text("Initializing AR...")
+                            .font(.headline)
+                            .foregroundColor(.white)
+                        
+                        Text("Move your device slowly to scan the environment")
+                            .font(.caption)
+                            .foregroundColor(.white.opacity(0.8))
+                            .multilineTextAlignment(.center)
+                            .padding(.horizontal)
                     }
-                    .disabled(permissionDenied)
+                    .padding(30)
+                    .background(Color.black.opacity(0.7))
+                    .cornerRadius(20)
                     
                     Spacer()
                 }
-                .padding(.bottom, 50)
             }
             
             // Error overlay
@@ -164,8 +175,10 @@ struct ARContentView: View {
             checkARAvailability()
         }
         .onDisappear {
+            print("AR: View disappearing, cleaning up AR session")
             arSceneRenderer?.stopARSession()
             isARSessionActive = false
+            isARTrackingReady = false
         }
         .alert("Camera Permission Required", isPresented: $showingPermissionAlert) {
             Button("Cancel", role: .cancel) {
@@ -226,17 +239,6 @@ struct ARContentView: View {
         }
     }
     
-    private func toggleARSession() {
-        guard !permissionDenied else { return }
-        
-        if isARSessionActive {
-            arSceneRenderer?.stopARSession()
-            isARSessionActive = false
-        } else {
-            arSceneRenderer?.startARSession()
-            isARSessionActive = true
-        }
-    }
 }
 
 struct ARMetalKitView: UIViewRepresentable {
@@ -319,6 +321,18 @@ struct ARMetalKitView: UIViewRepresentable {
         context.coordinator.metalView = view
         view.addGestureRecognizer(pinchGesture)
         print("AR: Added pinch gesture recognizer")
+        
+        // Add rotation gesture for rotating splats
+        let rotationGesture = UIRotationGestureRecognizer(target: context.coordinator, action: #selector(Coordinator.handleRotation(_:)))
+        view.addGestureRecognizer(rotationGesture)
+        print("AR: Added rotation gesture recognizer")
+        
+        // Add pan gesture for moving splats (two-finger drag)
+        let panGesture = UIPanGestureRecognizer(target: context.coordinator, action: #selector(Coordinator.handlePan(_:)))
+        panGesture.minimumNumberOfTouches = 2
+        panGesture.maximumNumberOfTouches = 2
+        view.addGestureRecognizer(panGesture)
+        print("AR: Added pan gesture recognizer")
     }
     
     func makeCoordinator() -> Coordinator {
@@ -344,6 +358,22 @@ struct ARMetalKitView: UIViewRepresentable {
             print("AR: Coordinator handlePinch scale: \(scale)")
             renderer?.handlePinch(scale: CGFloat(scale), velocity: 0)
             gesture.scale = 1.0 // Reset for next gesture
+        }
+        
+        @objc func handleRotation(_ gesture: UIRotationGestureRecognizer) {
+            let rotation = Float(gesture.rotation)
+            print("AR: Coordinator handleRotation rotation: \(rotation)")
+            renderer?.handleRotation(rotation: CGFloat(rotation), velocity: 0)
+            gesture.rotation = 0.0 // Reset for next gesture
+        }
+        
+        @objc func handlePan(_ gesture: UIPanGestureRecognizer) {
+            guard let view = metalView else { return }
+            let translation = gesture.translation(in: view)
+            let velocity = gesture.velocity(in: view)
+            print("AR: Coordinator handlePan translation: \(translation), velocity: \(velocity)")
+            renderer?.handlePan(translation: translation, velocity: velocity)
+            gesture.setTranslation(.zero, in: view) // Reset for next gesture
         }
         
         func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldRecognizeSimultaneouslyWith otherGestureRecognizer: UIGestureRecognizer) -> Bool {

@@ -188,6 +188,10 @@ class ARSceneRenderer: NSObject, MTKViewDelegate {
         startARSession()
     }
     
+    func isARTrackingNormal() -> Bool {
+        return arSplatRenderer?.isARTrackingNormal ?? false
+    }
+    
     // MARK: - Touch Handling for AR Interaction
     
     // MARK: - Gesture Handlers
@@ -198,17 +202,21 @@ class ARSceneRenderer: NSObject, MTKViewDelegate {
             return 
         }
         
-        Self.log.info("AR tap-to-place at location: \(location.x), \(location.y), viewport: \(self.drawableSize.width)x\(self.drawableSize.height)")
-        arSplatRenderer.placeSplatAtScreenPoint(location, viewportSize: self.drawableSize)
+        // Get the view bounds in points (not pixels)
+        let viewBounds = metalKitView.bounds.size
+        
+        Self.log.info("AR tap-to-place at location: \(location.x), \(location.y), view bounds: \(viewBounds.width)x\(viewBounds.height)")
+        arSplatRenderer.placeSplatAtScreenPoint(location, viewportSize: viewBounds)
     }
     
     func handlePan(translation: CGPoint, velocity: CGPoint) {
         guard let arSplatRenderer = arSplatRenderer else { return }
         
         // Convert screen pan to world movement
-        let scale: Float = 0.001 // Scale factor for pan sensitivity
+        // Scale based on distance from camera for more intuitive movement
+        let scale: Float = 0.0005 // Reduced sensitivity for more precise control
         let deltaX = Float(translation.x) * scale
-        let deltaZ = Float(translation.y) * scale // Y translation affects Z movement
+        let deltaZ = Float(translation.y) * scale // Y translation affects Z movement (forward/back)
         
         arSplatRenderer.moveSplat(by: SIMD3<Float>(deltaX, 0, deltaZ))
     }
@@ -224,8 +232,9 @@ class ARSceneRenderer: NSObject, MTKViewDelegate {
         guard let arSplatRenderer = arSplatRenderer else { return }
         
         let angle = Float(rotation)
-        let yAxis = SIMD3<Float>(0, 1, 0) // Rotate around Y axis
+        let yAxis = SIMD3<Float>(0, 1, 0) // Rotate around Y axis (vertical)
         arSplatRenderer.rotateSplat(by: angle, axis: yAxis)
+        Self.log.info("AR: Rotating splat by \(angle) radians around Y axis")
     }
 }
 

@@ -38,6 +38,14 @@ public class ARSplatRenderer: NSObject {
     public var splatScale: Float = 0.1 // Start small for AR
     public var splatRotation: simd_quatf = simd_quatf(angle: 0, axis: SIMD3<Float>(0, 1, 0))
     private var hasBeenPlaced = false // Track if user has placed the splat
+    private var arSessionStartTime: CFTimeInterval = 0 // Track when AR session started
+    private var isWaitingForARTracking = true // Track if we're waiting for AR to stabilize
+    
+    // AR session state
+    public var isARTrackingNormal: Bool {
+        guard let frame = session.currentFrame else { return false }
+        return frame.camera.trackingState == .normal
+    }
     
     struct CompositionVertex {
         let position: SIMD2<Float>
@@ -142,25 +150,53 @@ public class ARSplatRenderer: NSObject {
         
         // Reset placement state when loading new splats
         hasBeenPlaced = false
+        isWaitingForARTracking = true
+        
+        // Reset AR session start time to give new model time to stabilize
+        arSessionStartTime = CACurrentMediaTime()
         
         // Auto-place splat in front of camera when first loaded (will be done in render loop)
     }
     
     private func autoPlaceSplatInFrontOfCamera() {
-        print("ARSplatRenderer: Auto-placing splat in front of camera...")
+        // Only try auto-placement if we're still waiting
+        guard isWaitingForARTracking else { return }
         
-        // Wait a bit for AR session to be ready
+        // Wait for AR session to be properly initialized with tracking state
         guard let frame = session.currentFrame else {
-            print("ARSplatRenderer: No AR frame available yet, will try again next frame")
             return // Don't mark as placed yet, try again next frame
         }
         
-        let cameraTransform = frame.camera.transform
-        let forward = -cameraTransform.columns.2.xyz // Camera looks down negative Z
-        splatPosition = cameraTransform.columns.3.xyz + forward * 1.5
-        splatScale = 0.1
-        hasBeenPlaced = true // Mark as placed so it stops updating
-        print("ARSplatRenderer: Auto-placed splat at \(splatPosition) with scale \(splatScale)")
+        // Give AR session at least 1 second to stabilize before auto-placing
+        let timeSinceStart = CACurrentMediaTime() - arSessionStartTime
+        guard timeSinceStart > 1.0 else {
+            return // Wait for AR session to stabilize
+        }
+        
+        // Check if camera tracking is working properly
+        switch frame.camera.trackingState {
+        case .normal:
+            // AR is tracking properly, safe to place splat
+            let cameraTransform = frame.camera.transform
+            let forward = -cameraTransform.columns.2.xyz // Camera looks down negative Z
+            splatPosition = cameraTransform.columns.3.xyz + forward * 1.5
+            splatScale = 0.1
+            hasBeenPlaced = true // Mark as placed so it stops updating
+            isWaitingForARTracking = false // Stop trying to auto-place
+            print("ARSplatRenderer: Auto-placed splat at \(splatPosition) with scale \(splatScale) after \(String(format: "%.1f", timeSinceStart))s")
+        case .limited(let reason):
+            // Only log once per second to avoid spam
+            if Int(timeSinceStart) % 2 == 0 && timeSinceStart - floor(timeSinceStart) < 0.1 {
+                print("ARSplatRenderer: AR tracking limited (\(reason)), waiting...")
+            }
+            return
+        case .notAvailable:
+            // Only log once per second
+            if Int(timeSinceStart) % 2 == 0 && timeSinceStart - floor(timeSinceStart) < 0.1 {
+                print("ARSplatRenderer: AR tracking not available, waiting...")
+            }
+            return
+        }
     }
     
     private func updateSplatPositionRelativeToCamera() {
@@ -179,6 +215,8 @@ public class ARSplatRenderer: NSObject {
         let configuration = ARWorldTrackingConfiguration()
         configuration.planeDetection = [.horizontal, .vertical]
         session.run(configuration)
+        arSessionStartTime = CACurrentMediaTime() // Record when we started the session
+        isWaitingForARTracking = true // Reset waiting state
         print("ARSplatRenderer: AR session started with configuration")
     }
     
@@ -189,143 +227,81 @@ public class ARSplatRenderer: NSObject {
     // MARK: - AR Interaction Methods
     
     public func placeSplatAtScreenPoint(_ screenPoint: CGPoint, viewportSize: CGSize) {
-        print("ARSplatRenderer: placeSplatAtScreenPoint called with \(screenPoint)")
+        print("ARSplatRenderer: placeSplatAtScreenPoint called with \(screenPoint) in viewport \(viewportSize)")
         
         guard let frame = session.currentFrame else { 
             print("ARSplatRenderer: No AR frame available for tap-to-place")
             return 
         }
         
-        print("ARSplatRenderer: AR frame available, proceeding with placement")
-        print("ARSplatRenderer: Tap-to-place at screen point: \(screenPoint) in viewport: \(viewportSize)")
+        // First try to hit test existing planes
+        let existingPlaneResults = frame.hitTest(screenPoint, types: .existingPlaneUsingExtent)
         
-        // Create raycast query for existing plane geometry
-        guard let orientation = getOrientation() else {
-            print("ARSplatRenderer: Cannot get orientation for raycast, falling back to camera placement")
-            // Fall back to placing in front of camera
-            let cameraTransform = frame.camera.transform
-            let forward = -cameraTransform.columns.2.xyz
-            splatPosition = cameraTransform.columns.3.xyz + forward * 1.0
+        if let result = existingPlaneResults.first {
+            // Place at hit location on existing plane
+            splatPosition = result.worldTransform.columns.3.xyz
             hasBeenPlaced = true
-            print("ARSplatRenderer: Placed splat in front of camera (orientation fallback) at: \(splatPosition)")
+            print("ARSplatRenderer: Placed splat on existing plane at: \(splatPosition)")
             return
         }
         
-        print("ARSplatRenderer: Got orientation: \(orientation), proceeding with raycast")
+        // Try estimated planes
+        let estimatedPlaneResults = frame.hitTest(screenPoint, types: .estimatedHorizontalPlane)
         
-        // Debug screen point conversion
-        print("ARSplatRenderer: Screen point: \(screenPoint), Viewport: \(viewportSize)")
-        
-        // Convert screen point to normalized coordinates first
-        let normalizedPoint = CGPoint(
-            x: screenPoint.x / viewportSize.width,
-            y: screenPoint.y / viewportSize.height
-        )
-        print("ARSplatRenderer: Normalized point: \(normalizedPoint)")
-        
-        // Calculate world direction
-        let worldDirection = screenPointToWorldDirection(normalizedPoint, frame: frame, viewportSize: viewportSize)
-        print("ARSplatRenderer: World direction: \(worldDirection)")
-        
-        // Try horizontal planes first (tables, floors) - most common for AR placement
-        let horizontalQuery = ARRaycastQuery(
-            origin: frame.camera.transform.columns.3.xyz,
-            direction: worldDirection,
-            allowing: .existingPlaneGeometry,
-            alignment: .horizontal
-        )
-        
-        let results = session.raycast(horizontalQuery)
-        print("ARSplatRenderer: Raycast for existing planes returned \(results.count) results")
-        
-        if let result = results.first {
-            // Place splat at the detected plane location
+        if let result = estimatedPlaneResults.first {
             splatPosition = result.worldTransform.columns.3.xyz
             hasBeenPlaced = true
-            print("ARSplatRenderer: Placed splat on detected plane at: \(splatPosition)")
-        } else {
-            // Try with estimated planes if no existing geometry found
-            let estimatedQuery = ARRaycastQuery(
-                origin: frame.camera.transform.columns.3.xyz,
-                direction: worldDirection,
-                allowing: .estimatedPlane,
-                alignment: .horizontal
-            )
-            
-            let estimatedResults = session.raycast(estimatedQuery)
-            print("ARSplatRenderer: Raycast for estimated planes returned \(estimatedResults.count) results")
-            
-            if let result = estimatedResults.first {
-                splatPosition = result.worldTransform.columns.3.xyz
-                hasBeenPlaced = true
-                print("ARSplatRenderer: Placed splat on estimated plane at: \(splatPosition)")
-            } else {
-                // Fall back to placing in front of camera
-                let cameraTransform = frame.camera.transform
-                let forward = -cameraTransform.columns.2.xyz
-                splatPosition = cameraTransform.columns.3.xyz + forward * 1.0
-                hasBeenPlaced = true
-                print("ARSplatRenderer: No plane detected, placed splat in front of camera at: \(splatPosition)")
-            }
+            print("ARSplatRenderer: Placed splat on estimated plane at: \(splatPosition)")
+            return
         }
+        
+        // Try feature points as last resort
+        let featurePointResults = frame.hitTest(screenPoint, types: .featurePoint)
+        
+        if let result = featurePointResults.first {
+            splatPosition = result.worldTransform.columns.3.xyz
+            hasBeenPlaced = true
+            print("ARSplatRenderer: Placed splat on feature point at: \(splatPosition)")
+            return
+        }
+        
+        // If all else fails, place at a fixed distance in front of the camera
+        print("ARSplatRenderer: No AR hit test results, placing in front of camera")
+        let cameraTransform = frame.camera.transform
+        let forward = -cameraTransform.columns.2.xyz
+        splatPosition = cameraTransform.columns.3.xyz + forward * 1.5
+        hasBeenPlaced = true
+        print("ARSplatRenderer: Placed splat in front of camera at: \(splatPosition)")
     }
-    
     public func scaleSplat(factor: Float) {
         splatScale = max(0.1, min(10.0, splatScale * factor)) // Clamp between 0.1x and 10x
         print("ARSplatRenderer: Scaled splat to: \(splatScale)")
     }
     
     public func moveSplat(by delta: SIMD3<Float>) {
-        splatPosition += delta
-        print("ARSplatRenderer: Moved splat to: \(splatPosition)")
+        // Transform delta relative to camera orientation for more intuitive movement
+        guard let frame = session.currentFrame else {
+            splatPosition += delta
+            return
+        }
+        
+        let cameraTransform = frame.camera.transform
+        let right = cameraTransform.columns.0.xyz // Camera right vector
+        let up = cameraTransform.columns.1.xyz // Camera up vector
+        let forward = -cameraTransform.columns.2.xyz // Camera forward vector
+        
+        // Apply movement relative to camera orientation
+        let worldDelta = right * delta.x + up * delta.y + forward * delta.z
+        splatPosition += worldDelta
+        print("ARSplatRenderer: Moved splat by \(delta) in camera space, world delta: \(worldDelta), new position: \(splatPosition)")
     }
     
     public func rotateSplat(by angle: Float, axis: SIMD3<Float>) {
         let rotation = simd_quatf(angle: angle, axis: normalize(axis))
         splatRotation = simd_mul(rotation, splatRotation)
-        print("ARSplatRenderer: Rotated splat")
+        print("ARSplatRenderer: Rotated splat by \(angle) radians around \(axis)")
     }
     
-    private func screenPointToWorldDirection(_ normalizedPoint: CGPoint, frame: ARFrame, viewportSize: CGSize) -> SIMD3<Float> {
-        guard let orientation = getOrientation() else {
-            return SIMD3<Float>(0, 0, -1)
-        }
-        
-        // Convert to camera coordinates
-        let intrinsics = frame.camera.intrinsics
-        let imageResolution = frame.camera.imageResolution
-        
-        // Account for display transform
-        let displayTransform = frame.displayTransform(for: orientation, viewportSize: viewportSize)
-        let transformedPoint = normalizedPoint.applying(displayTransform.inverted())
-        
-        // Convert to camera pixel coordinates
-        let pixelX = Float(transformedPoint.x) * Float(imageResolution.width)
-        let pixelY = Float(transformedPoint.y) * Float(imageResolution.height)
-        
-        // Unproject to camera space
-        let fx = intrinsics[0][0]
-        let fy = intrinsics[1][1]
-        let cx = intrinsics[2][0]
-        let cy = intrinsics[2][1]
-        
-        let x = (pixelX - cx) / fx
-        let y = (pixelY - cy) / fy
-        let z: Float = -1.0 // Camera looks down negative Z
-        
-        // Transform to world space
-        let cameraDirection = SIMD3<Float>(x, y, z)
-        let cameraTransform = frame.camera.transform
-        let worldDirection = cameraTransform.upperLeft3x3 * cameraDirection
-        
-        return normalize(worldDirection)
-    }
-    
-    private func getOrientation() -> UIInterfaceOrientation? {
-        return UIApplication.shared.connectedScenes
-            .compactMap { $0 as? UIWindowScene }
-            .first?.interfaceOrientation
-    }
     
     public func render(to drawable: CAMetalDrawable, viewportSize: CGSize) throws {
         // Update viewport size if needed
@@ -363,12 +339,15 @@ public class ARSplatRenderer: NSObject {
                 autoPlaceSplatInFrontOfCamera()
             }
             
-            // Removed excessive per-frame logging
-            
-            // Render actual splats
-            try renderSplatsToTexture(contentTexture, commandBuffer: commandBuffer)
+            // Only render splats if they've been placed (either auto or manually)
+            if hasBeenPlaced {
+                // Render actual splats
+                try renderSplatsToTexture(contentTexture, commandBuffer: commandBuffer)
+            } else {
+                // Clear content texture while waiting for placement
+                clearTexture(contentTexture, commandBuffer: commandBuffer)
+            }
         } else {
-            print("ARSplatRenderer: No splats loaded, clearing content texture")
             // Clear content texture if no splats
             clearTexture(contentTexture, commandBuffer: commandBuffer)
         }
