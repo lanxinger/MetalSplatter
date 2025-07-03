@@ -40,6 +40,10 @@ public class ARSplatRenderer: NSObject {
         return frame.camera.trackingState == .normal
     }
     
+    public func isWaitingForSurfaceDetection() -> Bool {
+        return isWaitingForARTracking && !hasBeenPlaced && splatRenderer.splatCount > 0
+    }
+    
     // Note: Removed CompositionVertex struct for single-pass rendering
     
     public init(device: MTLDevice,
@@ -139,23 +143,46 @@ public class ARSplatRenderer: NSObject {
             return // Don't mark as placed yet, try again next frame
         }
         
-        // Give AR session at least 1 second to stabilize before auto-placing
+        // Give AR session more time to detect surfaces before auto-placing
         let timeSinceStart = CACurrentMediaTime() - arSessionStartTime
-        guard timeSinceStart > 1.0 else {
-            return // Wait for AR session to stabilize
+        guard timeSinceStart > 3.0 else {
+            return // Wait for AR session to stabilize and detect surfaces
         }
         
         // Check if camera tracking is working properly
         switch frame.camera.trackingState {
         case .normal:
-            // AR is tracking properly, safe to place splat
-            let cameraTransform = frame.camera.transform
-            let forward = -cameraTransform.columns.2.xyz // Camera looks down negative Z
-            splatPosition = cameraTransform.columns.3.xyz + forward * 1.5
-            splatScale = 0.1
-            hasBeenPlaced = true // Mark as placed so it stops updating
-            isWaitingForARTracking = false // Stop trying to auto-place
-            print("ARSplatRenderer: Auto-placed splat at \(splatPosition) with scale \(splatScale) after \(String(format: "%.1f", timeSinceStart))s")
+            // AR is tracking properly, but check if we have detected surfaces
+            let detectedAnchors = session.currentFrame?.anchors.filter { $0 is ARPlaneAnchor } ?? []
+            
+            if detectedAnchors.isEmpty && timeSinceStart < 10.0 {
+                // No planes detected yet, wait longer (up to 10 seconds)
+                if Int(timeSinceStart) % 2 == 0 && timeSinceStart - floor(timeSinceStart) < 0.1 {
+                    print("ARSplatRenderer: Waiting for surface detection... (\(String(format: "%.1f", timeSinceStart))s)")
+                }
+                return
+            }
+            
+            // Try to auto-place on a detected surface
+            if let placementPosition = findAutoPlacementPosition(frame: frame) {
+                splatPosition = placementPosition
+                splatScale = 0.1
+                hasBeenPlaced = true
+                isWaitingForARTracking = false
+                print("ARSplatRenderer: ✅ Auto-placed splat on detected surface at \(splatPosition) with scale \(splatScale) after \(String(format: "%.1f", timeSinceStart))s")
+            } else if timeSinceStart > 10.0 {
+                // After 10 seconds, fall back to fixed distance even without surface detection
+                let cameraTransform = frame.camera.transform
+                let forward = -cameraTransform.columns.2.xyz // Camera looks down negative Z
+                splatPosition = cameraTransform.columns.3.xyz + forward * 1.5
+                splatScale = 0.1
+                hasBeenPlaced = true
+                isWaitingForARTracking = false
+                print("ARSplatRenderer: ⚠️ Timeout: No surface detected after 10s, placed at fixed distance \(splatPosition)")
+            } else {
+                // Still waiting for better surface detection
+                return
+            }
         case .limited(let reason):
             // Only log once per second to avoid spam
             if Int(timeSinceStart) % 2 == 0 && timeSinceStart - floor(timeSinceStart) < 0.1 {
@@ -183,7 +210,7 @@ public class ARSplatRenderer: NSObject {
     }
     
     public func startARSession() {
-        print("ARSplatRenderer: Starting AR session...")
+        print("ARSplatRenderer: Starting AR session (hasBeenPlaced=\(hasBeenPlaced), isWaitingForARTracking=\(isWaitingForARTracking))...")
         let configuration = ARWorldTrackingConfiguration()
         
         // Enable all plane detection for maximum surface coverage
@@ -218,6 +245,7 @@ public class ARSplatRenderer: NSObject {
         session.run(configuration, options: [.resetTracking, .removeExistingAnchors])
         arSessionStartTime = CACurrentMediaTime() // Record when we started the session
         isWaitingForARTracking = true // Reset waiting state
+        hasBeenPlaced = false // Allow auto-placement to happen again
         
         print("ARSplatRenderer: AR session started with optimized configuration")
         print("ARSplatRenderer: - Plane detection: horizontal + vertical")
@@ -227,7 +255,20 @@ public class ARSplatRenderer: NSObject {
     }
     
     public func stopARSession() {
+        print("ARSplatRenderer: Stopping AR session and resetting state")
         session.pause()
+        
+        // Reset placement state so auto-placement can happen again
+        hasBeenPlaced = false
+        isWaitingForARTracking = true
+        
+        // Reset session start time for next session
+        arSessionStartTime = 0
+        
+        // Clear any cached AR textures in the background renderer
+        arBackgroundRenderer.clearCachedTextures()
+        
+        print("ARSplatRenderer: AR session stopped and state reset")
     }
     
     // MARK: - AR Interaction Methods
@@ -252,9 +293,13 @@ public class ARSplatRenderer: NSObject {
         var results = session.raycast(raycastQuery)
         
         if let result = results.first {
-            splatPosition = result.worldTransform.columns.3.xyz
+            // Offset the splat slightly above the surface to avoid intersection
+            let surfacePosition = result.worldTransform.columns.3.xyz
+            let surfaceNormal = result.worldTransform.columns.1.xyz // Y column is up vector
+            let offsetDistance: Float = max(0.005, splatScale * 0.3) // Minimum 5mm or 30% of splat size
+            splatPosition = surfacePosition + normalize(surfaceNormal) * offsetDistance
             hasBeenPlaced = true
-            print("ARSplatRenderer: ✅ Placed splat on existing horizontal plane at: \(splatPosition)")
+            print("ARSplatRenderer: ✅ Placed splat on existing horizontal plane at: \(splatPosition) (offset: \(offsetDistance))")
             return
         }
         
@@ -269,9 +314,13 @@ public class ARSplatRenderer: NSObject {
         results = session.raycast(raycastQuery)
         
         if let result = results.first {
-            splatPosition = result.worldTransform.columns.3.xyz
+            // Offset the splat slightly away from the vertical surface
+            let surfacePosition = result.worldTransform.columns.3.xyz
+            let surfaceNormal = result.worldTransform.columns.2.xyz // Z column is forward/normal for vertical
+            let offsetDistance: Float = max(0.005, splatScale * 0.3) // Minimum 5mm or 30% of splat size
+            splatPosition = surfacePosition + normalize(surfaceNormal) * offsetDistance
             hasBeenPlaced = true
-            print("ARSplatRenderer: ✅ Placed splat on existing vertical plane at: \(splatPosition)")
+            print("ARSplatRenderer: ✅ Placed splat on existing vertical plane at: \(splatPosition) (offset: \(offsetDistance))")
             return
         }
         
@@ -286,9 +335,13 @@ public class ARSplatRenderer: NSObject {
         results = session.raycast(raycastQuery)
         
         if let result = results.first {
-            splatPosition = result.worldTransform.columns.3.xyz
+            // Offset the splat slightly above the estimated surface
+            let surfacePosition = result.worldTransform.columns.3.xyz
+            let surfaceNormal = result.worldTransform.columns.1.xyz // Y column is up vector
+            let offsetDistance: Float = max(0.005, splatScale * 0.3) // Minimum 5mm or 30% of splat size
+            splatPosition = surfacePosition + normalize(surfaceNormal) * offsetDistance
             hasBeenPlaced = true
-            print("ARSplatRenderer: ✅ Placed splat on estimated plane at: \(splatPosition)")
+            print("ARSplatRenderer: ✅ Placed splat on estimated plane at: \(splatPosition) (offset: \(offsetDistance))")
             return
         }
         
@@ -296,9 +349,13 @@ public class ARSplatRenderer: NSObject {
         let hitTestResults = frame.hitTest(screenPoint, types: [.existingPlaneUsingExtent, .estimatedHorizontalPlane, .featurePoint])
         
         if let result = hitTestResults.first {
-            splatPosition = result.worldTransform.columns.3.xyz
+            // Offset the splat slightly above the detected surface
+            let surfacePosition = result.worldTransform.columns.3.xyz
+            let surfaceNormal = result.worldTransform.columns.1.xyz // Y column is up vector for most surfaces
+            let offsetDistance: Float = max(0.005, splatScale * 0.3) // Minimum 5mm or 30% of splat size
+            splatPosition = surfacePosition + normalize(surfaceNormal) * offsetDistance
             hasBeenPlaced = true
-            print("ARSplatRenderer: ✅ Placed splat using legacy hit test at: \(splatPosition)")
+            print("ARSplatRenderer: ✅ Placed splat using legacy hit test at: \(splatPosition) (offset: \(offsetDistance))")
             return
         }
         
@@ -365,6 +422,63 @@ public class ARSplatRenderer: NSObject {
         }
         return .portrait // fallback
     }
+    
+    private func findAutoPlacementPosition(frame: ARFrame) -> SIMD3<Float>? {
+        // Try to find a surface near the center of the screen for auto-placement
+        let cameraTransform = frame.camera.transform
+        let forward = -cameraTransform.columns.2.xyz // Camera looks down negative Z
+        
+        // Log detected planes for debugging
+        let planeAnchors = frame.anchors.compactMap { $0 as? ARPlaneAnchor }
+        print("ARSplatRenderer: Auto-placement attempting with \(planeAnchors.count) detected planes")
+        
+        // Try raycasting from camera center forward
+        let raycastQuery = ARRaycastQuery(
+            origin: cameraTransform.columns.3.xyz,
+            direction: forward,
+            allowing: .existingPlaneGeometry,
+            alignment: .horizontal
+        )
+        
+        var results = session.raycast(raycastQuery)
+        print("ARSplatRenderer: Horizontal plane raycast returned \(results.count) results")
+        
+        if let result = results.first {
+            // Found horizontal surface - place above it
+            let surfacePosition = result.worldTransform.columns.3.xyz
+            let surfaceNormal = result.worldTransform.columns.1.xyz // Y column is up vector
+            let offsetDistance: Float = max(0.005, 0.1 * 0.3) // Use initial scale for offset
+            let finalPosition = surfacePosition + normalize(surfaceNormal) * offsetDistance
+            print("ARSplatRenderer: Auto-placement found horizontal surface at \(surfacePosition), placing at \(finalPosition)")
+            return finalPosition
+        }
+        
+        // Try estimated planes if no existing geometry
+        let estimatedQuery = ARRaycastQuery(
+            origin: cameraTransform.columns.3.xyz,
+            direction: forward,
+            allowing: .estimatedPlane,
+            alignment: .horizontal
+        )
+        
+        results = session.raycast(estimatedQuery)
+        print("ARSplatRenderer: Estimated plane raycast returned \(results.count) results")
+        
+        if let result = results.first {
+            // Found estimated surface - place above it
+            let surfacePosition = result.worldTransform.columns.3.xyz
+            let surfaceNormal = result.worldTransform.columns.1.xyz // Y column is up vector
+            let offsetDistance: Float = max(0.005, 0.1 * 0.3) // Use initial scale for offset
+            let finalPosition = surfacePosition + normalize(surfaceNormal) * offsetDistance
+            print("ARSplatRenderer: Auto-placement found estimated surface at \(surfacePosition), placing at \(finalPosition)")
+            return finalPosition
+        }
+        
+        // No surface found with raycast methods
+        print("ARSplatRenderer: ⚠️ Auto-placement could not find any surfaces via raycast")
+        return nil // No surface found
+    }
+    
     public func scaleSplat(factor: Float) {
         splatScale = max(0.1, min(10.0, splatScale * factor)) // Clamp between 0.1x and 10x
         print("ARSplatRenderer: Scaled splat to: \(splatScale)")

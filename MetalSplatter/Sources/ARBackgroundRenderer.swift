@@ -149,6 +149,13 @@ public class ARBackgroundRenderer {
         updateGeometry = true
     }
     
+    public func clearCachedTextures() {
+        // Clear cached textures to prevent purple flash on restart
+        capturedImageTextureY = nil
+        capturedImageTextureCbCr = nil
+        updateGeometry = true
+    }
+    
     private func update() {
         guard let frame = session.currentFrame else { return }
         

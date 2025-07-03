@@ -32,6 +32,8 @@ struct ARContentView: View {
     @State private var permissionDenied = false
     @State private var arError: String?
     @State private var isARTrackingReady = false
+    @State private var isWaitingForSurfaceDetection = false
+    @State private var showARInstructions = false
     
     let model: ModelIdentifier?
     
@@ -59,41 +61,33 @@ struct ARContentView: View {
                     // Check AR tracking status periodically
                     if isARSessionActive, let renderer = arSceneRenderer {
                         isARTrackingReady = renderer.isARTrackingNormal()
+                        isWaitingForSurfaceDetection = renderer.isWaitingForSurfaceDetection()
                     }
                 }
             
-            // AR Controls overlay
+            // Help button overlay
             VStack {
-                // Top instruction text
-                if isARSessionActive {
-                    HStack {
-                        VStack(alignment: .leading, spacing: 4) {
-                            Text("AR Interactions:")
-                                .font(.headline)
-                                .foregroundColor(.white)
-                            Text("• Tap to place")
-                                .font(.caption)
-                                .foregroundColor(.white.opacity(0.8))
-                            Text("• Pinch to scale")
-                                .font(.caption)
-                                .foregroundColor(.white.opacity(0.8))
-                            Text("• Two-finger drag to move")
-                                .font(.caption)
-                                .foregroundColor(.white.opacity(0.8))
-                            Text("• Two-finger twist to rotate")
-                                .font(.caption)
-                                .foregroundColor(.white.opacity(0.8))
-                        }
-                        Spacer()
-                    }
-                    .padding()
-                    .background(Color.black.opacity(0.5))
-                    .cornerRadius(10)
-                    .padding()
-                    .allowsHitTesting(false) // Don't block touches to the AR view
-                }
-                
                 Spacer()
+                
+                HStack {
+                    Spacer()
+                    
+                    if isARSessionActive {
+                        Button(action: {
+                            showARInstructions = true
+                        }) {
+                            Image(systemName: "questionmark.circle.fill")
+                                .font(.title)
+                                .foregroundColor(.white)
+                                .frame(width: 50, height: 50)
+                                .background(Color.black.opacity(0.6))
+                                .clipShape(Circle())
+                                .shadow(radius: 3)
+                        }
+                        .padding(.bottom, 30)
+                        .padding(.trailing, 20)
+                    }
+                }
             }
             
             // Loading overlay while AR is initializing
@@ -111,6 +105,34 @@ struct ARContentView: View {
                             .foregroundColor(.white)
                         
                         Text("Move your device slowly to scan the environment")
+                            .font(.caption)
+                            .foregroundColor(.white.opacity(0.8))
+                            .multilineTextAlignment(.center)
+                            .padding(.horizontal)
+                    }
+                    .padding(30)
+                    .background(Color.black.opacity(0.7))
+                    .cornerRadius(20)
+                    
+                    Spacer()
+                }
+            }
+            
+            // Surface detection overlay
+            if isARSessionActive && isARTrackingReady && isWaitingForSurfaceDetection {
+                VStack {
+                    Spacer()
+                    
+                    VStack(spacing: 20) {
+                        ProgressView()
+                            .progressViewStyle(CircularProgressViewStyle(tint: .white))
+                            .scaleEffect(1.5)
+                        
+                        Text("Detecting Surfaces...")
+                            .font(.headline)
+                            .foregroundColor(.white)
+                        
+                        Text("Point your device at horizontal surfaces like tables or floors")
                             .font(.caption)
                             .foregroundColor(.white.opacity(0.8))
                             .multilineTextAlignment(.center)
@@ -172,6 +194,81 @@ struct ARContentView: View {
                     Spacer()
                 }
             }
+            
+            // AR Instructions overlay
+            if showARInstructions {
+                ZStack {
+                    // Semi-transparent background
+                    Color.black.opacity(0.6)
+                        .ignoresSafeArea()
+                        .onTapGesture {
+                            showARInstructions = false
+                        }
+                    
+                    VStack {
+                        Spacer()
+                        
+                        VStack(spacing: 16) {
+                            HStack {
+                                Text("AR Interactions")
+                                    .font(.headline)
+                                    .foregroundColor(.white)
+                                
+                                Spacer()
+                                
+                                Button(action: {
+                                    showARInstructions = false
+                                }) {
+                                    Image(systemName: "xmark.circle.fill")
+                                        .font(.title3)
+                                        .foregroundColor(.white.opacity(0.8))
+                                }
+                            }
+                            
+                            VStack(alignment: .leading, spacing: 8) {
+                                HStack {
+                                    Image(systemName: "hand.tap")
+                                        .foregroundColor(.white.opacity(0.8))
+                                        .frame(width: 20)
+                                    Text("Tap to place splat")
+                                        .foregroundColor(.white)
+                                }
+                                
+                                HStack {
+                                    Image(systemName: "hand.pinch")
+                                        .foregroundColor(.white.opacity(0.8))
+                                        .frame(width: 20)
+                                    Text("Pinch to scale")
+                                        .foregroundColor(.white)
+                                }
+                                
+                                HStack {
+                                    Image(systemName: "hand.draw")
+                                        .foregroundColor(.white.opacity(0.8))
+                                        .frame(width: 20)
+                                    Text("Two-finger drag to move")
+                                        .foregroundColor(.white)
+                                }
+                                
+                                HStack {
+                                    Image(systemName: "rotate.3d")
+                                        .foregroundColor(.white.opacity(0.8))
+                                        .frame(width: 20)
+                                    Text("Two-finger twist to rotate")
+                                        .foregroundColor(.white)
+                                }
+                            }
+                            .padding(.vertical, 8)
+                        }
+                        .padding(24)
+                        .background(Color.black.opacity(0.8))
+                        .cornerRadius(16)
+                        .padding(.horizontal, 20)
+                        
+                        Spacer()
+                    }
+                }
+            }
         }
         .navigationTitle("AR Splats")
         .navigationBarTitleDisplayMode(.inline)
@@ -187,6 +284,12 @@ struct ARContentView: View {
             arSceneRenderer?.stopARSession()
             isARSessionActive = false
             isARTrackingReady = false
+            isWaitingForSurfaceDetection = false
+            showARInstructions = false
+            // Clear any error states for clean restart
+            arError = nil
+            // Clear the renderer reference to force complete cleanup
+            arSceneRenderer = nil
         }
         .alert("Camera Permission Required", isPresented: $showingPermissionAlert) {
             Button("Cancel", role: .cancel) {
@@ -210,14 +313,9 @@ struct ARContentView: View {
         switch AVCaptureDevice.authorizationStatus(for: .video) {
         case .authorized:
             print("AR: Camera permission already granted")
-            // Permission already granted - start AR session if renderer is ready
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-                if self.arSceneRenderer != nil && !self.isARSessionActive {
-                    print("AR: Starting AR session after view appeared with existing permissions")
-                    self.arSceneRenderer?.startARSession()
-                    self.isARSessionActive = true
-                }
-            }
+            // Permission already granted - wait for renderer to be ready
+            // Don't start AR session here, let the renderer ready notification handle it
+            print("AR: Will wait for renderer to be ready before starting AR session")
         case .notDetermined:
             print("AR: Camera permission not determined, requesting...")
             requestCameraPermission()
@@ -261,7 +359,7 @@ struct ARMetalKitView: UIViewRepresentable {
     @Binding var isARActive: Bool
     
     func makeUIView(context: Context) -> MTKView {
-        print("AR: Creating MTKView...")
+        print("AR: Creating MTKView - this should happen when entering AR view")
         let metalKitView = MTKView()
         metalKitView.device = MTLCreateSystemDefaultDevice()
         metalKitView.backgroundColor = UIColor.clear
@@ -269,6 +367,7 @@ struct ARMetalKitView: UIViewRepresentable {
         
         print("AR: Metal device: \(metalKitView.device?.name ?? "nil")")
         
+        // Create fresh renderer each time view is made
         guard let renderer = ARSceneRenderer(metalKitView) else {
             print("AR: Failed to create ARSceneRenderer!")
             return metalKitView

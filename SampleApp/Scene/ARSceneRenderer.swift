@@ -192,6 +192,10 @@ class ARSceneRenderer: NSObject, MTKViewDelegate {
         return arSplatRenderer?.isARTrackingNormal ?? false
     }
     
+    func isWaitingForSurfaceDetection() -> Bool {
+        return arSplatRenderer?.isWaitingForSurfaceDetection() ?? false
+    }
+    
     // MARK: - Touch Handling for AR Interaction
     
     // MARK: - Gesture Handlers
