@@ -177,7 +177,9 @@ class MetalKitSceneRenderer: NSObject, MTKViewDelegate {
         let translationMatrix = matrix4x4_translation(0.0, 0.0, Constants.modelCenterZ)
         // Turn common 3D GS PLY files rightside-up. This isn't generally meaningful, it just
         // happens to be a useful default for the most common datasets at the moment.
-        let commonUpCalibration = matrix4x4_rotation(radians: .pi, axis: SIMD3<Float>(0, 0, 1))
+        // Skip this rotation for SOGS files which are already correctly oriented
+        let isSOGS = model?.description.contains("meta.json") ?? false
+        let commonUpCalibration = isSOGS ? matrix_identity_float4x4 : matrix4x4_rotation(radians: .pi, axis: SIMD3<Float>(0, 0, 1))
 
         let viewport = MTLViewport(originX: 0, originY: 0, width: drawableSize.width, height: drawableSize.height, znear: 0, zfar: 1)
 

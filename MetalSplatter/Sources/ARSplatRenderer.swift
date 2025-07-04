@@ -28,7 +28,7 @@ public class ARSplatRenderer: NSObject {
     
     // Splat transform properties for AR interaction
     public var splatPosition: SIMD3<Float> = SIMD3<Float>(0, 0, -1.5) // 1.5 meters in front of camera
-    public var splatScale: Float = 0.1 // Start small for AR
+    public var splatScale: Float = 1.0 // Default scale for properly sized models
     public var splatRotation: simd_quatf = simd_quatf(angle: 0, axis: SIMD3<Float>(0, 1, 0))
     private var hasBeenPlaced = false // Track if user has placed the splat
     private var arSessionStartTime: CFTimeInterval = 0 // Track when AR session started
@@ -166,7 +166,7 @@ public class ARSplatRenderer: NSObject {
             // Try to auto-place on a detected surface
             if let placementPosition = findAutoPlacementPosition(frame: frame) {
                 splatPosition = placementPosition
-                splatScale = 0.1
+                splatScale = 1.0
                 hasBeenPlaced = true
                 isWaitingForARTracking = false
                 print("ARSplatRenderer: ✅ Auto-placed splat on detected surface at \(splatPosition) with scale \(splatScale) after \(String(format: "%.1f", timeSinceStart))s")
@@ -175,7 +175,7 @@ public class ARSplatRenderer: NSObject {
                 let cameraTransform = frame.camera.transform
                 let forward = -cameraTransform.columns.2.xyz // Camera looks down negative Z
                 splatPosition = cameraTransform.columns.3.xyz + forward * 1.5
-                splatScale = 0.1
+                splatScale = 1.0
                 hasBeenPlaced = true
                 isWaitingForARTracking = false
                 print("ARSplatRenderer: ⚠️ Timeout: No surface detected after 10s, placed at fixed distance \(splatPosition)")
@@ -480,7 +480,7 @@ public class ARSplatRenderer: NSObject {
     }
     
     public func scaleSplat(factor: Float) {
-        splatScale = max(0.1, min(10.0, splatScale * factor)) // Clamp between 0.1x and 10x
+        splatScale = max(0.01, min(10.0, splatScale * factor)) // Clamp between 0.01x and 10x
         print("ARSplatRenderer: Scaled splat to: \(splatScale)")
     }
     
