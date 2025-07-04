@@ -34,6 +34,9 @@ public class ARSplatRenderer: NSObject {
     private var arSessionStartTime: CFTimeInterval = 0 // Track when AR session started
     private var isWaitingForARTracking = true // Track if we're waiting for AR to stabilize
     
+    // Track the loaded file URL for coordinate calibration
+    private var loadedFileURL: URL?
+    
     // AR session state
     public var isARTrackingNormal: Bool {
         guard let frame = session.currentFrame else { return false }
@@ -123,6 +126,9 @@ public class ARSplatRenderer: NSObject {
     public func read(from url: URL) async throws {
         try await splatRenderer.read(from: url)
         print("ARSplatRenderer: Loaded \(splatRenderer.splatCount) splats from \(url.lastPathComponent)")
+        
+        // Store the file URL for coordinate calibration
+        loadedFileURL = url
         
         // Reset placement state when loading new splats
         hasBeenPlaced = false
@@ -293,10 +299,10 @@ public class ARSplatRenderer: NSObject {
         var results = session.raycast(raycastQuery)
         
         if let result = results.first {
-            // Offset the splat slightly above the surface to avoid intersection
+            // Place the splat directly on the surface with minimal offset to avoid Z-fighting
             let surfacePosition = result.worldTransform.columns.3.xyz
             let surfaceNormal = result.worldTransform.columns.1.xyz // Y column is up vector
-            let offsetDistance: Float = max(0.005, splatScale * 0.3) // Minimum 5mm or 30% of splat size
+            let offsetDistance: Float = 0.001 // Minimal 1mm offset to avoid Z-fighting
             splatPosition = surfacePosition + normalize(surfaceNormal) * offsetDistance
             hasBeenPlaced = true
             print("ARSplatRenderer: ✅ Placed splat on existing horizontal plane at: \(splatPosition) (offset: \(offsetDistance))")
@@ -314,10 +320,10 @@ public class ARSplatRenderer: NSObject {
         results = session.raycast(raycastQuery)
         
         if let result = results.first {
-            // Offset the splat slightly away from the vertical surface
+            // Place the splat directly on the vertical surface with minimal offset
             let surfacePosition = result.worldTransform.columns.3.xyz
             let surfaceNormal = result.worldTransform.columns.2.xyz // Z column is forward/normal for vertical
-            let offsetDistance: Float = max(0.005, splatScale * 0.3) // Minimum 5mm or 30% of splat size
+            let offsetDistance: Float = 0.001 // Minimal 1mm offset to avoid Z-fighting
             splatPosition = surfacePosition + normalize(surfaceNormal) * offsetDistance
             hasBeenPlaced = true
             print("ARSplatRenderer: ✅ Placed splat on existing vertical plane at: \(splatPosition) (offset: \(offsetDistance))")
@@ -335,10 +341,10 @@ public class ARSplatRenderer: NSObject {
         results = session.raycast(raycastQuery)
         
         if let result = results.first {
-            // Offset the splat slightly above the estimated surface
+            // Place the splat directly on the estimated surface with minimal offset
             let surfacePosition = result.worldTransform.columns.3.xyz
             let surfaceNormal = result.worldTransform.columns.1.xyz // Y column is up vector
-            let offsetDistance: Float = max(0.005, splatScale * 0.3) // Minimum 5mm or 30% of splat size
+            let offsetDistance: Float = 0.001 // Minimal 1mm offset to avoid Z-fighting
             splatPosition = surfacePosition + normalize(surfaceNormal) * offsetDistance
             hasBeenPlaced = true
             print("ARSplatRenderer: ✅ Placed splat on estimated plane at: \(splatPosition) (offset: \(offsetDistance))")
@@ -349,10 +355,10 @@ public class ARSplatRenderer: NSObject {
         let hitTestResults = frame.hitTest(screenPoint, types: [.existingPlaneUsingExtent, .estimatedHorizontalPlane, .featurePoint])
         
         if let result = hitTestResults.first {
-            // Offset the splat slightly above the detected surface
+            // Place the splat directly on the detected surface with minimal offset
             let surfacePosition = result.worldTransform.columns.3.xyz
             let surfaceNormal = result.worldTransform.columns.1.xyz // Y column is up vector for most surfaces
-            let offsetDistance: Float = max(0.005, splatScale * 0.3) // Minimum 5mm or 30% of splat size
+            let offsetDistance: Float = 0.001 // Minimal 1mm offset to avoid Z-fighting
             splatPosition = surfacePosition + normalize(surfaceNormal) * offsetDistance
             hasBeenPlaced = true
             print("ARSplatRenderer: ✅ Placed splat using legacy hit test at: \(splatPosition) (offset: \(offsetDistance))")
@@ -444,10 +450,10 @@ public class ARSplatRenderer: NSObject {
         print("ARSplatRenderer: Horizontal plane raycast returned \(results.count) results")
         
         if let result = results.first {
-            // Found horizontal surface - place above it
+            // Found horizontal surface - place directly on it
             let surfacePosition = result.worldTransform.columns.3.xyz
             let surfaceNormal = result.worldTransform.columns.1.xyz // Y column is up vector
-            let offsetDistance: Float = max(0.005, 0.1 * 0.3) // Use initial scale for offset
+            let offsetDistance: Float = 0.001 // Minimal 1mm offset to avoid Z-fighting
             let finalPosition = surfacePosition + normalize(surfaceNormal) * offsetDistance
             print("ARSplatRenderer: Auto-placement found horizontal surface at \(surfacePosition), placing at \(finalPosition)")
             return finalPosition
@@ -465,10 +471,10 @@ public class ARSplatRenderer: NSObject {
         print("ARSplatRenderer: Estimated plane raycast returned \(results.count) results")
         
         if let result = results.first {
-            // Found estimated surface - place above it
+            // Found estimated surface - place directly on it
             let surfacePosition = result.worldTransform.columns.3.xyz
             let surfaceNormal = result.worldTransform.columns.1.xyz // Y column is up vector
-            let offsetDistance: Float = max(0.005, 0.1 * 0.3) // Use initial scale for offset
+            let offsetDistance: Float = 0.001 // Minimal 1mm offset to avoid Z-fighting
             let finalPosition = surfacePosition + normalize(surfaceNormal) * offsetDistance
             print("ARSplatRenderer: Auto-placement found estimated surface at \(surfacePosition), placing at \(finalPosition)")
             return finalPosition
@@ -593,6 +599,7 @@ public class ARSplatRenderer: NSObject {
         let scaleMatrix = matrix4x4_scale(splatScale, splatScale, splatScale)
         
         // Combine transformations: Translation * Rotation * Scale
+        // Note: AR coordinate system doesn't need the same calibration as MetalKitSceneRenderer
         let modelMatrix = translationMatrix * rotationMatrix * scaleMatrix
         
         // Apply AR camera view matrix to the transformed splat

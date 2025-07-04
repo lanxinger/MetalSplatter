@@ -197,12 +197,22 @@ class MetalKitSceneRenderer: NSObject, MTKViewDelegate {
         let panMatrix = matrix4x4_translation(translation.x, translation.y, 0)
         let scaleMatrix = matrix4x4_scale(modelScale, modelScale, modelScale)
         let translationMatrix = matrix4x4_translation(0.0, 0.0, Constants.modelCenterZ)
-        // Turn common 3D GS PLY files rightside-up. This isn't generally meaningful, it just
-        // happens to be a useful default for the most common datasets at the moment.
-        // Skip this rotation for SOGS files which are already correctly oriented
+        // Coordinate system calibration based on file format
         let modelDescription = model?.description ?? ""
         let isSOGS = modelDescription.contains("meta.json") || modelDescription.contains(".zip")
-        let commonUpCalibration = isSOGS ? matrix_identity_float4x4 : matrix4x4_rotation(radians: .pi, axis: SIMD3<Float>(0, 0, 1))
+        let isSPZ = modelDescription.contains(".spz") || modelDescription.contains(".spx")
+        
+        // SPZ files are already correctly oriented like SOGS files
+        // Only PLY files need the 180° rotation to be right-side up
+        let commonUpCalibration: simd_float4x4
+        if isSOGS || isSPZ {
+            commonUpCalibration = matrix_identity_float4x4 // No rotation for SOGS and SPZ
+        } else {
+            commonUpCalibration = matrix4x4_rotation(radians: .pi, axis: SIMD3<Float>(0, 0, 1)) // 180° for PLY
+        }
+        
+        // Debug: Log coordinate calibration decision
+        print("MetalKitSceneRenderer: model='\(modelDescription)', isSOGS=\(isSOGS), isSPZ=\(isSPZ), applying180°=\(!isSOGS && !isSPZ)")
 
         let viewport = MTLViewport(originX: 0, originY: 0, width: drawableSize.width, height: drawableSize.height, znear: 0, zfar: 1)
 
