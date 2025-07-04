@@ -136,54 +136,79 @@ public class SplatSOGSSceneReader: SplatSceneReader {
         
         // Try multiple approaches for finding the file on iOS File Provider
         var fileURL = baseURL.appendingPathComponent(filename)
-        var fileExists = false
+        var fileData: Data?
         
-        // First, try accessing the parent directory with security scoped resource
-        let shouldStopAccessingParent = baseURL.startAccessingSecurityScopedResource()
-        defer {
-            if shouldStopAccessingParent {
-                baseURL.stopAccessingSecurityScopedResource()
-            }
-        }
+        // List all approaches we'll try
+        let urlsToTry = [
+            baseURL.appendingPathComponent(filename),
+            metaURL.deletingLastPathComponent().appendingPathComponent(filename)
+        ]
         
-        // Check if file exists with parent directory access
-        fileExists = FileManager.default.fileExists(atPath: fileURL.path)
-        
-        if !fileExists {
-            // Try with the metaURL's parent directory (in case baseURL is wrong)
-            let metaParent = metaURL.deletingLastPathComponent()
-            fileURL = metaParent.appendingPathComponent(filename)
+        // Try each URL with proper security scoped resource handling
+        for tryURL in urlsToTry {
+            print("SplatSOGSSceneReader: Trying URL: \(tryURL.path)")
             
-            let shouldStopAccessingMeta = metaParent.startAccessingSecurityScopedResource()
+            // First start accessing the parent directory
+            let parentURL = tryURL.deletingLastPathComponent()
+            let parentAccess = parentURL.startAccessingSecurityScopedResource()
             defer {
-                if shouldStopAccessingMeta {
-                    metaParent.stopAccessingSecurityScopedResource()
+                if parentAccess {
+                    parentURL.stopAccessingSecurityScopedResource()
                 }
             }
             
-            fileExists = FileManager.default.fileExists(atPath: fileURL.path)
+            // Then try to access the file itself
+            let fileAccess = tryURL.startAccessingSecurityScopedResource()
+            defer {
+                if fileAccess {
+                    tryURL.stopAccessingSecurityScopedResource()
+                }
+            }
+            
+            // Check if file exists with enhanced access
+            if FileManager.default.fileExists(atPath: tryURL.path) {
+                print("SplatSOGSSceneReader: File exists at: \(tryURL.path)")
+                
+                do {
+                    // Try to read the file data
+                    fileData = try Data(contentsOf: tryURL)
+                    fileURL = tryURL
+                    print("SplatSOGSSceneReader: Successfully loaded \(fileData!.count) bytes from \(filename)")
+                    break
+                } catch {
+                    print("SplatSOGSSceneReader: Failed to read file at \(tryURL.path): \(error)")
+                    // Continue to next URL
+                }
+            } else {
+                print("SplatSOGSSceneReader: File does not exist at: \(tryURL.path)")
+            }
         }
         
-        print("SplatSOGSSceneReader: Full path: \(fileURL.path)")
-        print("SplatSOGSSceneReader: File exists: \(fileExists)")
-        
-        guard fileExists else {
-            print("SplatSOGSSceneReader: WebP file does not exist: \(fileURL.path)")
+        guard let webpData = fileData else {
+            print("SplatSOGSSceneReader: WebP file not found: \(filename)")
             print("SplatSOGSSceneReader: Tried base URL: \(baseURL.path)")
             print("SplatSOGSSceneReader: Tried meta parent: \(metaURL.deletingLastPathComponent().path)")
+            
+            // List directory contents for debugging
+            do {
+                let parentURL = baseURL
+                let parentAccess = parentURL.startAccessingSecurityScopedResource()
+                defer {
+                    if parentAccess {
+                        parentURL.stopAccessingSecurityScopedResource()
+                    }
+                }
+                
+                let contents = try FileManager.default.contentsOfDirectory(at: parentURL, includingPropertiesForKeys: nil)
+                print("SplatSOGSSceneReader: Directory contents at \(parentURL.path):")
+                for file in contents {
+                    print("  - \(file.lastPathComponent)")
+                }
+            } catch {
+                print("SplatSOGSSceneReader: Could not list directory contents: \(error)")
+            }
+            
             throw SOGSError.missingFile(filename)
-        }
-        
-        print("SplatSOGSSceneReader: File exists, loading data...")
-        
-        let webpData: Data
-        do {
-            // The security scoped access is already handled above, just read the file
-            webpData = try Data(contentsOf: fileURL)
-            print("SplatSOGSSceneReader: Loaded \(webpData.count) bytes from \(filename)")
-        } catch {
-            print("SplatSOGSSceneReader: Failed to read file \(filename): \(error)")
-            throw SOGSError.missingFile("Failed to read \(filename): \(error)")
         }
         
         // Validate WebP signature

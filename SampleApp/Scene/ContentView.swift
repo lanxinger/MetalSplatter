@@ -220,17 +220,19 @@ struct ContentView: View {
     }
     
     private func handleSOGSSuccess(_ metaURL: URL, folderURL: URL, hasAccess: Bool) {
-        // Keep folder access for longer since SOGS needs multiple files
-        Task {
-            try await Task.sleep(for: .seconds(60)) // Longer timeout for SOGS loading
-            if hasAccess {
-                print("Stopping security scoped access for folder")
-                folderURL.stopAccessingSecurityScopedResource()
-            }
-        }
-        
+        // For SOGS, we need to maintain folder access until the model is loaded
+        // Store the folder URL with the model identifier so the renderer can access it
         let model = ModelIdentifier.gaussianSplat(metaURL)
         lastLoadedModel = model
         openWindow(value: model)
+        
+        // Keep folder access for much longer since SOGS loading happens asynchronously
+        Task {
+            try await Task.sleep(for: .seconds(300)) // 5 minutes timeout for SOGS loading
+            if hasAccess {
+                print("Stopping security scoped access for folder after timeout")
+                folderURL.stopAccessingSecurityScopedResource()
+            }
+        }
     }
 }
