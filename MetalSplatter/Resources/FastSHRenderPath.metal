@@ -7,7 +7,7 @@ typedef struct {
     packed_half4 baseColor;      // Base color (DC term) + opacity
     packed_half3 covA;
     packed_half3 covB;
-    ushort shPaletteIndex;       // Index into SH palette (for SOGS)
+    uint shPaletteIndex;         // Index into SH palette (for SOGS)
     ushort shDegree;             // SH degree (0-3)
 } SplatSH;
 
@@ -20,12 +20,12 @@ Splat evaluateSplatWithSH(SplatSH splatSH,
     splat.covA = splatSH.covA;
     splat.covB = splatSH.covB;
     
-    // Use pre-evaluated SH color if available
-    if (splatSH.shDegree > 0 && splatSH.shPaletteIndex != 0) {
+    // Use pre-evaluated SH color if available (including degree 0)
+    if (splatSH.shPaletteIndex != 0) {
         float4 shColor = evaluatedSH[splatSH.shPaletteIndex];
         splat.color = packed_half4(half4(half3(shColor.rgb), half(splatSH.baseColor.a)));
     } else {
-        // Fall back to base color for degree 0 or invalid index
+        // Fall back to base color for invalid index
         splat.color = splatSH.baseColor;
     }
     

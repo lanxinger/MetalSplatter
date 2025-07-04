@@ -48,7 +48,7 @@ class MetalKitSceneRenderer: NSObject, MTKViewDelegate {
     var modelRenderer: (any ModelRenderer)?
     
     // Fast SH Support
-    var fastSHEnabled = true
+    var fastSHSettings = FastSHSettings()
 
     let inFlightSemaphore = DispatchSemaphore(value: Constants.maxSimultaneousRenders)
 
@@ -102,7 +102,7 @@ class MetalKitSceneRenderer: NSObject, MTKViewDelegate {
             let colorPixelFormat = metalKitView.colorPixelFormat
             let depthStencilPixelFormat = metalKitView.depthStencilPixelFormat
             let sampleCount = metalKitView.sampleCount
-            let useFastSH = fastSHEnabled
+            let useFastSH = fastSHSettings.enabled
             
             // Create and read splat entirely in nonisolated context
             let splat = try await Task.detached {
@@ -133,11 +133,32 @@ class MetalKitSceneRenderer: NSObject, MTKViewDelegate {
             
             // Configure Fast SH if using FastSHSplatRenderer
             if let fastRenderer = splat as? FastSHSplatRenderer {
-                // Configure basic fast SH settings
-                fastRenderer.fastSHConfig.enabled = true
-                fastRenderer.fastSHConfig.useTextureEvaluation = false
-                fastRenderer.fastSHConfig.updateFrequency = 1
-                print("Fast SH enabled for \(url.lastPathComponent)")
+                // Apply settings from FastSHSettings object
+                fastRenderer.fastSHConfig.enabled = fastSHSettings.enabled
+                fastRenderer.fastSHConfig.useTextureEvaluation = fastSHSettings.useTextureEvaluation
+                fastRenderer.fastSHConfig.updateFrequency = fastSHSettings.updateFrequency
+                fastRenderer.fastSHConfig.maxPaletteSize = fastSHSettings.maxPaletteSize
+                
+                // Analyze model and update settings
+                let splatCount = fastRenderer.splatCount
+                let uniqueShSets = fastRenderer.shCoefficients.count
+                let shDegree = fastRenderer.shDegree
+                
+                await MainActor.run {
+                    fastSHSettings.analyzeAndConfigure(
+                        splatCount: splatCount,
+                        uniqueShSets: uniqueShSets, 
+                        shDegree: shDegree
+                    )
+                }
+                
+                // Apply any updated settings back to renderer
+                fastRenderer.fastSHConfig.enabled = fastSHSettings.enabled
+                fastRenderer.fastSHConfig.useTextureEvaluation = fastSHSettings.useTextureEvaluation
+                fastRenderer.fastSHConfig.updateFrequency = fastSHSettings.updateFrequency
+                fastRenderer.fastSHConfig.maxPaletteSize = fastSHSettings.maxPaletteSize
+                
+                print("Fast SH configured for \(url.lastPathComponent): enabled=\(fastSHSettings.enabled), palette=\(uniqueShSets), degree=\(shDegree)")
             }
             
             if autoFitEnabled {

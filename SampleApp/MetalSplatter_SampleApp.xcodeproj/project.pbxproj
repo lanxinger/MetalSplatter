@@ -11,6 +11,7 @@
 		28BD25552E166F9700525F25 /* ARContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 28BD25532E166F9700525F25 /* ARContentView.swift */; };
 		28BD25562E166F9700525F25 /* ARSceneRenderer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 28BD25542E166F9700525F25 /* ARSceneRenderer.swift */; };
 		28BD25582E16704600525F25 /* ARSplatRenderer+ModelRenderer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 28BD25572E16704600525F25 /* ARSplatRenderer+ModelRenderer.swift */; };
+		28C237DB2E17C48000BF6F24 /* FastSHSettings.swift in Sources */ = {isa = PBXBuildFile; fileRef = 28C237DA2E17C48000BF6F24 /* FastSHSettings.swift */; };
 		610347D92B46864500693CE3 /* SampleApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 61791DF62B41551F00302B57 /* SampleApp.swift */; };
 		610347DA2B46874500693CE3 /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 61791DF72B41551F00302B57 /* ContentView.swift */; };
 		610347DB2B46875700693CE3 /* VisionSceneRenderer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 61791E0C2B41683500302B57 /* VisionSceneRenderer.swift */; };
@@ -35,6 +36,7 @@
 		28BD25532E166F9700525F25 /* ARContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ARContentView.swift; sourceTree = "<group>"; };
 		28BD25542E166F9700525F25 /* ARSceneRenderer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ARSceneRenderer.swift; sourceTree = "<group>"; };
 		28BD25572E16704600525F25 /* ARSplatRenderer+ModelRenderer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "ARSplatRenderer+ModelRenderer.swift"; sourceTree = "<group>"; };
+		28C237DA2E17C48000BF6F24 /* FastSHSettings.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FastSHSettings.swift; sourceTree = "<group>"; };
 		610347D82B46861E00693CE3 /* ContentStageConfiguration.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentStageConfiguration.swift; sourceTree = "<group>"; };
 		61791DC32B41514300302B57 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		61791DDA2B4154FB00302B57 /* SplatRenderer+ModelRenderer.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = "SplatRenderer+ModelRenderer.swift"; sourceTree = "<group>"; };
@@ -121,6 +123,7 @@
 		61E3FD792AE5CB0200032652 = {
 			isa = PBXGroup;
 			children = (
+				28C237DA2E17C48000BF6F24 /* FastSHSettings.swift */,
 				610347E22B468A1100693CE3 /* App */,
 				610347E12B468A0B00693CE3 /* Util */,
 				610347E02B468A0000693CE3 /* Scene */,
@@ -222,6 +225,7 @@
 				610347DA2B46874500693CE3 /* ContentView.swift in Sources */,
 				61791DE42B4154FB00302B57 /* SampleBoxRenderer+ModelRenderer.swift in Sources */,
 				28BD25552E166F9700525F25 /* ARContentView.swift in Sources */,
+				28C237DB2E17C48000BF6F24 /* FastSHSettings.swift in Sources */,
 				28BD25562E166F9700525F25 /* ARSceneRenderer.swift in Sources */,
 				61791DEA2B4154FB00302B57 /* MatrixMathUtil.swift in Sources */,
 				610347DB2B46875700693CE3 /* VisionSceneRenderer.swift in Sources */,

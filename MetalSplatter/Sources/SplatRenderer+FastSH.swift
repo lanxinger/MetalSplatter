@@ -34,11 +34,11 @@ extension SplatRenderer {
         var baseColor: PackedRGBHalf4      // Base color (DC term) + opacity
         var covA: PackedHalf3
         var covB: PackedHalf3
-        var shPaletteIndex: UInt16         // Index into SH palette (for SOGS)
+        var shPaletteIndex: UInt32         // Index into SH palette (for SOGS)
         var shDegree: UInt16               // SH degree (0-3)
         
         /// Convert from regular Splat + SH info
-        init(splat: Splat, shIndex: UInt16 = 0, shDegree: UInt16 = 0) {
+        init(splat: Splat, shIndex: UInt32 = 0, shDegree: UInt16 = 0) {
             self.position = splat.position
             self.baseColor = splat.color
             self.covA = splat.covA
@@ -82,7 +82,7 @@ public class FastSHSplatRenderer: SplatRenderer {
     
     // SH data storage
     public private(set) var shCoefficients: [[SIMD3<Float>]] = []
-    private var shPaletteMap: [Int: UInt16] = [:] // Maps from splat index to palette index
+    private var shPaletteMap: [Int: UInt32] = [:] // Maps from splat index to palette index
     public private(set) var shDegree: Int = 0
     
     // Extended splat buffer for SH
@@ -186,35 +186,41 @@ public class FastSHSplatRenderer: SplatRenderer {
     public func loadSplatsWithSH(_ splats: [SplatScenePoint]) async throws {
         // Extract unique SH coefficient sets and build palette
         var uniqueSHSets: [[SIMD3<Float>]] = []
-        var shSetToIndex: [[SIMD3<Float>]: UInt16] = [:]
+        var shSetToIndex: [[SIMD3<Float>]: UInt32] = [:]
         shPaletteMap.removeAll()
         
         // Determine SH degree from first splat with SH
         for splat in splats {
             if case let .sphericalHarmonic(coeffs) = splat.color, !coeffs.isEmpty {
                 shDegree = SphericalHarmonicsEvaluator.degreeFromCoefficientCount(coeffs.count)
+                print("Fast SH: Detected \(coeffs.count) coefficients, mapped to degree \(shDegree)")
                 break
             }
         }
         
         // Build palette of unique SH coefficient sets
         for (index, splat) in splats.enumerated() {
-            if case let .sphericalHarmonic(coeffs) = splat.color, coeffs.count > 1 {
+            if case let .sphericalHarmonic(coeffs) = splat.color, !coeffs.isEmpty {
                 if let paletteIndex = shSetToIndex[coeffs] {
                     shPaletteMap[index] = paletteIndex
-                } else {
-                    let newIndex = UInt16(uniqueSHSets.count)
+                } else if uniqueSHSets.count < fastSHConfig.maxPaletteSize {
+                    let newIndex = UInt32(uniqueSHSets.count)
                     uniqueSHSets.append(coeffs)
                     shSetToIndex[coeffs] = newIndex
                     shPaletteMap[index] = newIndex
                 }
+                // If we exceed maxPaletteSize, splats will use index 0 (fallback)
             }
         }
         
         // Create SH palette buffer if we have SH data
         if !uniqueSHSets.isEmpty {
-            let coeffsPerEntry = SphericalHarmonicsEvaluator.coefficientCountForDegree(shDegree)
+            // Use actual coefficient count from the data, not theoretical count
+            let actualCoeffsPerEntry = uniqueSHSets[0].count
+            let coeffsPerEntry = actualCoeffsPerEntry // Use actual data structure
             let paletteSize = uniqueSHSets.count * coeffsPerEntry * MemoryLayout<SIMD3<Float>>.stride
+            
+            print("Fast SH: Creating palette buffer - \(uniqueSHSets.count) sets × \(coeffsPerEntry) coeffs = \(paletteSize) bytes")
             
             shPaletteBuffer = device.makeBuffer(length: paletteSize, options: .storageModeShared)
             shPaletteBuffer?.label = "SH Palette Buffer"
@@ -224,8 +230,14 @@ public class FastSHSplatRenderer: SplatRenderer {
                 let contents = buffer.contents().bindMemory(to: SIMD3<Float>.self, capacity: uniqueSHSets.count * coeffsPerEntry)
                 for (setIndex, coeffSet) in uniqueSHSets.enumerated() {
                     let offset = setIndex * coeffsPerEntry
-                    for (coeffIndex, coeff) in coeffSet.enumerated() {
-                        contents[offset + coeffIndex] = coeff
+                    // Safety check: only copy available coefficients
+                    let coeffsToCopy = min(coeffSet.count, coeffsPerEntry)
+                    for coeffIndex in 0..<coeffsToCopy {
+                        contents[offset + coeffIndex] = coeffSet[coeffIndex]
+                    }
+                    // Pad with zeros if coefficient set is shorter than expected
+                    for coeffIndex in coeffsToCopy..<coeffsPerEntry {
+                        contents[offset + coeffIndex] = SIMD3<Float>(0, 0, 0)
                     }
                 }
             }
@@ -266,7 +278,10 @@ public class FastSHSplatRenderer: SplatRenderer {
         guard fastSHConfig.enabled,
               let evaluator = shEvaluator,
               let paletteBuffer = shPaletteBuffer,
-              !shCoefficients.isEmpty else { return }
+              !shCoefficients.isEmpty else { 
+            print("Fast SH evaluation skipped: enabled=\(fastSHConfig.enabled), evaluator=\(shEvaluator != nil), palette=\(shPaletteBuffer != nil), coeffs=\(!shCoefficients.isEmpty)")
+            return 
+        }
         
         // Check if we should update this frame
         framesSinceLastSHUpdate += 1
@@ -298,7 +313,15 @@ public class FastSHSplatRenderer: SplatRenderer {
                 viewDirection: viewDirection,
                 commandBuffer: commandBuffer
             )
+            print("Fast SH: Evaluated palette with \(paletteSize) entries, degree \(shDegree), buffer=\(evaluatedSHBuffer != nil)")
         }
+    }
+    
+    /// Override read method to use Fast SH loading pipeline
+    public override func read(from url: URL) async throws {
+        var newPoints = SplatMemoryBuffer()
+        try await newPoints.read(from: try AutodetectSceneReader(url))
+        try await loadSplatsWithSH(newPoints.points)
     }
     
 }
@@ -407,6 +430,11 @@ extension FastSHSplatRenderer {
             renderEncoder.setVertexTexture(texture, index: 0)
         } else if let buffer = evaluatedSHBuffer {
             renderEncoder.setVertexBuffer(buffer, offset: 0, index: 3)
+        } else {
+            // This should not happen due to the check in render(), but safety fallback
+            print("Error: Fast SH pipeline called without evaluated SH buffer")
+            renderEncoder.endEncoding()
+            return
         }
         
         // Set up viewports and draw
