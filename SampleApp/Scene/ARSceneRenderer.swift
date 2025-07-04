@@ -114,12 +114,26 @@ class ARSceneRenderer: NSObject, MTKViewDelegate {
     func startARSession() {
         guard let arSplatRenderer = arSplatRenderer else {
             Self.log.error("Cannot start AR session without a loaded splat model")
+            // Schedule a retry after a short delay
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+                guard let self = self else { return }
+                if self.arSplatRenderer != nil && !self.isARSessionActive {
+                    Self.log.info("Retrying AR session start after model load")
+                    self.startARSession()
+                }
+            }
+            return
+        }
+        
+        // Prevent duplicate starts
+        guard !isARSessionActive else {
+            Self.log.info("AR session already active, skipping start")
             return
         }
         
         arSplatRenderer.startARSession()
         isARSessionActive = true
-        Self.log.info("AR session started")
+        Self.log.info("AR session started successfully")
     }
     
     func stopARSession() {

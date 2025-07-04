@@ -43,19 +43,8 @@ struct ARContentView: View {
             ARMetalKitView(renderer: $arSceneRenderer, model: model, isARActive: $isARSessionActive)
                 .ignoresSafeArea()
                 .onReceive(NotificationCenter.default.publisher(for: .init("ARRendererReady"))) { _ in
-                    // This will be triggered when the renderer is ready
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-                        if !permissionDenied && arSceneRenderer != nil && !isARSessionActive {
-                            print("AR: Starting AR session after renderer ready")
-                            // Check camera permission again before starting
-                            if AVCaptureDevice.authorizationStatus(for: .video) == .authorized {
-                                arSceneRenderer?.startARSession()
-                                isARSessionActive = true
-                            } else {
-                                print("AR: Camera permission not available when renderer ready")
-                            }
-                        }
-                    }
+                    // Don't start AR session here - wait for model to load
+                    print("AR: Renderer ready notification received, waiting for model load")
                 }
                 .onReceive(Timer.publish(every: 0.5, on: .main, in: .common).autoconnect()) { _ in
                     // Check AR tracking status periodically
@@ -339,9 +328,8 @@ struct ARContentView: View {
                     // Try to start AR session now that we have permission
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
                         if self.arSceneRenderer != nil {
-                            print("AR: Starting AR session after permission granted")
-                            self.arSceneRenderer?.startARSession()
-                            self.isARSessionActive = true
+                            print("AR: Permission granted but waiting for model to load before starting AR session")
+                            // AR session will be started after model loads
                         }
                     }
                 } else {
@@ -394,36 +382,35 @@ struct ARMetalKitView: UIViewRepresentable {
     
     func updateUIView(_ uiView: MTKView, context: Context) {
         print("AR: updateUIView called - renderer: \(renderer != nil ? "exists" : "nil")")
+        
+        // Only proceed if renderer exists and AR is not already active
+        guard let renderer = renderer, !isARActive else { 
+            print("AR: Skipping update - renderer: \(renderer != nil), isARActive: \(isARActive)")
+            return 
+        }
+        
         Task { @MainActor in
-            if let model = model {
-                do {
-                    try await renderer?.load(model)
+            do {
+                if let model = model {
+                    print("AR: Loading model \(model)")
+                    try await renderer.load(model)
                     print("AR: Successfully loaded model \(model)")
-                    // Trigger AR session start after model load if not already active
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-                        if let renderer = self.renderer, !self.isARActive {
-                            if AVCaptureDevice.authorizationStatus(for: .video) == .authorized {
-                                print("AR: Starting AR session after model load")
-                                renderer.startARSession()
-                                self.isARActive = true
-                            }
-                        }
-                    }
-                } catch {
-                    print("AR: Failed to load model \(model): \(error)")
+                } else {
+                    print("AR: No model provided, loading sample box")
+                    try await renderer.load(.sampleBox)
+                    print("AR: Successfully loaded sample box")
                 }
-            } else {
-                print("AR: No model provided, using sample box")
-                // Still try to start AR session for sample box
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-                    if let renderer = self.renderer, !self.isARActive {
-                        if AVCaptureDevice.authorizationStatus(for: .video) == .authorized {
-                            print("AR: Starting AR session for sample box")
-                            renderer.startARSession()
-                            self.isARActive = true
-                        }
-                    }
+                
+                // Now that model is loaded, start AR session if we have permission
+                if AVCaptureDevice.authorizationStatus(for: .video) == .authorized {
+                    print("AR: Starting AR session after successful model load")
+                    renderer.startARSession()
+                    self.isARActive = true
+                } else {
+                    print("AR: Cannot start AR session - camera permission not granted")
                 }
+            } catch {
+                print("AR: Failed to load model: \(error)")
             }
         }
     }
