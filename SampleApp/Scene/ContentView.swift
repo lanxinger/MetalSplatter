@@ -73,7 +73,7 @@ struct ContentView: View {
 
             Spacer()
 
-            Button("Read Scene File") {
+            Button("Read Scene File (PLY/SPLAT/SPZ/JSON/ZIP)") {
                 isPickingFile = true
             }
             .padding()
@@ -88,7 +88,8 @@ struct ContentView: View {
                             UTType(filenameExtension: "splat")!,
                             UTType(filenameExtension: "spz")!,
                             UTType(filenameExtension: "spx")!,
-                            UTType(filenameExtension: "json")!
+                            UTType(filenameExtension: "json")!,
+                            UTType.zip
                           ]) {
                 isPickingFile = false
                 switch $0 {
@@ -107,7 +108,7 @@ struct ContentView: View {
                 }
             }
             
-            Button("Read SOGS Folder") {
+            Button("Read SOGS Folder (or use ZIP above)") {
                 isPickingSOGSFolder = true
             }
             .padding()

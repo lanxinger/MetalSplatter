@@ -1,4 +1,5 @@
 import Foundation
+import ZIPFoundation
 
 public enum SplatFileFormat {
     case ply
@@ -31,7 +32,37 @@ public enum SplatFileFormat {
             } else {
                 return nil
             }
+        case "zip":
+            // Check if this is a SOGS ZIP file by examining its contents
+            if SplatFileFormat.isSOGSZipFile(url: url) {
+                self = .sogs
+            } else {
+                return nil
+            }
         default: return nil
         }
+    }
+    
+    private static func isSOGSZipFile(url: URL) -> Bool {
+        // Check if the ZIP file contains SOGS files
+        guard let archive = Archive(url: url, accessMode: .read) else { return false }
+        
+        var hasMetaJson = false
+        var hasWebPFiles = false
+        
+        for entry in archive {
+            let filename = entry.path.lowercased()
+            if filename.hasSuffix("meta.json") {
+                hasMetaJson = true
+            } else if filename.hasSuffix(".webp") {
+                hasWebPFiles = true
+            }
+            
+            if hasMetaJson && hasWebPFiles {
+                return true
+            }
+        }
+        
+        return false
     }
 }

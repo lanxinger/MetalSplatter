@@ -33,10 +33,16 @@ public class AutodetectSceneReader: SplatSceneReader {
         case .sogs:
             print("AutodetectSceneReader: Loading as SOGS")
             do {
-                reader = try SplatSOGSSceneReader(url)
-                print("AutodetectSceneReader: Successfully created SplatSOGSSceneReader")
+                // Check if it's a ZIP file or regular SOGS folder
+                if url.pathExtension.lowercased() == "zip" {
+                    reader = try SplatSOGSZipReader(url)
+                    print("AutodetectSceneReader: Successfully created SplatSOGSZipReader")
+                } else {
+                    reader = try SplatSOGSSceneReader(url)
+                    print("AutodetectSceneReader: Successfully created SplatSOGSSceneReader")
+                }
             } catch {
-                print("AutodetectSceneReader: Failed to create SplatSOGSSceneReader: \(error)")
+                print("AutodetectSceneReader: Failed to create SOGS reader: \(error)")
                 throw Error.cannotDetermineFormat
             }
         case .spx:
