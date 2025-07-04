@@ -282,12 +282,20 @@ struct PackedGaussians {
         let posStart = index * positionBits
         
         // Verify index is in bounds for all arrays
-        guard index >= 0 && index < numPoints &&
-              start3 + 2 < colors.count &&
-              start3 + 2 < scales.count &&
-              start3 + 2 < rotations.count &&
-              index < alphas.count else {
-            print("PackedGaussians.at: Index \(index) out of bounds")
+        guard index >= 0 && index < numPoints else {
+            print("PackedGaussians.at: Index \(index) out of bounds (numPoints: \(numPoints))")
+            return result
+        }
+        
+        // Additional safety checks for array bounds
+        if start3 + 2 >= colors.count || start3 + 2 >= scales.count || 
+           start3 + 2 >= rotations.count || index >= alphas.count {
+            print("PackedGaussians.at: Array bounds issue for index \(index)")
+            print("  Colors: \(colors.count), needed: \(start3 + 3)")
+            print("  Scales: \(scales.count), needed: \(start3 + 3)")
+            print("  Rotations: \(rotations.count), needed: \(start3 + 3)")
+            print("  Alphas: \(alphas.count), needed: \(index + 1)")
+            // Return empty result rather than crashing
             return result
         }
         
@@ -575,12 +583,12 @@ struct PackedGaussians {
         
         // Extract component data (safely handling truncated files)
         // For each component, check if we have enough data and adjust if needed
-        let safePositionBytes = min(positionBytes, max(0, data.count - positionOffset))
-        let safeColorBytes = min(colorBytes, max(0, data.count - colorOffset))
-        let safeScaleBytes = min(scaleBytes, max(0, data.count - scaleOffset))
-        let safeRotationBytes = min(rotationBytes, max(0, data.count - rotationOffset))
-        let safeAlphaBytes = min(alphaBytes, max(0, data.count - alphaOffset))
-        let safeSHBytes = min(shBytes, max(0, data.count - shOffset))
+        let safePositionBytes = positionOffset < data.count ? min(positionBytes, data.count - positionOffset) : 0
+        let safeAlphaBytes = alphaOffset < data.count ? min(alphaBytes, data.count - alphaOffset) : 0
+        let safeColorBytes = colorOffset < data.count ? min(colorBytes, data.count - colorOffset) : 0
+        let safeScaleBytes = scaleOffset < data.count ? min(scaleBytes, data.count - scaleOffset) : 0
+        let safeRotationBytes = rotationOffset < data.count ? min(rotationBytes, data.count - rotationOffset) : 0
+        let safeSHBytes = shOffset < data.count ? min(shBytes, data.count - shOffset) : 0
         
         print("PackedGaussians.deserialize: Safe data sizes after truncation check:")
         print("  Positions: \(safePositionBytes)/\(positionBytes) bytes")
@@ -590,54 +598,88 @@ struct PackedGaussians {
         print("  Alphas: \(safeAlphaBytes)/\(alphaBytes) bytes")
         print("  SH: \(safeSHBytes)/\(shBytes) bytes")
         
-        // Only read the data we actually have
-        if safePositionBytes > 0 {
-            result.positions = Array(data[positionOffset..<(positionOffset + safePositionBytes)])
-        } else {
-            result.positions = []
-        }
-        
-        if safeAlphaBytes > 0 {
-            result.alphas = Array(data[alphaOffset..<(alphaOffset + safeAlphaBytes)])
-        } else {
-            result.alphas = []
-        }
-        
-        if safeColorBytes > 0 {
-            result.colors = Array(data[colorOffset..<(colorOffset + safeColorBytes)])
-        } else {
-            result.colors = []
-        }
-        
-        if safeScaleBytes > 0 {
-            result.scales = Array(data[scaleOffset..<(scaleOffset + safeScaleBytes)])
-        } else {
-            result.scales = []
-        }
-        
-        if safeRotationBytes > 0 {
-            result.rotations = Array(data[rotationOffset..<(rotationOffset + safeRotationBytes)])
-        } else {
-            result.rotations = []
-        }
-        
-        if safeSHBytes > 0 {
-            result.sh = Array(data[shOffset..<(shOffset + safeSHBytes)])
-        } else {
-            result.sh = []
+        // Only read the data we actually have, with bounds checking
+        do {
+            if safePositionBytes > 0 && positionOffset + safePositionBytes <= data.count {
+                result.positions = Array(data[positionOffset..<(positionOffset + safePositionBytes)])
+            } else {
+                result.positions = []
+                print("PackedGaussians.deserialize: Warning - Cannot read position data safely")
+            }
+            
+            if safeAlphaBytes > 0 && alphaOffset + safeAlphaBytes <= data.count {
+                result.alphas = Array(data[alphaOffset..<(alphaOffset + safeAlphaBytes)])
+            } else {
+                result.alphas = []
+                print("PackedGaussians.deserialize: Warning - Cannot read alpha data safely")
+            }
+            
+            if safeColorBytes > 0 && colorOffset + safeColorBytes <= data.count {
+                result.colors = Array(data[colorOffset..<(colorOffset + safeColorBytes)])
+            } else {
+                result.colors = []
+                print("PackedGaussians.deserialize: Warning - Cannot read color data safely")
+            }
+            
+            if safeScaleBytes > 0 && scaleOffset + safeScaleBytes <= data.count {
+                result.scales = Array(data[scaleOffset..<(scaleOffset + safeScaleBytes)])
+            } else {
+                result.scales = []
+                print("PackedGaussians.deserialize: Warning - Cannot read scale data safely")
+            }
+            
+            if safeRotationBytes > 0 && rotationOffset + safeRotationBytes <= data.count {
+                result.rotations = Array(data[rotationOffset..<(rotationOffset + safeRotationBytes)])
+            } else {
+                result.rotations = []
+                print("PackedGaussians.deserialize: Warning - Cannot read rotation data safely")
+            }
+            
+            if safeSHBytes > 0 && shOffset + safeSHBytes <= data.count {
+                result.sh = Array(data[shOffset..<(shOffset + safeSHBytes)])
+            } else {
+                result.sh = []
+                print("PackedGaussians.deserialize: Warning - Cannot read SH data safely")
+            }
+        } catch {
+            print("PackedGaussians.deserialize: Error extracting data: \(error)")
+            throw SplatFileFormatError.invalidData
         }
         
         // Update point count based on what we actually read
-        let actualPointCount = min(numPoints,
-                                  safePositionBytes / (usesFloat16 ? 6 : 9),
-                                  safeAlphaBytes,
-                                  safeColorBytes / 3,
-                                  safeScaleBytes / 3,
-                                  safeRotationBytes / 3,
-                                  safeSHBytes / (shDim * 3))
+        var constraints: [Int] = [numPoints]
+        
+        // Add constraints based on available data
+        if safePositionBytes > 0 {
+            constraints.append(safePositionBytes / (usesFloat16 ? 6 : 9))
+        }
+        if safeAlphaBytes > 0 {
+            constraints.append(safeAlphaBytes)
+        }
+        if safeColorBytes > 0 {
+            constraints.append(safeColorBytes / 3)
+        }
+        if safeScaleBytes > 0 {
+            constraints.append(safeScaleBytes / 3)
+        }
+        if safeRotationBytes > 0 {
+            constraints.append(safeRotationBytes / 3)
+        }
+        if safeSHBytes > 0 && shDim > 0 {
+            constraints.append(safeSHBytes / (shDim * 3))
+        }
+        
+        let actualPointCount = constraints.min() ?? 0
         
         print("PackedGaussians.deserialize: Adjusted point count from \(numPoints) to \(actualPointCount)")
-        result.numPoints = Int(actualPointCount)
+        
+        // Ensure we have a valid point count
+        if actualPointCount <= 0 {
+            print("PackedGaussians.deserialize: Error - Cannot determine valid point count")
+            throw SplatFileFormatError.invalidData
+        }
+        
+        result.numPoints = actualPointCount
         
         return result
     }
