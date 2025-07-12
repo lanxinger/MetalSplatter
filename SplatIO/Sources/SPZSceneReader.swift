@@ -193,11 +193,16 @@ public class SPZSceneReader: SplatSceneReader {
         let safeNumPoints = min(packedGaussians.numPoints, maxPointsToRead)
         print("SPZSceneReader: Unpacking \(safeNumPoints) points with SH degree \(packedGaussians.shDegree)")
         
+        // Determine data layout based on format
+        let positionStride = packedGaussians.usesFloat16 ? 6 : 9 // bytes per position
+        let rotationStride = packedGaussians.usesQuaternionSmallestThree ? 4 : 3 // bytes per rotation
+        let shStride = 3 // RGB components per SH coefficient
+        
         // Validate the data format matches the C++ implementation expectations
-        let positionBytesPerPoint = packedGaussians.usesFloat16 ? 6 : 9
+        let positionBytesPerPoint = positionStride
         let expectedPositionBytes = safeNumPoints * positionBytesPerPoint
         let expectedScaleBytes = safeNumPoints * 3
-        let expectedRotationBytes = safeNumPoints * 3
+        let expectedRotationBytes = safeNumPoints * rotationStride
         let expectedAlphaBytes = safeNumPoints
         let expectedColorBytes = safeNumPoints * 3
         let shDim = shDimForDegree(packedGaussians.shDegree)  // Use correct Niantic formula
@@ -221,10 +226,6 @@ public class SPZSceneReader: SplatSceneReader {
             print("SPZSceneReader: Missing essential component data")
             return results
         }
-        
-        // Determine data layout based on format
-        let positionStride = packedGaussians.usesFloat16 ? 6 : 9 // bytes per position
-        let shStride = 3 // RGB components per SH coefficient
         
         // Process in smaller batches for better memory management and parallelization
         let chunkSize = 10000
@@ -252,6 +253,7 @@ public class SPZSceneReader: SplatSceneReader {
                     chunkResults[chunkIndex] = self.processPointChunk(packedGaussians: packedGaussians,
                                                                    range: chunkRange,
                                                                    positionStride: positionStride,
+                                                                   rotationStride: rotationStride,
                                                                    shDim: shDim,
                                                                    shStride: shStride)
                     processingGroup.leave()
@@ -261,6 +263,7 @@ public class SPZSceneReader: SplatSceneReader {
                 chunkResults[chunkIndex] = self.processPointChunk(packedGaussians: packedGaussians,
                                                                range: chunkRange,
                                                                positionStride: positionStride,
+                                                               rotationStride: rotationStride,
                                                                shDim: shDim,
                                                                shStride: shStride)
                 
@@ -293,6 +296,7 @@ public class SPZSceneReader: SplatSceneReader {
     private func processPointChunk(packedGaussians: PackedGaussians, 
                                  range: Range<Int>,
                                  positionStride: Int,
+                                 rotationStride: Int,
                                  shDim: Int,
                                  shStride: Int) -> [SplatScenePoint] {
         var chunkResults = [SplatScenePoint]()
@@ -310,14 +314,14 @@ public class SPZSceneReader: SplatSceneReader {
             let posOffset = i * positionStride
             let colorOffset = i * 3
             let scaleOffset = i * 3
-            let rotOffset = i * 3
+            let rotOffset = i * rotationStride
             let shOffset = i * shDim * shStride
             
             // Check if all essential components are in bounds
             guard i < packedGaussians.alphas.count &&
                   colorOffset + 2 < packedGaussians.colors.count &&
                   scaleOffset + 2 < packedGaussians.scales.count &&
-                  rotOffset + 2 < packedGaussians.rotations.count &&
+                  rotOffset + (rotationStride - 1) < packedGaussians.rotations.count &&
                   posOffset + (positionStride - 1) < packedGaussians.positions.count else {
                 continue
             }
@@ -381,26 +385,18 @@ public class SPZSceneReader: SplatSceneReader {
                 scale = scaleBytes / 16.0 - 10.0
             }
             
-            // Extract rotation (quaternion from 3 bytes) - matches C++ reference algorithm
+            // Extract rotation using appropriate decoding method
             var rotation = simd_quatf(ix: 0, iy: 0, iz: 0, r: 1) // Default identity quaternion
-            if rotOffset + 2 < packedGaussians.rotations.count {
-                // Convert using C++ reference algorithm: load-spz.cc:325-334
-                let rotBytes = SIMD3<Float>(
-                    Float(packedGaussians.rotations[rotOffset]),
-                    Float(packedGaussians.rotations[rotOffset + 1]),
-                    Float(packedGaussians.rotations[rotOffset + 2])
-                )
-                // C++ formula: xyz = (bytes * (1.0f / 127.5f)) + Vec3f{-1, -1, -1}
-                var xyz = rotBytes * (1.0 / 127.5) + SIMD3<Float>(-1, -1, -1)
+            if rotOffset + (rotationStride - 1) < packedGaussians.rotations.count {
+                // Extract rotation bytes for this point
+                let rotData = Array(packedGaussians.rotations[rotOffset..<(rotOffset + rotationStride)])
                 
-                // Apply coordinate system conversion to rotation
-                xyz = xyz * coordinateConverter.flipQ
-                
-                // Compute w component - quaternion is normalized and w is non-negative
-                let squaredNorm = xyz.x*xyz.x + xyz.y*xyz.y + xyz.z*xyz.z
-                let w = sqrt(max(0.0, 1.0 - squaredNorm))
-                
-                rotation = simd_quatf(ix: xyz.x, iy: xyz.y, iz: xyz.z, r: w)
+                // Use appropriate unpacking function based on format
+                if packedGaussians.usesQuaternionSmallestThree {
+                    unpackQuaternionSmallestThree(&rotation, rotData, coordinateConverter)
+                } else {
+                    unpackQuaternionFirstThree(&rotation, rotData, coordinateConverter)
+                }
             }
             
             // Extract alpha (apply logit transformation)

@@ -9,7 +9,7 @@ import Metal
  */
 struct PackedGaussiansHeader {
     static let magic: UInt32 = 0x5053474e  // NGSP = Niantic gaussian splat
-    static let version: UInt32 = 2
+    static let version: UInt32 = 3
     
     var magic: UInt32 = PackedGaussiansHeader.magic
     var version: UInt32 = PackedGaussiansHeader.version
@@ -29,6 +29,7 @@ struct PackedGaussiansHeader {
     // Flags bit meanings (matching C++ implementation):
     // bit 0: antialiased (whether gaussians should be rendered with mip-splat antialiasing)
     // bit 1: usesFloat16 (whether positions are stored as float16 or fixed-point)
+    // Note: Version 3+ uses smallest-three quaternion encoding (4 bytes) instead of first-three (3 bytes)
     
     init() {}
     
@@ -61,8 +62,8 @@ struct PackedGaussiansHeader {
             throw SplatFileFormatError.invalidHeader
         }
         
-        // Validate version
-        guard version == PackedGaussiansHeader.version else {
+        // Validate version (support versions 1-3)
+        guard version >= 1 && version <= 3 else {
             throw SplatFileFormatError.unsupportedVersion
         }
         
@@ -134,7 +135,7 @@ struct PackedGaussian {
     
     init() {
         position = Array(repeating: 0, count: 9) // 3 positions × 3 bytes each for 24-bit fixed-point (or 6 bytes for float16)
-        rotation = Array(repeating: 0, count: 3)
+        rotation = Array(repeating: 0, count: 4) // 4 bytes for smallest-three quaternion encoding (version 3+)
         scale = Array(repeating: 0, count: 3)
         color = Array(repeating: 0, count: 3)
         alpha = 0
@@ -143,7 +144,7 @@ struct PackedGaussian {
         shB = Array(repeating: 0, count: 15)
     }
     
-    func unpack(usesFloat16: Bool, fractionalBits: Int) -> UnpackedGaussian {
+    func unpack(usesFloat16: Bool, usesQuaternionSmallestThree: Bool, fractionalBits: Int, converter: CoordinateConverter? = nil) -> UnpackedGaussian {
         var result = UnpackedGaussian()
         
         // Unpack position based on format
@@ -178,26 +179,14 @@ struct PackedGaussian {
             }
         }
         
-        // Unpack rotation
-        if rotation.count >= 3 {
-            // Convert back from 8-bit to normalized values
-            var xyz = SIMD3<Float>(
-                Float(rotation[0]) / 127.5 - 1.0,
-                Float(rotation[1]) / 127.5 - 1.0,
-                Float(rotation[2]) / 127.5 - 1.0
-            )
-            
-            // Normalize the vector to ensure it's valid
-            let length = simd_length(xyz)
-            if length > 0 {
-                xyz /= length
-            }
-            
-            // Reconstruct the w component
-            let w = sqrt(max(0.0, 1.0 - simd_dot(xyz, xyz)))
-            
-            // Create quaternion
-            result.rotation = simd_quatf(vector: SIMD4<Float>(xyz.x, xyz.y, xyz.z, w))
+        // Unpack rotation based on encoding type
+        let c = converter ?? CoordinateConverter.converter(from: .rub, to: .rub)
+        if usesQuaternionSmallestThree {
+            guard rotation.count >= 4 else { return result }
+            unpackQuaternionSmallestThree(&result.rotation, rotation, c)
+        } else {
+            guard rotation.count >= 3 else { return result }
+            unpackQuaternionFirstThree(&result.rotation, rotation, c)
         }
         
         // Unpack alpha using sigmoid
@@ -256,6 +245,7 @@ struct PackedGaussians {
     var shDegree: Int = 0
     var fractionalBits: Int = 0
     var antialiased: Bool = false
+    var usesQuaternionSmallestThree: Bool = true  // Version 3+ uses smallest-three encoding
     
     var positions: [UInt8] = []
     var scales: [UInt8] = []
@@ -311,10 +301,11 @@ struct PackedGaussians {
             result.scale = Array(scales[scaleStart..<scaleStart + 3])
         }
         
-        // Copy rotation bytes
-        let rotStart = start3
-        if rotStart + 3 <= rotations.count {
-            result.rotation = Array(rotations[rotStart..<rotStart + 3])
+        // Copy rotation bytes (size depends on encoding type)
+        let rotationBytes = usesQuaternionSmallestThree ? 4 : 3
+        let rotStart = index * rotationBytes
+        if rotStart + rotationBytes <= rotations.count {
+            result.rotation = Array(rotations[rotStart..<rotStart + rotationBytes])
         }
         
         // Copy alpha
@@ -505,13 +496,15 @@ struct PackedGaussians {
         let shDim = shDimForDegree(shDegree)
         // C++ reference: version 1 uses float16, version 2+ uses fixed-point with flags
         let usesFloat16 = (header.version == 1) || (header.flags & PackedGaussiansHeader.FlagUsesFloat16) != 0
+        let usesQuaternionSmallestThree = header.version >= 3
         print("PackedGaussians.deserialize: Uses Float16: \(usesFloat16) (version: \(header.version), flags: 0x\(String(format: "%02X", header.flags)))")
+        print("PackedGaussians.deserialize: Uses Smallest-Three Quaternions: \(usesQuaternionSmallestThree)")
         
         // Calculate component sizes
         let positionBytes = usesFloat16 ? (numPoints * 3 * 2) : (numPoints * 3 * 3)
         let colorBytes = numPoints * 3
         let scaleBytes = numPoints * 3
-        let rotationBytes = numPoints * 3
+        let rotationBytes = numPoints * (usesQuaternionSmallestThree ? 4 : 3)
         let alphaBytes = numPoints
         let shBytes = numPoints * shDim * 3
         
@@ -580,6 +573,7 @@ struct PackedGaussians {
         result.shDegree = Int(header.shDegree)
         result.fractionalBits = Int(header.fractionalBits)
         result.antialiased = (header.flags & PackedGaussiansHeader.FlagAntialiased) != 0
+        result.usesQuaternionSmallestThree = usesQuaternionSmallestThree
         
         // Extract component data (safely handling truncated files)
         // For each component, check if we have enough data and adjust if needed
@@ -802,4 +796,92 @@ func shDegreeForDim(_ dim: Int) -> Int {
     if dim < 8 { return 1 }
     if dim < 15 { return 2 }
     return 3
+}
+
+// MARK: - Quaternion Unpacking Functions
+
+/// Unpacks quaternion using first-three encoding from 3 bytes  
+func unpackQuaternionFirstThree(_ result: inout simd_quatf, _ rotation: [UInt8], _ c: CoordinateConverter) {
+    guard rotation.count >= 3 else { return }
+    
+    let xyz = SIMD3<Float>(
+        Float(rotation[0]),
+        Float(rotation[1]),
+        Float(rotation[2])
+    ) / 127.5 - SIMD3<Float>(1, 1, 1)
+    
+    // Apply coordinate flips
+    let flippedXyz = SIMD3<Float>(
+        xyz.x * c.flipQ.x,
+        xyz.y * c.flipQ.y,
+        xyz.z * c.flipQ.z
+    )
+    
+    // Compute the real component - we know the quaternion is normalized and w is non-negative
+    let w = sqrt(max(0.0, 1.0 - simd_length_squared(flippedXyz)))
+    
+    result = simd_quatf(ix: flippedXyz.x, iy: flippedXyz.y, iz: flippedXyz.z, r: w)
+}
+
+/// Unpacks quaternion using smallest-three encoding from 4 bytes
+func unpackQuaternionSmallestThree(_ result: inout simd_quatf, _ rotation: [UInt8], _ c: CoordinateConverter) {
+    guard rotation.count >= 4 else { return }
+    
+    // Extract the largest component index (2 bits)
+    let largestIdx = Int(rotation[3] >> 6)
+    
+    // Extract 10-bit signed values for the three smallest components
+    var components = [Float](repeating: 0, count: 4)
+    
+    // First component: bits 0-9 from bytes 0-1
+    var val1 = Int16(rotation[0]) | (Int16(rotation[1] & 0x03) << 8)
+    if val1 >= 512 { val1 -= 1024 } // Sign extension
+    
+    // Second component: bits 2-11 from bytes 1-2  
+    var val2 = Int16((rotation[1] >> 2) | ((rotation[2] & 0x0F) << 6))
+    if val2 >= 512 { val2 -= 1024 } // Sign extension
+    
+    // Third component: bits 4-13 from bytes 2-3
+    var val3 = Int16((rotation[2] >> 4) | ((rotation[3] & 0x3F) << 4))
+    if val3 >= 512 { val3 -= 1024 } // Sign extension
+    
+    // Convert to normalized float values
+    let vals = [Float(val1), Float(val2), Float(val3)]
+    let sqrt1_2: Float = sqrt(0.5)
+    
+    // Place the three smallest components
+    var compIdx = 0
+    for i in 0..<4 {
+        if i != largestIdx {
+            let normalizedVal = sqrt1_2 * Float(vals[compIdx]) / Float((1 << 9) - 1)
+            components[i] = normalizedVal * c.flipQ[i]
+            compIdx += 1
+        }
+    }
+    
+    // Compute the largest component using quaternion normalization
+    let sumSquares = components[0] * components[0] + components[1] * components[1] + 
+                    components[2] * components[2] + components[3] * components[3]
+    components[largestIdx] = sqrt(max(0.0, 1.0 - sumSquares))
+    
+    result = simd_quatf(ix: components[0], iy: components[1], iz: components[2], r: components[3])
+}
+
+// MARK: - Additional utility functions
+
+/// Converts color value from quantized format
+func unquantizeColor(_ value: UInt8) -> Float {
+    let colorScale: Float = 0.15  // Match reference implementation
+    return ((Float(value) / 255.0) - 0.5) / colorScale
+}
+
+/// Converts SH coefficient from quantized format
+func unquantizeSH(_ value: UInt8) -> Float {
+    return (Float(value) - 128.0) / 128.0
+}
+
+/// Inverse sigmoid function (logit)
+func logit(_ x: Float) -> Float {
+    let clamped = max(0.0001, min(0.9999, x))
+    return log(clamped / (1.0 - clamped))
 }

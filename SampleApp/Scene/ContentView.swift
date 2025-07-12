@@ -134,34 +134,6 @@ struct ContentView: View {
 
             Spacer()
 
-#if os(iOS)
-            Button("Open in AR") {
-                // Use the most recently loaded model, or default to sample box
-                if let lastModel = lastLoadedModel {
-                    navigationPath.append(ARModelIdentifier(model: lastModel))
-                } else {
-                    // Default to sample box if no models have been loaded
-                    navigationPath.append(ARModelIdentifier(model: .sampleBox))
-                }
-            }
-            .padding()
-            .buttonStyle(.bordered)
-            .opacity(lastLoadedModel != nil ? 1.0 : 0.7)
-
-            Spacer()
-#endif
-
-            Button("Show Sample Box") {
-                openWindow(value: ModelIdentifier.sampleBox)
-            }
-            .padding()
-            .buttonStyle(.borderedProminent)
-#if os(visionOS)
-            .disabled(immersiveSpaceIsShown)
-#endif
-
-            Spacer()
-
 #if os(visionOS)
             Button("Dismiss Immersive Space") {
                 Task {
