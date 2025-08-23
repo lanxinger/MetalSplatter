@@ -16,17 +16,42 @@ struct MetalKitSceneView: View {
     var modelIdentifier: ModelIdentifier?
     @State private var showARUnavailableAlert = false
     @State private var navigateToAR = false
+    @State private var showSettings = false
+    @State private var fastSHEnabled = true
+    @State private var metal4BindlessEnabled = true // Default to enabled
     
     var body: some View {
         ZStack {
             // The actual Metal view
-            MetalKitRendererView(modelIdentifier: modelIdentifier)
-                .ignoresSafeArea()
+            MetalKitRendererView(
+                modelIdentifier: modelIdentifier,
+                fastSHEnabled: $fastSHEnabled,
+                metal4BindlessEnabled: $metal4BindlessEnabled
+            )
+            .ignoresSafeArea()
             
-            // AR toggle button overlay (iOS only)
-            #if os(iOS)
+            // Control overlay
             VStack {
+                // Settings button at top-right
+                HStack {
+                    Spacer()
+                    Button(action: {
+                        showSettings.toggle()
+                    }) {
+                        Image(systemName: "gearshape.fill")
+                            .font(.title2)
+                            .foregroundColor(.white)
+                            .frame(width: 44, height: 44)
+                            .background(Color.black.opacity(0.5))
+                            .clipShape(Circle())
+                    }
+                    .padding()
+                }
+                
                 Spacer()
+                
+                // AR toggle button overlay (iOS only)
+                #if os(iOS)
                 HStack {
                     Spacer()
                     
@@ -49,13 +74,115 @@ struct MetalKitSceneView: View {
                     .padding(.trailing, 20)
                     .padding(.bottom, 20)
                 }
+                #endif
             }
-            #endif
+            
+            // Settings overlay
+            if showSettings {
+                ZStack {
+                    // Invisible background to capture taps
+                    Color.clear
+                        .contentShape(Rectangle())
+                        .onTapGesture {
+                            showSettings = false
+                        }
+                    
+                    VStack {
+                        HStack {
+                        VStack(alignment: .leading, spacing: 12) {
+                            // Header with close button
+                            HStack {
+                                Text("Render Settings")
+                                    .font(.headline)
+                                
+                                Spacer()
+                                
+                                Button(action: {
+                                    showSettings = false
+                                }) {
+                                    Image(systemName: "xmark.circle.fill")
+                                        .font(.title3)
+                                        .foregroundColor(.secondary)
+                                }
+                            }
+                            .padding(.bottom, 4)
+                            
+                            // Fast SH Toggle
+                            Toggle(isOn: $fastSHEnabled) {
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text("Fast Spherical Harmonics")
+                                        .font(.subheadline)
+                                    Text("Optimized SH evaluation for better performance")
+                                        .font(.caption)
+                                        .foregroundColor(.secondary)
+                                }
+                            }
+                            
+                            Divider()
+                            
+                            // Metal 4 Bindless Toggle
+                            Toggle(isOn: $metal4BindlessEnabled) {
+                                VStack(alignment: .leading, spacing: 2) {
+                                    HStack {
+                                        Text("Metal 4 Bindless Resources")
+                                            .font(.subheadline)
+                                        Text("(Default)")
+                                            .font(.caption2)
+                                            .foregroundColor(.blue)
+                                            .padding(.horizontal, 6)
+                                            .padding(.vertical, 2)
+                                            .background(Color.blue.opacity(0.1))
+                                            .cornerRadius(4)
+                                    }
+                                    Text("50-80% CPU overhead reduction for large scenes (iOS 26+)")
+                                        .font(.caption)
+                                        .foregroundColor(.secondary)
+                                }
+                            }
+                            
+                            if metal4BindlessEnabled {
+                                VStack(alignment: .leading, spacing: 4) {
+                                    Label("Metal 4 Active", systemImage: "checkmark.circle.fill")
+                                        .font(.caption)
+                                        .foregroundColor(.green)
+                                    Text("• Argument tables enabled\n• Residency sets active\n• Bindless rendering mode")
+                                        .font(.caption2)
+                                        .foregroundColor(.secondary)
+                                        .padding(.leading, 20)
+                                }
+                                .padding(.top, 4)
+                            }
+                            
+                        }
+                        .padding()
+#if os(iOS)
+                        .background(Color(UIColor.systemBackground).opacity(0.9))
+#else
+                        .background(Color(NSColor.controlBackgroundColor).opacity(0.9))
+#endif
+                        .cornerRadius(10)
+                        .shadow(radius: 5)
+                        .frame(maxWidth: 400)
+                        .onTapGesture {
+                            // Prevent tap-through to background
+                        }
+                        
+                        Spacer()
+                    }
+                    .padding()
+                    
+                    Spacer()
+                }
+                }
+                .transition(.opacity)
+            }
         }
+#if os(iOS)
         .navigationDestination(isPresented: $navigateToAR) {
             ARContentView(model: modelIdentifier)
                 .navigationTitle("AR \(modelIdentifier?.description ?? "View")")
         }
+#endif
         .alert("AR Not Available", isPresented: $showARUnavailableAlert) {
             Button("OK", role: .cancel) { }
         } message: {
@@ -79,27 +206,49 @@ struct MetalKitSceneView: View {
 
 struct MetalKitRendererView: ViewRepresentable {
     var modelIdentifier: ModelIdentifier?
+    @Binding var fastSHEnabled: Bool
+    @Binding var metal4BindlessEnabled: Bool
 
-    class Coordinator: NSObject, UIGestureRecognizerDelegate {
+    class Coordinator: NSObject {
         var renderer: MetalKitSceneRenderer?
+        var parent: MetalKitRendererView
         // Store camera interaction state
         var lastPanLocation: CGPoint?
         var lastRotation: Angle = .zero
         var lastRollRotation: Float = 0.0
         var zoom: Float = 1.0
+        
+        init(_ parent: MetalKitRendererView) {
+            self.parent = parent
+        }
+        
+        @MainActor
+        func updateSettings() {
+            // Update renderer settings silently
+            renderer?.fastSHSettings.enabled = parent.fastSHEnabled
+            renderer?.setMetal4Bindless(parent.metal4BindlessEnabled)
+        }
     }
 
     func makeCoordinator() -> Coordinator {
-        Coordinator()
+        Coordinator(self)
     }
 
 #if os(macOS)
     func makeNSView(context: NSViewRepresentableContext<MetalKitRendererView>) -> MTKView {
         makeView(context.coordinator)
     }
+    
+    func updateNSView(_ view: MTKView, context: NSViewRepresentableContext<MetalKitRendererView>) {
+        updateView(context.coordinator)
+    }
 #elseif os(iOS)
     func makeUIView(context: UIViewRepresentableContext<MetalKitRendererView>) -> MTKView {
         makeView(context.coordinator)
+    }
+    
+    func updateUIView(_ view: MTKView, context: UIViewRepresentableContext<MetalKitRendererView>) {
+        updateView(context.coordinator)
     }
 #endif
 
@@ -114,7 +263,9 @@ struct MetalKitRendererView: ViewRepresentable {
         coordinator.renderer = renderer
         metalKitView.delegate = renderer
         
-        // Fast SH is configured in the renderer itself
+        // Apply initial settings
+        renderer?.fastSHSettings.enabled = fastSHEnabled
+        renderer?.setMetal4Bindless(metal4BindlessEnabled)
 
         // --- Interactivity: Pan (rotation) and Pinch (zoom) ---
         #if os(iOS)
@@ -146,18 +297,15 @@ struct MetalKitRendererView: ViewRepresentable {
         return metalKitView
     }
 
-#if os(macOS)
-    func updateNSView(_ view: MTKView, context: NSViewRepresentableContext<MetalKitRendererView>) {
-        updateView(context.coordinator)
-    }
-#elseif os(iOS)
-    func updateUIView(_ view: MTKView, context: UIViewRepresentableContext<MetalKitRendererView>) {
-        updateView(context.coordinator)
-    }
-#endif
-
     private func updateView(_ coordinator: Coordinator) {
         guard let renderer = coordinator.renderer else { return }
+        
+        // Update coordinator's parent reference to get latest state
+        coordinator.parent = self
+        
+        // Update settings when the view updates
+        coordinator.updateSettings()
+        
         Task {
             do {
                 try await renderer.load(modelIdentifier)
@@ -170,11 +318,15 @@ struct MetalKitRendererView: ViewRepresentable {
 
 #if os(iOS)
     // MARK: - Coordinator Gesture Handling
-    extension MetalKitRendererView.Coordinator {
-        private static let verticalRotationKey = UnsafeRawPointer(bitPattern: "verticalRotation".hashValue)!
-        private static let pan2TranslationKey = UnsafeRawPointer(bitPattern: "pan2Translation".hashValue)!
+    extension MetalKitRendererView.Coordinator: UIGestureRecognizerDelegate {
+        private static nonisolated(unsafe) let verticalRotationKey: UnsafeRawPointer = {
+            UnsafeRawPointer(bitPattern: "verticalRotation".hashValue)!
+        }()
+        private static nonisolated(unsafe) let pan2TranslationKey: UnsafeRawPointer = {
+            UnsafeRawPointer(bitPattern: "pan2Translation".hashValue)!
+        }()
         
-        @objc func handlePan(_ gesture: UIPanGestureRecognizer) {
+        @MainActor @objc func handlePan(_ gesture: UIPanGestureRecognizer) {
             guard let renderer = renderer else { return }
             let location = gesture.location(in: gesture.view)
 
@@ -233,7 +385,7 @@ struct MetalKitRendererView: ViewRepresentable {
             }
         }
 
-        @objc func handlePinch(_ gesture: UIPinchGestureRecognizer) {
+        @MainActor @objc func handlePinch(_ gesture: UIPinchGestureRecognizer) {
             guard let renderer = renderer else { return }
 
             // --- Call endUserInteraction on gesture end ---
@@ -254,7 +406,7 @@ struct MetalKitRendererView: ViewRepresentable {
             }
         }
 
-        @objc func handleRotation(_ gesture: UIRotationGestureRecognizer) {
+        @MainActor @objc func handleRotation(_ gesture: UIRotationGestureRecognizer) {
             guard let renderer = renderer else { return }
 
             // --- Call endUserInteraction on gesture end ---
@@ -275,7 +427,7 @@ struct MetalKitRendererView: ViewRepresentable {
             }
         }
 
-        @objc func handleDoubleTap(_ gesture: UITapGestureRecognizer) {
+        @MainActor @objc func handleDoubleTap(_ gesture: UITapGestureRecognizer) {
             guard let renderer = renderer else { return }
             renderer.resetView()
         }

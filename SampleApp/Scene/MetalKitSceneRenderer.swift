@@ -47,8 +47,14 @@ class MetalKitSceneRenderer: NSObject, MTKViewDelegate {
     var model: ModelIdentifier?
     var modelRenderer: (any ModelRenderer)?
     
+    // Track last logged model to avoid spam
+    private var lastLoggedModel: String?
+    
     // Fast SH Support
     var fastSHSettings = FastSHSettings()
+    
+    // Metal 4 Bindless Support
+    var useMetal4Bindless: Bool = true // Default to enabled
 
     let inFlightSemaphore = DispatchSemaphore(value: Constants.maxSimultaneousRenders)
 
@@ -97,6 +103,9 @@ class MetalKitSceneRenderer: NSObject, MTKViewDelegate {
         
         switch model {
         case .gaussianSplat(let url):
+            // Get cached model data
+            let cachedModel = try await ModelCache.shared.getModel(.gaussianSplat(url))
+            
             // Capture needed values from main actor context
             let deviceRef = device
             let colorPixelFormat = metalKitView.colorPixelFormat
@@ -104,32 +113,48 @@ class MetalKitSceneRenderer: NSObject, MTKViewDelegate {
             let sampleCount = metalKitView.sampleCount
             let useFastSH = fastSHSettings.enabled
             
-            // Create and read splat entirely in nonisolated context
-            let splat = try await Task.detached {
+            // Create and load splat entirely in nonisolated context
+            let points = cachedModel.points // Explicit copy for isolation
+            let splat = try await Task {
                 if useFastSH {
-                    // Use Fast SH renderer
+                    // Use Fast SH renderer with cached data
                     let renderer = try FastSHSplatRenderer(device: deviceRef,
                                                          colorFormat: colorPixelFormat,
                                                          depthFormat: depthStencilPixelFormat,
                                                          sampleCount: sampleCount,
                                                          maxViewCount: 1,
                                                          maxSimultaneousRenders: Constants.maxSimultaneousRenders)
-                    try await renderer.read(from: url)
+                    try await renderer.loadSplatsWithSH(points)
                     return renderer as SplatRenderer // Cast to base class
                 } else {
-                    // Use regular renderer
+                    // Use regular renderer with cached data
                     let renderer = try SplatRenderer(device: deviceRef,
                                                     colorFormat: colorPixelFormat,
                                                     depthFormat: depthStencilPixelFormat,
                                                     sampleCount: sampleCount,
                                                     maxViewCount: 1,
                                                     maxSimultaneousRenders: Constants.maxSimultaneousRenders)
-                    try await renderer.read(from: url)
+                    try renderer.add(points)
                     return renderer
                 }
             }.value
             
             modelRenderer = splat
+            
+            // Initialize Metal 4 bindless resources if available and enabled
+            if useMetal4Bindless {
+                if #available(iOS 26.0, macOS 26.0, tvOS 26.0, visionOS 26.0, *) {
+                    do {
+                        try splat.initializeMetal4Bindless()
+                        Self.log.info("Initialized Metal 4 bindless resources for Gaussian Splat model")
+                    } catch {
+                        Self.log.warning("Failed to initialize Metal 4 bindless resources: \(error.localizedDescription)")
+                        // Continue with traditional rendering
+                    }
+                } else {
+                    Self.log.info("Metal 4 bindless resources not available on this platform (requires iOS 26+)")
+                }
+            }
             
             // Configure Fast SH if using FastSHSplatRenderer
             if let fastRenderer = splat as? FastSHSplatRenderer {
@@ -211,8 +236,11 @@ class MetalKitSceneRenderer: NSObject, MTKViewDelegate {
             commonUpCalibration = matrix4x4_rotation(radians: .pi, axis: SIMD3<Float>(0, 0, 1)) // 180° for PLY
         }
         
-        // Debug: Log coordinate calibration decision
-        print("MetalKitSceneRenderer: model='\(modelDescription)', isSOGS=\(isSOGS), isSPZ=\(isSPZ), applying180°=\(!isSOGS && !isSPZ)")
+        // Log coordinate calibration decision only when model changes
+        if lastLoggedModel != modelDescription {
+            lastLoggedModel = modelDescription
+            print("MetalKitSceneRenderer: model='\(modelDescription)', isSOGS=\(isSOGS), isSPZ=\(isSPZ), applying180°=\(!isSOGS && !isSPZ)")
+        }
 
         let viewport = MTLViewport(originX: 0, originY: 0, width: drawableSize.width, height: drawableSize.height, znear: 0, zfar: 1)
 
@@ -288,25 +316,74 @@ class MetalKitSceneRenderer: NSObject, MTKViewDelegate {
         }
         // --- End Animation Handling ---
 
-        do {
-            try modelRenderer.render(viewports: [viewport],
-                                     colorTexture: view.multisampleColorTexture ?? drawable.texture,
-                                     colorStoreAction: view.multisampleColorTexture == nil ? .store : .multisampleResolve,
-                                     depthTexture: view.depthStencilTexture,
-                                     rasterizationRateMap: nil,
-                                     renderTargetArrayLength: 0,
-                                     to: commandBuffer)
-        } catch {
-            Self.log.error("Unable to render scene: \(error.localizedDescription)")
-        }
+        renderTraditional(modelRenderer: modelRenderer,
+                        viewport: viewport,
+                        view: view,
+                        drawable: drawable,
+                        commandBuffer: commandBuffer)
 
         commandBuffer.present(drawable)
 
         commandBuffer.commit()
     }
+    
+    // MARK: - Render Methods
+    
+    /// Traditional full-resolution rendering
+    private func renderTraditional(modelRenderer: any ModelRenderer,
+                                 viewport: ModelRendererViewportDescriptor,
+                                 view: MTKView,
+                                 drawable: CAMetalDrawable,
+                                 commandBuffer: MTLCommandBuffer) {
+        do {
+            try modelRenderer.render(viewports: [viewport],
+                                   colorTexture: view.multisampleColorTexture ?? drawable.texture,
+                                   colorStoreAction: view.multisampleColorTexture == nil ? .store : .multisampleResolve,
+                                   depthTexture: view.depthStencilTexture,
+                                   rasterizationRateMap: nil,
+                                   renderTargetArrayLength: 0,
+                                   to: commandBuffer)
+        } catch {
+            Self.log.error("Unable to render scene: \(error.localizedDescription)")
+        }
+    }
 
     func mtkView(_ view: MTKView, drawableSizeWillChange size: CGSize) {
         drawableSize = size
+    }
+
+    // MARK: - Metal 4 Configuration
+    
+    /// Enable or disable Metal 4 bindless rendering
+    func setMetal4Bindless(_ enabled: Bool) {
+        useMetal4Bindless = enabled
+        
+        // If we already have a renderer, try to initialize Metal 4
+        if enabled, let splat = modelRenderer as? SplatRenderer {
+            if #available(iOS 26.0, macOS 26.0, tvOS 26.0, visionOS 26.0, *) {
+                do {
+                    try splat.initializeMetal4Bindless()
+                    Self.log.info("Enabled Metal 4 bindless resources for current model")
+                } catch {
+                    Self.log.warning("Failed to enable Metal 4 bindless: \(error.localizedDescription)")
+                }
+            }
+        }
+        
+        // Request redraw
+        #if os(macOS)
+        metalKitView.setNeedsDisplay(metalKitView.bounds)
+        #else
+        metalKitView.setNeedsDisplay()
+        #endif
+    }
+    
+    /// Check if Metal 4 bindless is available on this device
+    var isMetal4BindlessAvailable: Bool {
+        if #available(iOS 26.0, macOS 26.0, tvOS 26.0, visionOS 26.0, *) {
+            return device.supportsFamily(.apple9) // Requires Apple 9 GPU family
+        }
+        return false
     }
 
     // MARK: - User Interaction API
@@ -315,88 +392,59 @@ class MetalKitSceneRenderer: NSObject, MTKViewDelegate {
         userIsInteracting = true
         rotation = newRotation
         verticalRotation = vertical
-        #if os(macOS)
-        metalKitView.setNeedsDisplay(metalKitView.bounds)
-        #else
-        metalKitView.setNeedsDisplay()
-        #endif
+        lastRotationUpdateTimestamp = nil // Reset timestamp for smooth resumption of auto-rotation
     }
+
     func setUserZoom(_ newZoom: Float) {
         userIsInteracting = true
         zoom = newZoom
-        #if os(macOS)
-        metalKitView.setNeedsDisplay(metalKitView.bounds)
-        #else
-        metalKitView.setNeedsDisplay()
-        #endif
+        lastRotationUpdateTimestamp = nil
     }
-    func setUserTranslation(_ newTranslation: SIMD2<Float>) {
+
+    func setUserRollRotation(_ rollRotation: Float) {
         userIsInteracting = true
-        translation = newTranslation
-        #if os(macOS)
-        metalKitView.setNeedsDisplay(metalKitView.bounds)
-        #else
-        metalKitView.setNeedsDisplay()
-        #endif
+        self.rollRotation = rollRotation
+        lastRotationUpdateTimestamp = nil
     }
-    func setUserRollRotation(_ newRoll: Float) {
+
+    func setUserTranslation(_ translation: SIMD2<Float>) {
         userIsInteracting = true
-        rollRotation = newRoll
-        #if os(macOS)
-        metalKitView.setNeedsDisplay(metalKitView.bounds)
-        #else
-        metalKitView.setNeedsDisplay()
-        #endif
+        self.translation = translation
+        lastRotationUpdateTimestamp = nil
     }
+
+    func endUserInteraction() {
+        userIsInteracting = false
+        lastRotationUpdateTimestamp = Date()
+    }
+    
+    /// Reset view to default state with smooth animation
     func resetView() {
-        // Start animation instead of setting directly
-        guard !isAnimatingReset else { return } // Don't restart if already animating
-
-        isAnimatingReset = true
-        animationStartTime = Date()
-        userIsInteracting = true // Prevent auto-rotate during animation
-
-        // Store starting state
+        // If already animating, do nothing
+        guard !isAnimatingReset else { return }
+        
+        // Store starting values for animation
         startRotation = rotation
         startVerticalRotation = verticalRotation
         startRollRotation = rollRotation
         startZoom = zoom
         startTranslation = translation
-
-        // No need to set final values here, draw() will handle it.
-        // No need for metalKitView.setNeedsDisplay() here, draw() will trigger redraws.
-    }
-    
-    func toggleAutoFit() {
-        autoFitEnabled.toggle()
-        if autoFitEnabled, let modelRenderer = modelRenderer {
-            Task {
-                await optimizeViewportForModel(modelRenderer)
-            }
-        } else {
-            modelScale = 1.0
-            #if os(macOS)
-            metalKitView.setNeedsDisplay(metalKitView.bounds)
-            #else
-            metalKitView.setNeedsDisplay()
-            #endif
-        }
-    }
-
-    /// Call this when user gestures (drag, pinch) end.
-    func endUserInteraction() {
-        // If user interacts during reset animation, cancel the animation
-        if isAnimatingReset {
-            isAnimatingReset = false
-            animationStartTime = nil
-        }
-        userIsInteracting = false
-        // Reset timestamp to avoid jump in auto-rotation after interaction
-        lastRotationUpdateTimestamp = nil
+        
+        // Start animation
+        isAnimatingReset = true
+        animationStartTime = Date()
+        userIsInteracting = true // Prevent auto-rotate during animation
+        
+        // Trigger first animation frame
+        #if os(macOS)
+        metalKitView.setNeedsDisplay(metalKitView.bounds)
+        #else
+        metalKitView.setNeedsDisplay()
+        #endif
     }
     #endif
-    
-    // MARK: - Viewport Optimization
+
+    /// Optimizes the viewport (scale, position) to fit the loaded model
     private func optimizeViewportForModel(_ renderer: any ModelRenderer) async {
         // Calculate model bounds
         guard let bounds = await calculateModelBounds(renderer) else {

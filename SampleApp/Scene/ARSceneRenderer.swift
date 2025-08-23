@@ -29,6 +29,8 @@ class ARSceneRenderer: NSObject, MTKViewDelegate {
     
     // AR Session state
     var isARSessionActive = false
+    private var noRendererLogCount = 0
+    private let maxNoRendererLogs = 3
     
     init?(_ metalKitView: MTKView) {
         guard let device = metalKitView.device else { return nil }
@@ -60,14 +62,19 @@ class ARSceneRenderer: NSObject, MTKViewDelegate {
         switch model {
         case .gaussianSplat(let url):
             Self.log.info("AR: Loading gaussian splat from \(url.lastPathComponent)")
+            
+            // Get cached model data
+            let cachedModel = try await ModelCache.shared.getModel(.gaussianSplat(url))
+            
             // Capture needed values from main actor context
             let deviceRef = device
             let colorPixelFormat = metalKitView.colorPixelFormat
             let depthStencilPixelFormat = metalKitView.depthStencilPixelFormat
             let sampleCount = metalKitView.sampleCount
             
-            // Create AR splat renderer entirely in nonisolated context
-            let renderer = try await Task.detached {
+            // Create AR splat renderer entirely in nonisolated context  
+            let points = cachedModel.points // Explicit copy for isolation
+            let renderer = try await Task {
                 let arRenderer = try ARSplatRenderer(
                     device: deviceRef,
                     colorFormat: colorPixelFormat,
@@ -76,12 +83,13 @@ class ARSceneRenderer: NSObject, MTKViewDelegate {
                     maxViewCount: 1,
                     maxSimultaneousRenders: Constants.maxSimultaneousRenders
                 )
-                try await arRenderer.read(from: url)
+                try arRenderer.add(points)
                 return arRenderer
             }.value
             
             arSplatRenderer = renderer
-            Self.log.info("AR: Successfully created AR splat renderer")
+            noRendererLogCount = 0 // Reset log throttling
+            Self.log.info("AR: Successfully created AR splat renderer using cached data")
             
         case .sampleBox:
             Self.log.info("AR: Creating sample box for AR")
@@ -103,6 +111,7 @@ class ARSceneRenderer: NSObject, MTKViewDelegate {
             }.value
             
             arSplatRenderer = renderer
+            noRendererLogCount = 0 // Reset log throttling
             Self.log.info("AR: Successfully created AR renderer for sample box")
             
         case .none:
@@ -143,8 +152,14 @@ class ARSceneRenderer: NSObject, MTKViewDelegate {
     }
     
     func draw(in view: MTKView) {
-        guard let arSplatRenderer = arSplatRenderer else { 
-            Self.log.error("No AR splat renderer available")
+        guard let arSplatRenderer = arSplatRenderer else {
+            if noRendererLogCount < maxNoRendererLogs {
+                Self.log.error("No AR splat renderer available")
+                noRendererLogCount += 1
+                if noRendererLogCount == maxNoRendererLogs {
+                    Self.log.info("Suppressing further 'No AR splat renderer' messages")
+                }
+            }
             return 
         }
         

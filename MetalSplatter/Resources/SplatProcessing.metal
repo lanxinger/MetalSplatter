@@ -174,6 +174,9 @@ struct ARBackgroundVertexOut {
     float2 texCoord;
 };
 
+#if __METAL_VERSION__ >= 400
+[[user_annotation("ar_camera_background")]]
+#endif
 vertex ARBackgroundVertexOut ar_background_vertex(const ARBackgroundVertex in [[stage_in]]) {
     ARBackgroundVertexOut out;
     out.position = float4(in.position, 0.0, 1.0);
@@ -181,6 +184,9 @@ vertex ARBackgroundVertexOut ar_background_vertex(const ARBackgroundVertex in [[
     return out;
 }
 
+#if __METAL_VERSION__ >= 400
+[[user_annotation("ar_camera_fragment")]]
+#endif
 fragment float4 ar_background_fragment(ARBackgroundVertexOut in [[stage_in]],
                                       texture2d<float> capturedImageTextureY [[texture(0)]],
                                       texture2d<float> capturedImageTextureCbCr [[texture(1)]]) {
@@ -214,6 +220,9 @@ struct ARCompositionVertexOut {
     float2 texCoord;
 };
 
+#if __METAL_VERSION__ >= 400
+[[user_annotation("ar_composition_vertex")]]
+#endif
 vertex ARCompositionVertexOut ar_composition_vertex(const ARCompositionVertex in [[stage_in]]) {
     ARCompositionVertexOut out;
     out.position = float4(in.position, 0.0, 1.0);
@@ -221,6 +230,9 @@ vertex ARCompositionVertexOut ar_composition_vertex(const ARCompositionVertex in
     return out;
 }
 
+#if __METAL_VERSION__ >= 400
+[[user_annotation("ar_splat_composition")]]
+#endif
 fragment float4 ar_composition_fragment(ARCompositionVertexOut in [[stage_in]],
                                        texture2d<float> backgroundTexture [[texture(0)]],
                                        texture2d<float> contentTexture [[texture(1)]]) {

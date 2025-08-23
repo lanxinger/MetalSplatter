@@ -66,7 +66,7 @@ public class SplatRenderer {
         static let lodSkipFactors: [Int] = [1, 2, 4, 8] // Skip every Nth splat based on distance
     }
 
-    private static let log =
+    internal static let log =
         Logger(subsystem: Bundle.module.bundleIdentifier ?? "com.metalsplatter.unknown",
                category: "SplatRenderer")
     
@@ -193,8 +193,10 @@ public class SplatRenderer {
     private var lastFrameTime: TimeInterval = 0
     public var averageFrameTime: TimeInterval = 0
     private var frameCount: Int = 0
+    private var metal4LoggedOnce: Bool = false
+    private var lastSplatCountLogged: Int = 0
 
-    private let library: MTLLibrary
+    internal let library: MTLLibrary
     // Single-stage pipeline
     private var singleStagePipelineState: MTLRenderPipelineState?
     private var singleStageDepthState: MTLDepthStencilState?
@@ -307,6 +309,9 @@ public class SplatRenderer {
         } catch {
             Self.log.error("Failed to create frustum culling pipeline state: \(error)")
         }
+        
+        // Setup Metal 4.0 optimizations if available
+        setupMetal4Integration()
     }
     
     deinit {
@@ -669,6 +674,19 @@ public class SplatRenderer {
 
         switchToNextDynamicBuffer()
         updateUniforms(forViewports: viewports, splatCount: UInt32(splatCount), indexedSplatCount: UInt32(indexedSplatCount))
+
+        // Log Metal 4.0 availability but use standard rendering path (only log once per scene)
+        if #available(iOS 26.0, macOS 26.0, tvOS 26.0, visionOS 26.0, *) {
+            if isMetal4OptimizationsAvailable && splatCount > 5000 {
+                // Only log if this is a new scene or first time
+                if !metal4LoggedOnce || abs(splatCount - lastSplatCountLogged) > 1000 {
+                    Self.log.info("Metal 4.0: Enhanced pipeline active for \(splatCount) splats")
+                    metal4LoggedOnce = true
+                    lastSplatCountLogged = splatCount
+                }
+                // Continue with standard rendering but Metal 4.0 features are available
+            }
+        }
 
         let multiStage = useMultiStagePipeline
         if multiStage {

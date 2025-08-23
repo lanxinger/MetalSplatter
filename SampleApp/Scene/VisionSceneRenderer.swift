@@ -41,6 +41,9 @@ class VisionSceneRenderer {
 
     var model: ModelIdentifier?
     var modelRenderer: (any ModelRenderer)?
+    
+    // Metal 4 Bindless Support
+    var useMetal4Bindless: Bool = true // Default to enabled
 
     let inFlightSemaphore = DispatchSemaphore(value: Constants.maxSimultaneousRenders)
 
@@ -69,14 +72,32 @@ class VisionSceneRenderer {
         modelRenderer = nil
         switch model {
         case .gaussianSplat(let url):
+            // Get cached model data
+            let cachedModel = try await ModelCache.shared.getModel(.gaussianSplat(url))
+            
             let splat = try SplatRenderer(device: device,
                                           colorFormat: layerRenderer.configuration.colorFormat,
                                           depthFormat: layerRenderer.configuration.depthFormat,
                                           sampleCount: 1,
                                           maxViewCount: layerRenderer.properties.viewCount,
                                           maxSimultaneousRenders: Constants.maxSimultaneousRenders)
-            try await splat.read(from: url)
+            try splat.add(cachedModel.points)
             modelRenderer = splat
+            
+            // Initialize Metal 4 bindless resources if available and enabled
+            if useMetal4Bindless {
+                if #available(visionOS 26.0, *) {
+                    do {
+                        try splat.initializeMetal4Bindless()
+                        Self.log.info("Initialized Metal 4 bindless resources for Gaussian Splat model")
+                    } catch {
+                        Self.log.warning("Failed to initialize Metal 4 bindless resources: \(error.localizedDescription)")
+                        // Continue with traditional rendering
+                    }
+                } else {
+                    Self.log.info("Metal 4 bindless resources not available on this platform (requires visionOS 26+)")
+                }
+            }
         case .sampleBox:
             do {
                 modelRenderer = try SampleBoxRenderer(device: device,
@@ -218,6 +239,33 @@ class VisionSceneRenderer {
                 }
             }
         }
+    }
+    
+    // MARK: - Metal 4 Configuration
+    
+    /// Enable or disable Metal 4 bindless rendering
+    func setMetal4Bindless(_ enabled: Bool) {
+        useMetal4Bindless = enabled
+        
+        // If we already have a renderer, try to initialize Metal 4
+        if enabled, let splat = modelRenderer as? SplatRenderer {
+            if #available(visionOS 26.0, *) {
+                do {
+                    try splat.initializeMetal4Bindless()
+                    Self.log.info("Enabled Metal 4 bindless resources for current model")
+                } catch {
+                    Self.log.warning("Failed to enable Metal 4 bindless: \(error.localizedDescription)")
+                }
+            }
+        }
+    }
+    
+    /// Check if Metal 4 bindless is available on this device
+    var isMetal4BindlessAvailable: Bool {
+        if #available(visionOS 26.0, *) {
+            return device.supportsFamily(.apple9) // Requires Apple 9 GPU family
+        }
+        return false
     }
 }
 

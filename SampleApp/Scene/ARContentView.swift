@@ -31,6 +31,7 @@ struct ARContentView: View {
     @State private var showingPermissionAlert = false
     @State private var permissionDenied = false
     @State private var arError: String?
+    @State private var modelLoadingError: String?
     @State private var isARTrackingReady = false
     @State private var isWaitingForSurfaceDetection = false
     @State private var showARInstructions = false
@@ -40,7 +41,12 @@ struct ARContentView: View {
     var body: some View {
         ZStack {
             // AR Metal view
-            ARMetalKitView(renderer: $arSceneRenderer, model: model, isARActive: $isARSessionActive)
+            ARMetalKitView(
+                renderer: $arSceneRenderer, 
+                model: model, 
+                isARActive: $isARSessionActive,
+                modelLoadingError: $modelLoadingError
+            )
                 .ignoresSafeArea()
                 .onReceive(NotificationCenter.default.publisher(for: .init("ARRendererReady"))) { _ in
                     // Don't start AR session here - wait for model to load
@@ -175,6 +181,48 @@ struct ARContentView: View {
                             }
                         }
                         .buttonStyle(.borderedProminent)
+                    }
+                    .padding(30)
+                    .background(Color.black.opacity(0.8))
+                    .cornerRadius(20)
+                    .padding()
+                    Spacer()
+                }
+            }
+            
+            // Model loading error overlay
+            if let error = modelLoadingError {
+                VStack {
+                    Spacer()
+                    VStack(spacing: 16) {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .font(.system(size: 60))
+                            .foregroundColor(.orange)
+                        
+                        Text("Model Loading Error")
+                            .font(.title2)
+                            .fontWeight(.bold)
+                            .foregroundColor(.white)
+                        
+                        Text(error)
+                            .font(.body)
+                            .foregroundColor(.white)
+                            .multilineTextAlignment(.center)
+                            .padding(.horizontal)
+                        
+                        HStack(spacing: 12) {
+                            Button("Try Sample Box") {
+                                loadFallbackModel()
+                            }
+                            .buttonStyle(.borderedProminent)
+                            .tint(.green)
+                            
+                            Button("Dismiss") {
+                                modelLoadingError = nil
+                            }
+                            .buttonStyle(.bordered)
+                            .tint(.gray)
+                        }
                     }
                     .padding(30)
                     .background(Color.black.opacity(0.8))
@@ -339,12 +387,42 @@ struct ARContentView: View {
         }
     }
     
+    private func loadFallbackModel() {
+        guard let renderer = arSceneRenderer else { return }
+        
+        Task {
+            do {
+                print("AR: Loading fallback sample box model")
+                try await renderer.load(.sampleBox)
+                print("AR: Successfully loaded fallback model")
+                
+                // Clear error message
+                DispatchQueue.main.async {
+                    self.modelLoadingError = nil
+                }
+                
+                // Start AR session if we have permission
+                if AVCaptureDevice.authorizationStatus(for: .video) == .authorized {
+                    print("AR: Starting AR session with fallback model")
+                    renderer.startARSession()
+                    self.isARSessionActive = true
+                }
+            } catch {
+                print("AR: Fallback model loading failed: \(error)")
+                DispatchQueue.main.async {
+                    self.modelLoadingError = "Even the sample model failed to load: \(error.localizedDescription)"
+                }
+            }
+        }
+    }
+    
 }
 
 struct ARMetalKitView: UIViewRepresentable {
     @Binding var renderer: ARSceneRenderer?
     let model: ModelIdentifier?
     @Binding var isARActive: Bool
+    @Binding var modelLoadingError: String?
     
     func makeUIView(context: Context) -> MTKView {
         print("AR: Creating MTKView - this should happen when entering AR view")
@@ -411,6 +489,35 @@ struct ARMetalKitView: UIViewRepresentable {
                 }
             } catch {
                 print("AR: Failed to load model: \(error)")
+                
+                // Set error message for user feedback
+                DispatchQueue.main.async {
+                    self.modelLoadingError = "Failed to load model: \(error.localizedDescription)"
+                }
+                
+                // Try to load fallback model
+                do {
+                    print("AR: Attempting to load fallback sample box")
+                    try await renderer.load(.sampleBox)
+                    print("AR: Successfully loaded fallback model")
+                    
+                    // Start AR session if we have permission
+                    if AVCaptureDevice.authorizationStatus(for: .video) == .authorized {
+                        print("AR: Starting AR session with fallback model")
+                        renderer.startARSession()
+                        self.isARActive = true
+                        
+                        // Clear error since fallback worked
+                        DispatchQueue.main.async {
+                            self.modelLoadingError = nil
+                        }
+                    }
+                } catch {
+                    print("AR: Even fallback model failed to load: \(error)")
+                    DispatchQueue.main.async {
+                        self.modelLoadingError = "Cannot load any model. AR unavailable."
+                    }
+                }
             }
         }
     }

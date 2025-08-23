@@ -1,0 +1,234 @@
+#include <metal_stdlib>
+#include <metal_tensor>
+
+#if __METAL_VERSION__ >= 400
+#include <MetalPerformancePrimitives/MetalPerformancePrimitives.h>
+#endif
+
+using namespace metal;
+
+// Import our common structures
+#include "SplatProcessing.h"
+
+// MARK: - Metal Performance Primitives for AR Matrix Operations
+
+#if __METAL_VERSION__ >= 400
+using namespace mpp::tensor_ops;
+
+// AR-specific matrix operations using MPP for optimal performance
+template<typename Scope>
+struct ARMatrixProcessor {
+    // Optimized camera transform operations
+    [[user_annotation("ar_camera_transform_mpp")]]
+    static void process_camera_transforms(
+        tensor<float, extents<int, 4, 4>, device_descriptor> camera_matrices,
+        tensor<float, extents<int, 4, 4>, device_descriptor> model_transforms,
+        tensor<float, extents<int, 4, 4>, device_descriptor>& result_transforms,
+        Scope scope
+    ) {
+        // Use MPP matrix multiplication for batch camera transform processing
+        matmul2d<matmul2d_descriptor<float, 4, 4>, Scope> matmul;
+        
+        // Batch process all AR transforms at once (significant performance gain)
+        matmul.run(camera_matrices, model_transforms, result_transforms, scope);
+    }
+};
+
+// AR tracking state update using cooperative operations
+[[user_annotation("ar_tracking_update_cooperative")]]
+kernel void ar_tracking_update_cooperative(
+    device tensor<float, extents<int, 3>, device_descriptor> position_history [[buffer(0)]],
+    device tensor<float, extents<int, 4>, device_descriptor> rotation_history [[buffer(1)]],
+    device tensor<float, extents<int, 1>, device_descriptor> confidence_scores [[buffer(2)]],
+    device float4x4* updated_transforms [[buffer(3)]],
+    uint gid [[thread_position_in_grid]]
+) {
+    // Use cooperative tensor operations for AR state prediction
+    // This would integrate with ARKit's tracking system for enhanced stability
+    
+    // Example: Process tracking history using ML-based prediction
+    if (gid == 0) {
+        // Access tensor data for AR processing
+        // In real implementation, this would:
+        // 1. Analyze position/rotation trends
+        // 2. Predict next AR state using ML models
+        // 3. Update transform matrices for stable rendering
+    }
+}
+#endif
+
+// MARK: - Enhanced AR Argument Buffer Structure
+
+// Comprehensive AR resource management for Metal 4
+struct ARMetal4Resources {
+    // Camera input resources
+    texture2d<float> camera_y [[id(0)]];
+    texture2d<float> camera_cbcr [[id(1)]];
+    texture2d<float> depth_texture [[id(2)]];
+    texture2d<float> confidence_texture [[id(3)]];
+    
+    // AR tracking and state data
+    device float4x4* camera_transforms [[id(4)]];
+    device float3* anchor_positions [[id(5)]];
+    device float* tracking_confidence [[id(6)]];
+    
+#if __METAL_VERSION__ >= 400
+    // ML processing tensors (Metal 4.0+ only)
+    device tensor<float, dextents<int, 4>, device_descriptor>* surface_tensors [[id(7)]];
+    device tensor<float, dextents<int, 3>, device_descriptor>* object_tensors [[id(8)]];
+#endif
+    
+    // Enhanced splat resources
+    device Splat* splat_data [[id(9)]];
+    texture2d<float> splat_textures [[id(10)]];
+    
+    // Occlusion and depth processing
+    texture2d<float> occlusion_mask [[id(11)]];
+    device float* depth_threshold_buffer [[id(12)]];
+};
+
+#if __METAL_VERSION__ >= 400
+// User annotation for the ARMetal4Resources struct (Metal 4.0+ only)
+typedef ARMetal4Resources AnnotatedARResources [[user_annotation("ar_enhanced_resources")]];
+#endif
+
+// MARK: - GPU-Driven AR Quality Management
+
+// Adaptive AR rendering based on tracking quality
+#if __METAL_VERSION__ >= 400
+[[user_annotation("ar_adaptive_quality")]]
+#endif
+kernel void ar_adaptive_rendering_kernel(
+    constant ARMetal4Resources& resources [[buffer(0)]],
+    device uint* render_mode [[buffer(1)]],
+    uint2 gid [[thread_position_in_grid]]
+) {
+    // GPU decides rendering quality based on AR tracking state
+    float tracking_confidence = resources.tracking_confidence[0];
+    
+    uint mode = 0; // Default: basic rendering
+    if (tracking_confidence > 0.8) {
+        mode = 2; // High quality: full splat density
+    } else if (tracking_confidence > 0.5) {
+        mode = 1; // Medium quality: reduced density
+    }
+    
+    render_mode[0] = mode;
+}
+
+// MARK: - AR-Specific Surface Detection
+
+#if __METAL_VERSION__ >= 400
+// ML-enhanced surface detection for better AR placement
+[[user_annotation("ar_ml_surface_detection")]]
+kernel void ar_surface_detection_ml(
+    texture2d<float> camera_frame [[texture(0)]],
+    device tensor<float, dextents<int, 3>, device_descriptor> surface_confidence [[buffer(0)]],
+    device tensor<float, dextents<int, 2>, device_descriptor> placement_hints [[buffer(1)]],
+    uint2 gid [[thread_position_in_grid]]
+) {
+    // Process camera frame through ML model for enhanced surface detection
+    // This would provide:
+    // - More accurate plane detection
+    // - Object boundary recognition
+    // - Optimal splat placement suggestions
+    
+    uint2 frame_size = uint2(camera_frame.get_width(), camera_frame.get_height());
+    if (gid.x >= frame_size.x || gid.y >= frame_size.y) return;
+    
+    // Sample camera pixel for processing
+    float4 pixel = camera_frame.read(gid);
+    
+    // Placeholder for ML-based surface analysis
+    // Real implementation would run inference on camera data
+    // to generate surface confidence maps and placement hints
+}
+#endif
+
+// MARK: - Enhanced AR Occlusion Handling
+
+// Improved depth-based occlusion with ML assistance
+#if __METAL_VERSION__ >= 400
+[[user_annotation("ar_enhanced_occlusion")]]
+#endif
+fragment float4 ar_occlusion_fragment(
+    FragmentIn in [[stage_in]],
+    constant ARMetal4Resources& resources [[buffer(0)]],
+    constant uint2& screen_size [[buffer(1)]]
+) {
+    // Enhanced occlusion handling using multiple data sources
+    constexpr sampler linear_sampler(min_filter::linear);
+    
+    // Convert screen position to normalized device coordinates for texture sampling
+    float2 screen_coord = in.position.xy / float2(screen_size);
+    
+    float ar_depth = resources.depth_texture.sample(linear_sampler, screen_coord).r;
+    float confidence = resources.confidence_texture.sample(linear_sampler, screen_coord).r;
+    float occlusion_mask = resources.occlusion_mask.sample(linear_sampler, screen_coord).r;
+    
+    // Combine multiple occlusion signals for better accuracy
+    float occlusion_factor = ar_depth * confidence * occlusion_mask;
+    
+    // Apply intelligent occlusion based on confidence
+    float4 splat_color = float4(in.color);
+    splat_color.a *= (1.0 - occlusion_factor);
+    
+    return splat_color;
+}
+
+// MARK: - AR Performance Monitoring
+
+// Real-time performance tracking for AR optimization
+#if __METAL_VERSION__ >= 400
+[[user_annotation("ar_performance_monitor")]]
+#endif
+kernel void ar_performance_monitor(
+    device float* frame_times [[buffer(0)]],
+    device uint* splat_counts [[buffer(1)]],
+    device float* gpu_utilization [[buffer(2)]],
+    constant float& current_time [[buffer(3)]],
+    uint gid [[thread_position_in_grid]]
+) {
+    if (gid == 0) {
+        // Track AR rendering metrics for adaptive quality control
+        // This data feeds back into the adaptive rendering system
+        
+        // Example metrics:
+        // - Frame time consistency
+        // - GPU load
+        // - Splat rendering efficiency
+        // - AR tracking stability
+    }
+}
+
+// MARK: - Tensor-Based AR Features (Future Enhancement)
+
+#if __METAL_VERSION__ >= 400
+// Foundation for ML-based AR enhancements
+struct ARTensorProcessor {
+    // Object detection and tracking tensors
+    device tensor<float, dextents<int, 4>, device_descriptor> detection_input;
+    device tensor<float, dextents<int, 3>, device_descriptor> detection_output;
+    
+    // Pose estimation tensors
+    device tensor<float, dextents<int, 2>, device_descriptor> pose_input;
+    device tensor<float, dextents<int, 6>, device_descriptor> pose_output;
+    
+    // Surface analysis tensors
+    device tensor<float, dextents<int, 3>, device_descriptor> surface_input;
+    device tensor<float, dextents<int, 2>, device_descriptor> surface_confidence;
+};
+
+// Template for future ML-based AR processing
+[[user_annotation("ar_tensor_processing")]]
+kernel void ar_tensor_processing_template(
+    constant ARTensorProcessor& processor [[buffer(0)]],
+    uint2 gid [[thread_position_in_grid]]
+) {
+    // Placeholder for advanced tensor operations:
+    // - Real-time object detection
+    // - Enhanced pose estimation
+    // - Intelligent surface analysis
+    // - Predictive tracking
+}
+#endif
