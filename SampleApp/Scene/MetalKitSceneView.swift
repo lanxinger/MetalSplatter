@@ -126,9 +126,9 @@ struct MetalKitSceneView: View {
                                     HStack {
                                         Text("Metal 4 Bindless Resources")
                                             .font(.subheadline)
-                                        Text("(Default)")
+                                        Text("(Full Feature Set)")
                                             .font(.caption2)
-                                            .foregroundColor(.blue)
+                                            .foregroundColor(.green)
                                             .padding(.horizontal, 6)
                                             .padding(.vertical, 2)
                                             .background(Color.blue.opacity(0.1))

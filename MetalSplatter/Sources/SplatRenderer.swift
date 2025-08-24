@@ -173,7 +173,7 @@ public class SplatRenderer {
      memory. Color blending works the same as the hardcoded path, but depth blending uses color alpha and results in mostly-transparent splats contributing only slightly to the depth,
      resulting in a much more continuous and representative depth value, which is important for reprojection on Vision Pro.
      */
-    private var useMultiStagePipeline: Bool {
+    internal var useMultiStagePipeline: Bool {
 #if targetEnvironment(simulator)
         false
 #else
@@ -198,12 +198,12 @@ public class SplatRenderer {
 
     internal let library: MTLLibrary
     // Single-stage pipeline
-    private var singleStagePipelineState: MTLRenderPipelineState?
-    private var singleStageDepthState: MTLDepthStencilState?
+    internal var singleStagePipelineState: MTLRenderPipelineState?
+    internal var singleStageDepthState: MTLDepthStencilState?
     // Multi-stage pipeline
     private var initializePipelineState: MTLRenderPipelineState?
-    private var drawSplatPipelineState: MTLRenderPipelineState?
-    private var drawSplatDepthState: MTLDepthStencilState?
+    internal var drawSplatPipelineState: MTLRenderPipelineState?
+    internal var drawSplatDepthState: MTLDepthStencilState?
     private var postprocessPipelineState: MTLRenderPipelineState?
     private var postprocessDepthState: MTLDepthStencilState?
 
@@ -212,7 +212,7 @@ public class SplatRenderer {
     // uniforms = the i'th buffer (where i = uniformBufferIndex, which varies from 0 to maxSimultaneousRenders-1)
     var dynamicUniformBuffers: MTLBuffer
     var uniformBufferOffset = 0
-    var uniformBufferIndex = 0
+    internal var uniformBufferIndex = 0
     var uniforms: UnsafeMutablePointer<UniformsArray>
 
     // cameraWorldPosition and Forward vectors are the latest mean camera position across all viewports
@@ -582,13 +582,13 @@ public class SplatRenderer {
         indexBufferPool.trimToMemoryPressure()
     }
 
-    private func switchToNextDynamicBuffer() {
+    internal func switchToNextDynamicBuffer() {
         uniformBufferIndex = (uniformBufferIndex + 1) % maxSimultaneousRenders
         uniformBufferOffset = UniformsArray.alignedSize * uniformBufferIndex
         uniforms = UnsafeMutableRawPointer(dynamicUniformBuffers.contents() + uniformBufferOffset).bindMemory(to: UniformsArray.self, capacity: 1)
     }
 
-    private func updateUniforms(forViewports viewports: [ViewportDescriptor],
+    internal func updateUniforms(forViewports viewports: [ViewportDescriptor],
                                 splatCount: UInt32,
                                 indexedSplatCount: UInt32) {
         for (i, viewport) in viewports.enumerated() where i <= maxViewCount {

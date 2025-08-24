@@ -27,7 +27,7 @@ struct RenderSettings: View {
     @State private var isMetal4Available: Bool = false
     @State private var metal4SIMDGroupEnabled: Bool = true
     @State private var metal4TensorEnabled: Bool = true
-    @State private var metal4MeshShadersEnabled: Bool = false
+    @State private var metal4MeshShadersEnabled: Bool = true // Enable by default for full Metal 4 feature set
     @State private var metal4AtomicSortEnabled: Bool = true
     @State private var metal4Capabilities: Metal4Capabilities?
     var onDismiss: (() -> Void)?

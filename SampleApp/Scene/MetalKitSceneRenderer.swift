@@ -154,7 +154,7 @@ class MetalKitSceneRenderer: NSObject, MTKViewDelegate {
                         // Continue with traditional rendering
                     }
                 } else {
-                    Self.log.info("Metal 4 bindless resources not available on this platform (requires iOS 26+)")
+                    Self.log.info("Metal 4 bindless resources not available on this platform (requires iOS 26+/macOS 26+)")
                 }
             }
             
