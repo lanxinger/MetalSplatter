@@ -43,6 +43,7 @@ class MetalKitSceneRenderer: NSObject, MTKViewDelegate {
     let metalKitView: MTKView
     let device: MTLDevice
     let commandQueue: MTLCommandQueue
+    private let commandBufferManager: CommandBufferManager
 
     var model: ModelIdentifier?
     var modelRenderer: (any ModelRenderer)?
@@ -88,6 +89,7 @@ class MetalKitSceneRenderer: NSObject, MTKViewDelegate {
         self.device = device
         guard let queue = self.device.makeCommandQueue() else { return nil }
         self.commandQueue = queue
+        self.commandBufferManager = CommandBufferManager(commandQueue: queue)
         self.metalKitView = metalKitView
         metalKitView.colorPixelFormat = MTLPixelFormat.bgra8Unorm_srgb
         metalKitView.depthStencilPixelFormat = MTLPixelFormat.depth32Float
@@ -268,7 +270,7 @@ class MetalKitSceneRenderer: NSObject, MTKViewDelegate {
 
         _ = inFlightSemaphore.wait(timeout: DispatchTime.distantFuture)
 
-        guard let commandBuffer = commandQueue.makeCommandBuffer() else {
+        guard let commandBuffer = commandBufferManager.makeCommandBuffer() else {
             inFlightSemaphore.signal()
             return
         }

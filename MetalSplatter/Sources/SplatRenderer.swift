@@ -238,6 +238,9 @@ public class SplatRenderer {
 
     var sorting = false
     var orderAndDepthTempSort: [SplatIndexAndDepth] = []
+    
+    // Metal 4 command buffer pool for improved performance
+    private var commandBufferManager: CommandBufferManager
 
     public init(device: MTLDevice,
                 colorFormat: MTLPixelFormat,
@@ -250,6 +253,13 @@ public class SplatRenderer {
 #endif
 
         self.device = device
+
+        // Initialize command buffer manager with Metal 4 pooling support
+        guard let commandQueue = device.makeCommandQueue() else {
+            throw SplatRendererError.metalDeviceUnavailable
+        }
+        commandQueue.label = "SplatRenderer Command Queue"
+        self.commandBufferManager = CommandBufferManager(commandQueue: commandQueue)
 
         self.colorFormat = colorFormat
         self.depthFormat = depthFormat
@@ -813,15 +823,8 @@ public class SplatRenderer {
                     return
                 }
 
-                // Create command queue for compute and MPSArgSort.
-                guard let commandQueue = device.makeCommandQueue() else {
-                    Self.log.error("Failed to create command queue for compute and MPSArgSort.")
-                    self.sorting = false
-                    return
-                }
-                
-                // Create command buffer for distance computation
-                guard let commandBuffer = commandQueue.makeCommandBuffer(),
+                // Create command buffer for distance computation using pooled manager
+                guard let commandBuffer = commandBufferManager.makeCommandBuffer(),
                       let computeEncoder = commandBuffer.makeComputeCommandEncoder(),
                       let computePipelineState = computeDistancesPipelineState else {
                     Self.log.error("Failed to create compute command buffer or encoder.")
@@ -863,7 +866,7 @@ public class SplatRenderer {
 
                 // Run argsort, in decending order.
                 let argSort = MPSArgSort(dataType: .float32, descending: true)
-                argSort(commandQueue: commandQueue,
+                argSort(commandQueue: commandBufferManager.queue,
                         input: distanceBuffer,
                         output: indexOutputBuffer,
                         count: splatCount)

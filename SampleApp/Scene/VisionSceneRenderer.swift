@@ -38,6 +38,7 @@ class VisionSceneRenderer {
     let layerRenderer: LayerRenderer
     let device: MTLDevice
     let commandQueue: MTLCommandQueue
+    private let commandBufferManager: CommandBufferManager
 
     var model: ModelIdentifier?
     var modelRenderer: (any ModelRenderer)?
@@ -60,6 +61,7 @@ class VisionSceneRenderer {
             throw RendererError.failedToCreateCommandQueue
         }
         self.commandQueue = commandQueue
+        self.commandBufferManager = CommandBufferManager(commandQueue: commandQueue)
 
         worldTracking = WorldTrackingProvider()
         arSession = ARKitSession()
@@ -182,7 +184,7 @@ class VisionSceneRenderer {
         guard let timing = frame.predictTiming() else { return }
         LayerRenderer.Clock().wait(until: timing.optimalInputTime)
 
-        guard let commandBuffer = commandQueue.makeCommandBuffer() else {
+        guard let commandBuffer = commandBufferManager.makeCommandBuffer() else {
             fatalError("Failed to create command buffer")
         }
 

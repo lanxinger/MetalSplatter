@@ -19,6 +19,7 @@ class ARSceneRenderer: NSObject, MTKViewDelegate {
     let metalKitView: MTKView
     let device: MTLDevice
     let commandQueue: MTLCommandQueue
+    private let commandBufferManager: CommandBufferManager
     
     var model: ModelIdentifier?
     private var arSplatRenderer: ARSplatRenderer?
@@ -37,6 +38,7 @@ class ARSceneRenderer: NSObject, MTKViewDelegate {
         self.device = device
         guard let queue = self.device.makeCommandQueue() else { return nil }
         self.commandQueue = queue
+        self.commandBufferManager = CommandBufferManager(commandQueue: queue)
         self.metalKitView = metalKitView
         
         // Configure MTKView for AR
@@ -186,7 +188,7 @@ class ARSceneRenderer: NSObject, MTKViewDelegate {
         } catch {
             Self.log.error("Unable to render AR scene: \(error.localizedDescription)")
             // Fallback: Clear to a visible color so we know rendering is working
-            guard let commandBuffer = commandQueue.makeCommandBuffer() else { return }
+            guard let commandBuffer = commandBufferManager.makeCommandBuffer() else { return }
             let renderPassDescriptor = MTLRenderPassDescriptor()
             renderPassDescriptor.colorAttachments[0].texture = drawable.texture
             renderPassDescriptor.colorAttachments[0].loadAction = .clear

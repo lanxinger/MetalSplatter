@@ -11,6 +11,7 @@ import UIKit
 public class ARSplatRenderer: NSObject {
     private let device: MTLDevice
     private let commandQueue: MTLCommandQueue
+    private let commandBufferManager: CommandBufferManager
     private let library: MTLLibrary
     
     // AR components
@@ -64,6 +65,7 @@ public class ARSplatRenderer: NSObject {
             throw ARSplatRendererError.failedToCreateCommandQueue
         }
         self.commandQueue = commandQueue
+        self.commandBufferManager = CommandBufferManager(commandQueue: commandQueue)
         
         // Use the MetalSplatter bundle's library instead of the default library
         do {
@@ -570,12 +572,13 @@ public class ARSplatRenderer: NSObject {
         // Update AR camera
         arCamera.update(viewportSize: viewportSize)
         
-        guard let commandBuffer = commandQueue.makeCommandBuffer() else {
+        // Create separate command buffers for AR background and splat rendering
+        guard let backgroundCommandBuffer = commandBufferManager.makeCommandBuffer() else {
             throw ARSplatRendererError.failedToCreateCommandBuffer
         }
         
         // Single-pass rendering: render AR background directly to drawable
-        arBackgroundRenderer.render(to: drawable.texture, with: commandBuffer)
+        arBackgroundRenderer.render(to: drawable.texture, with: backgroundCommandBuffer)
         
         // Render splats on top with proper blending (if we have splats loaded)
         if splatRenderer.splatCount > 0 {
@@ -586,13 +589,27 @@ public class ARSplatRenderer: NSObject {
             
             // Only render splats if they've been placed (either auto or manually)
             if hasBeenPlaced {
+                guard let splatCommandBuffer = commandBufferManager.makeCommandBuffer() else {
+                    throw ARSplatRendererError.failedToCreateCommandBuffer
+                }
+                
+                // Commit background first, then render splats
+                backgroundCommandBuffer.commit()
+                
                 // Render splats directly to drawable with alpha blending
-                try renderSplatsToDrawable(drawable, commandBuffer: commandBuffer)
+                try renderSplatsToDrawable(drawable, commandBuffer: splatCommandBuffer)
+                splatCommandBuffer.present(drawable)
+                splatCommandBuffer.commit()
+            } else {
+                // No splats placed yet, just present the background
+                backgroundCommandBuffer.present(drawable)
+                backgroundCommandBuffer.commit()
             }
+        } else {
+            // No splats to render, just present the background
+            backgroundCommandBuffer.present(drawable)
+            backgroundCommandBuffer.commit()
         }
-        
-        commandBuffer.present(drawable)
-        commandBuffer.commit()
     }
     
     private func setupARSession() {
