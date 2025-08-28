@@ -7,7 +7,16 @@ public class AutodetectSceneReader: SplatSceneReader {
 
     private let reader: SplatSceneReader
 
-    public init(_ url: URL) throws {
+    /// Initialize with default settings
+    public convenience init(_ url: URL) throws {
+        try self.init(url, useOptimizedSOGS: true)
+    }
+    
+    /// Initialize with option to use optimized SOGS reader
+    /// - Parameters:
+    ///   - url: File URL to read
+    ///   - useOptimizedSOGS: Whether to use the optimized SOGS reader (default: true)
+    public init(_ url: URL, useOptimizedSOGS: Bool) throws {
         print("AutodetectSceneReader: Trying to load file: \(url.path)")
         print("AutodetectSceneReader: File extension: \(url.pathExtension)")
         
@@ -31,13 +40,14 @@ public class AutodetectSceneReader: SplatSceneReader {
                 throw Error.cannotDetermineFormat
             }
         case .sogs:
-            print("AutodetectSceneReader: Loading as SOGS")
+            print("AutodetectSceneReader: Loading as SOGS (optimized: \(useOptimizedSOGS))")
             do {
                 // Check if it's a ZIP file or regular SOGS folder
                 if url.pathExtension.lowercased() == "zip" {
                     reader = try SplatSOGSZipReader(url)
                     print("AutodetectSceneReader: Successfully created SplatSOGSZipReader")
                 } else {
+                    // Use the standard SplatSOGSSceneReader (now with optimizations built-in)
                     reader = try SplatSOGSSceneReader(url)
                     print("AutodetectSceneReader: Successfully created SplatSOGSSceneReader")
                 }

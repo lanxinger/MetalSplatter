@@ -74,9 +74,10 @@
 		610347DF2B4689DB00693CE3 /* Model */ = {
 			isa = PBXGroup;
 			children = (
-				283179692E5A1586006FD427 /* ModelCache.swift */,
-				28BD25572E16704600525F25 /* ARSplatRenderer+ModelRenderer.swift */,
 				28BD25512E166F8E00525F25 /* ARModelIdentifier.swift */,
+				28BD25572E16704600525F25 /* ARSplatRenderer+ModelRenderer.swift */,
+				28C237DA2E17C48000BF6F24 /* FastSHSettings.swift */,
+				283179692E5A1586006FD427 /* ModelCache.swift */,
 				61791DDB2B4154FB00302B57 /* ModelIdentifier.swift */,
 				61791DDE2B4154FB00302B57 /* ModelRenderer.swift */,
 				61791DDC2B4154FB00302B57 /* SampleBoxRenderer+ModelRenderer.swift */,
@@ -126,15 +127,14 @@
 		61E3FD792AE5CB0200032652 = {
 			isa = PBXGroup;
 			children = (
-				28C237DA2E17C48000BF6F24 /* FastSHSettings.swift */,
 				610347E22B468A1100693CE3 /* App */,
-				610347E12B468A0B00693CE3 /* Util */,
-				610347E02B468A0000693CE3 /* Scene */,
-				610347DF2B4689DB00693CE3 /* Model */,
-				61791DF82B41551F00302B57 /* Info.plist */,
 				61791DC32B41514300302B57 /* Assets.xcassets */,
-				61E3FD832AE5CB0200032652 /* Products */,
 				619832682AF0BC390022500D /* Frameworks */,
+				61791DF82B41551F00302B57 /* Info.plist */,
+				610347DF2B4689DB00693CE3 /* Model */,
+				61E3FD832AE5CB0200032652 /* Products */,
+				610347E02B468A0000693CE3 /* Scene */,
+				610347E12B468A0B00693CE3 /* Util */,
 			);
 			sourceTree = "<group>";
 		};

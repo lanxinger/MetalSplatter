@@ -60,13 +60,15 @@ public class SplatSOGSSceneReader: SplatSceneReader {
         
         print("SplatSOGSSceneReader: Found \(metadata.means.shape[0]) splats")
         
-        // Load WebP texture files
+        // Load WebP texture files using cache and parallel loading
         do {
-            let compressedData = try loadCompressedData(metadata: metadata)
+            let compressedData = try SOGSTextureCache.shared.getCompressedData(for: metaURL) {
+                return try self.loadCompressedDataParallel(metadata: metadata)
+            }
             print("SplatSOGSSceneReader: Successfully loaded all WebP textures")
             
-            // Decompress and convert to SplatScenePoint format
-            return try decompressData(compressedData)
+            // Decompress and convert to SplatScenePoint format using optimized batch iterator
+            return try decompressDataOptimized(compressedData)
         } catch let error as SOGSError {
             print("SplatSOGSSceneReader: SOGS-specific error: \(error)")
             throw error
@@ -131,7 +133,7 @@ public class SplatSOGSSceneReader: SplatSceneReader {
         )
     }
     
-    private func loadAndDecodeWebP(_ filename: String) throws -> WebPDecoder.DecodedImage {
+    internal func loadAndDecodeWebP(_ filename: String) throws -> WebPDecoder.DecodedImage {
         print("SplatSOGSSceneReader: Attempting to load WebP file: \(filename)")
         
         // Try multiple approaches for finding the file on iOS File Provider
@@ -267,7 +269,40 @@ public class SplatSOGSSceneReader: SplatSceneReader {
         return points
     }
     
-    private func calculateSHBands(width: Int) -> Int {
+    /// Optimized decompression using batch processing
+    private func decompressDataOptimized(_ compressedData: SOGSCompressedData) throws -> [SplatScenePoint] {
+        print("SplatSOGSSceneReader: Optimized decompression of \(compressedData.numSplats) splats...")
+        print("SplatSOGSSceneReader: Texture dimensions: \(compressedData.textureWidth)x\(compressedData.textureHeight)")
+        print("SplatSOGSSceneReader: SH bands: \(compressedData.shBands)")
+        
+        let batchIterator = SOGSBatchIterator(compressedData)
+        var allPoints: [SplatScenePoint] = []
+        allPoints.reserveCapacity(compressedData.numSplats)
+        
+        // Process in batches for better performance
+        let batchSize = 8192 // Process 8192 points at a time for optimal performance
+        let numBatches = (compressedData.numSplats + batchSize - 1) / batchSize
+        
+        for batchIndex in 0..<numBatches {
+            let startIndex = batchIndex * batchSize
+            let remainingPoints = compressedData.numSplats - startIndex
+            let currentBatchSize = min(batchSize, remainingPoints)
+            
+            let batchPoints = batchIterator.readBatch(startIndex: startIndex, count: currentBatchSize)
+            allPoints.append(contentsOf: batchPoints)
+            
+            // Progress logging for large datasets
+            if batchIndex % 10 == 0 || batchIndex == numBatches - 1 {
+                let processed = min(startIndex + currentBatchSize, compressedData.numSplats)
+                print("SplatSOGSSceneReader: Batch processed \(processed)/\(compressedData.numSplats) splats")
+            }
+        }
+        
+        print("SplatSOGSSceneReader: Successfully decompressed \(allPoints.count) points using optimized batch iterator")
+        return allPoints
+    }
+    
+    internal func calculateSHBands(width: Int) -> Int {
         // Based on the PlayCanvas implementation:
         // 192: 1 band (64 * 3), 512: 2 bands (64 * 8), 960: 3 bands (64 * 15)
         switch width {
