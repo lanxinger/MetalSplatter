@@ -31,7 +31,15 @@ public class SplatSOGSSceneReader: SplatSceneReader {
     public func readScene() throws -> [SplatScenePoint] {
         print("SplatSOGSSceneReader: Loading SOGS metadata from \(metaURL.path)")
         
-        // Load and parse metadata
+        // Check if this is a bundled .sog file - delegate to v2 reader
+        let filename = metaURL.lastPathComponent.lowercased()
+        if filename.hasSuffix(".sog") {
+            print("SplatSOGSSceneReader: Detected .sog bundle, delegating to v2 reader")
+            let v2Reader = try SplatSOGSSceneReaderV2(metaURL)
+            return try v2Reader.readScene()
+        }
+        
+        // Load and parse metadata to detect version
         let metaData: Data
         do {
             // Handle iOS File Provider security scoped resource access
@@ -49,12 +57,32 @@ public class SplatSOGSSceneReader: SplatSceneReader {
             throw SOGSError.invalidMetadata
         }
         
+        // Try to detect version by parsing JSON
+        do {
+            let json = try JSONSerialization.jsonObject(with: metaData) as? [String: Any]
+            if let version = json?["version"] as? Int {
+                print("SplatSOGSSceneReader: Detected SOGS version \(version)")
+                if version == 2 {
+                    // Delegate to v2 reader
+                    print("SplatSOGSSceneReader: Delegating to v2 reader for version 2 format")
+                    let v2Reader = try SplatSOGSSceneReaderV2(metaURL)
+                    return try v2Reader.readScene()
+                }
+            } else {
+                print("SplatSOGSSceneReader: No version field found, assuming v1 format")
+            }
+        } catch {
+            print("SplatSOGSSceneReader: Could not parse JSON for version detection: \(error)")
+        }
+        
+        // Fall back to v1 reader
+        print("SplatSOGSSceneReader: Using v1 reader")
         let metadata: SOGSMetadata
         do {
             metadata = try JSONDecoder().decode(SOGSMetadata.self, from: metaData)
-            print("SplatSOGSSceneReader: Successfully parsed metadata")
+            print("SplatSOGSSceneReader: Successfully parsed v1 metadata")
         } catch {
-            print("SplatSOGSSceneReader: Failed to parse metadata JSON: \(error)")
+            print("SplatSOGSSceneReader: Failed to parse v1 metadata JSON: \(error)")
             throw SOGSError.invalidMetadata
         }
         

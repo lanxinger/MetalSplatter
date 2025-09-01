@@ -32,6 +32,9 @@ public enum SplatFileFormat {
             } else {
                 return nil
             }
+        case "sog":
+            // SOGS v2 bundled format - single .sog file (ZIP archive)
+            self = .sogs
         case "zip":
             // Check if this is a SOGS ZIP file by examining its contents
             if SplatFileFormat.isSOGSZipFile(url: url) {

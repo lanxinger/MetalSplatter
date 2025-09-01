@@ -42,12 +42,18 @@ public class AutodetectSceneReader: SplatSceneReader {
         case .sogs:
             print("AutodetectSceneReader: Loading as SOGS (optimized: \(useOptimizedSOGS))")
             do {
-                // Check if it's a ZIP file or regular SOGS folder
-                if url.pathExtension.lowercased() == "zip" {
+                // Check the file extension to determine which SOGS reader to use
+                let fileExtension = url.pathExtension.lowercased()
+                if fileExtension == "sog" {
+                    // SOGS v2 bundled format - use the v2 reader directly
+                    reader = try SplatSOGSSceneReaderV2(url)
+                    print("AutodetectSceneReader: Successfully created SplatSOGSSceneReaderV2 for .sog file")
+                } else if fileExtension == "zip" {
+                    // Legacy ZIP format - use ZIP reader
                     reader = try SplatSOGSZipReader(url)
                     print("AutodetectSceneReader: Successfully created SplatSOGSZipReader")
                 } else {
-                    // Use the standard SplatSOGSSceneReader (now with optimizations built-in)
+                    // Standard SOGS format (folder/meta.json) - use main reader with auto-detection
                     reader = try SplatSOGSSceneReader(url)
                     print("AutodetectSceneReader: Successfully created SplatSOGSSceneReader")
                 }

@@ -66,14 +66,14 @@ struct ContentView: View {
                 .font(.headline)
                 .padding(.top)
             
-            Text("• PLY, SPZ, SPLAT files: Use 'Read Scene File'\n• SOGS compressed: Use 'Read SOGS Folder'\n• SOGS fallback: Select meta.json directly via 'Read Scene File'")
+            Text("• PLY, SPZ, SPLAT files: Use 'Read Scene File'\n• SOGS v2 bundled: Select .sog file via 'Read Scene File'\n• SOGS v1 folders: Use 'Read SOGS Folder'\n• SOGS fallback: Select meta.json directly via 'Read Scene File'")
                 .font(.caption)
                 .multilineTextAlignment(.leading)
                 .padding(.horizontal)
 
             Spacer()
 
-            Button("Read Scene File (PLY/SPLAT/SPZ/JSON/ZIP)") {
+            Button("Read Scene File (PLY/SPLAT/SPZ/JSON/SOG/ZIP)") {
                 isPickingFile = true
             }
             .padding()
@@ -89,6 +89,7 @@ struct ContentView: View {
                             UTType(filenameExtension: "spz")!,
                             UTType(filenameExtension: "spx")!,
                             UTType(filenameExtension: "json")!,
+                            UTType(filenameExtension: "sog")!,
                             UTType.zip
                           ]) {
                 isPickingFile = false

@@ -60,15 +60,40 @@ public protocol ModelRenderer {
 | **PLY** | Standard 3D Gaussian splat format | ASCII/Binary point cloud data |
 | **SPLAT** | Optimized binary format | Compressed, fast loading |
 | **SPZ** | Compressed splat format | Space-efficient storage |
-| **SOGS** | Advanced compressed format | Metadata JSON, multi-asset support |
+| **SOGS v1** | Compressed format with WebP textures | Folder-based, metadata JSON |
+| **SOGS v2** | Enhanced compressed format | Bundled .sog files, codebook compression |
 
-### SOGS Format Structure
+### SOGS v1 Format Structure
 ```
-model.sogs/
-├── meta.json           # Configuration and metadata
-├── chunk_0.splat       # Primary splat data
-└── additional assets   # Supporting files
+model_folder/
+├── meta.json           # Configuration and metadata  
+├── means_l.webp       # Position data (low bytes)
+├── means_u.webp       # Position data (high bytes)
+├── scales.webp        # Scale data
+├── quats.webp         # Orientation data
+├── sh0.webp           # Color/opacity data
+├── shN_centroids.webp # Optional: SH centroids
+└── shN_labels.webp    # Optional: SH labels
 ```
+
+### SOGS v2 Format Structure
+```
+model.sog              # Single bundled ZIP file containing:
+├── meta.json          # v2 metadata with codebooks
+├── means_l.webp       # Position data (low bytes)
+├── means_u.webp       # Position data (high bytes)
+├── scales.webp        # Scale indices (codebook-based)
+├── quats.webp         # Orientation data
+├── sh0.webp           # Color indices (codebook-based)
+├── shN_centroids.webp # Optional: SH centroids
+└── shN_labels.webp    # Optional: SH palette indices
+```
+
+### SOGS v2 Improvements
+- **Codebook Compression**: 256-entry k-means codebooks for scales and colors
+- **Single File Distribution**: Bundled .sog ZIP archives for easy sharing
+- **Morton Code Ordering**: Optimized spatial ordering eliminates runtime sorting
+- **Enhanced Metadata**: Version tracking, splat count, antialiasing flags
 
 ## Interactive Camera Controls
 
