@@ -38,6 +38,9 @@ public class ARSplatRenderer: NSObject {
     // Track the loaded file URL for coordinate calibration
     private var loadedFileURL: URL?
     
+    // Track if this is SOGS v2 format for coordinate system correction
+    private var isSOGSv2Format: Bool = false
+    
     // Track if we've logged the rendering path (avoid spam)
     private var hasLoggedRenderPath = false
     
@@ -162,6 +165,10 @@ public class ARSplatRenderer: NSObject {
         // Store the file URL for coordinate calibration
         loadedFileURL = url
         
+        // Check if this is SOGS v2 format
+        isSOGSv2Format = url.path.hasSuffix(".sog")
+        print("ARSplatRenderer: File format detection - isSOGSv2Format: \(isSOGSv2Format)")
+        
         // Reset placement state when loading new splats
         hasBeenPlaced = false
         isWaitingForARTracking = true
@@ -185,6 +192,13 @@ public class ARSplatRenderer: NSObject {
         arSessionStartTime = CACurrentMediaTime()
         
         // Auto-place splat in front of camera when first loaded (will be done in render loop)
+    }
+    
+    /// Set the source file information for format-specific transformations
+    public func setSourceFormat(url: URL) {
+        loadedFileURL = url
+        isSOGSv2Format = url.path.hasSuffix(".sog")
+        print("ARSplatRenderer: Source format set - path: \(url.path), isSOGSv2Format: \(isSOGSv2Format)")
     }
     
     private func autoPlaceSplatInFrontOfCamera() {
@@ -660,9 +674,19 @@ public class ARSplatRenderer: NSObject {
         let rotationMatrix = matrix4x4_rotation(splatRotation)
         let scaleMatrix = matrix4x4_scale(splatScale, splatScale, splatScale)
         
-        // Combine transformations: Translation * Rotation * Scale
-        // Note: AR coordinate system doesn't need the same calibration as MetalKitSceneRenderer
-        let modelMatrix = translationMatrix * rotationMatrix * scaleMatrix
+        // Format-specific coordinate calibration
+        // SOGS v2 files need special handling - they use a different coordinate system
+        let formatCalibration: simd_float4x4
+        if isSOGSv2Format {
+            // SOGS v2 needs 180° rotation around X axis in AR to match the viewer
+            formatCalibration = matrix4x4_rotation(radians: .pi, axis: SIMD3<Float>(1, 0, 0))
+        } else {
+            // Other formats work correctly with no transformation
+            formatCalibration = matrix_identity_float4x4
+        }
+        
+        // Combine transformations: Translation * Rotation * Scale * Format Calibration
+        let modelMatrix = translationMatrix * rotationMatrix * scaleMatrix * formatCalibration
         
         // Apply AR camera view matrix to the transformed splat
         let viewMatrix = arCamera.viewMatrix
@@ -698,8 +722,18 @@ public class ARSplatRenderer: NSObject {
         let rotationMatrix = matrix4x4_rotation(splatRotation)
         let scaleMatrix = matrix4x4_scale(splatScale, splatScale, splatScale)
         
-        // Combine transformations: Translation * Rotation * Scale
-        let modelMatrix = translationMatrix * rotationMatrix * scaleMatrix
+        // Format-specific coordinate calibration (same as renderSplatsToDrawable)
+        let formatCalibration: simd_float4x4
+        if isSOGSv2Format {
+            // SOGS v2 needs 180° rotation around X axis in AR to match the viewer
+            formatCalibration = matrix4x4_rotation(radians: .pi, axis: SIMD3<Float>(1, 0, 0))
+        } else {
+            // Other formats work correctly with no transformation
+            formatCalibration = matrix_identity_float4x4
+        }
+        
+        // Combine transformations: Translation * Rotation * Scale * Format Calibration
+        let modelMatrix = translationMatrix * rotationMatrix * scaleMatrix * formatCalibration
         
         // Apply AR camera view matrix to the transformed splat
         let viewMatrix = arCamera.viewMatrix

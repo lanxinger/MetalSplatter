@@ -228,20 +228,24 @@ class MetalKitSceneRenderer: NSObject, MTKViewDelegate {
         let modelDescription = model?.description ?? ""
         let isSOGS = modelDescription.contains("meta.json") || modelDescription.contains(".zip")
         let isSPZ = modelDescription.contains(".spz") || modelDescription.contains(".spx")
+        let isSOGSv2 = modelDescription.contains(".sog")
         
-        // SPZ files are already correctly oriented like SOGS files
-        // Only PLY files need the 180° rotation to be right-side up
+        // SPZ files are already correctly oriented like SOGS v1 files
+        // SOGS v2 (.sog) files need 180° flip around X axis
+        // PLY files need 180° rotation around Z axis to be right-side up
         let commonUpCalibration: simd_float4x4
-        if isSOGS || isSPZ {
-            commonUpCalibration = matrix_identity_float4x4 // No rotation for SOGS and SPZ
+        if isSOGSv2 {
+            commonUpCalibration = matrix4x4_rotation(radians: .pi, axis: SIMD3<Float>(1, 0, 0)) // 180° around X for SOGS v2
+        } else if isSOGS || isSPZ {
+            commonUpCalibration = matrix_identity_float4x4 // No rotation for SOGS v1 and SPZ
         } else {
-            commonUpCalibration = matrix4x4_rotation(radians: .pi, axis: SIMD3<Float>(0, 0, 1)) // 180° for PLY
+            commonUpCalibration = matrix4x4_rotation(radians: .pi, axis: SIMD3<Float>(0, 0, 1)) // 180° around Z for PLY
         }
         
         // Log coordinate calibration decision only when model changes
         if lastLoggedModel != modelDescription {
             lastLoggedModel = modelDescription
-            print("MetalKitSceneRenderer: model='\(modelDescription)', isSOGS=\(isSOGS), isSPZ=\(isSPZ), applying180°=\(!isSOGS && !isSPZ)")
+            print("MetalKitSceneRenderer: model='\(modelDescription)', isSOGS=\(isSOGS), isSOGSv2=\(isSOGSv2), isSPZ=\(isSPZ), rotation=\(isSOGSv2 ? "180°X" : (isSOGS || isSPZ ? "none" : "180°Z"))")
         }
 
         let viewport = MTLViewport(originX: 0, originY: 0, width: drawableSize.width, height: drawableSize.height, znear: 0, zfar: 1)

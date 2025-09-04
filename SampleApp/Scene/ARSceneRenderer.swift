@@ -86,6 +86,7 @@ class ARSceneRenderer: NSObject, MTKViewDelegate {
                     maxSimultaneousRenders: Constants.maxSimultaneousRenders
                 )
                 try arRenderer.add(points)
+                arRenderer.setSourceFormat(url: url)  // Set format for coordinate transformation
                 return arRenderer
             }.value
             

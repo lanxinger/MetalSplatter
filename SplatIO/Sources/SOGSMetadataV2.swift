@@ -276,7 +276,7 @@ public struct SOGSIteratorV2 {
         // Apply log transform inverse: sign(v)*exp(|v|)-1
         return SIMD3<Float>(
             sign(nx) * (exp(abs(nx)) - 1),
-            sign(ny) * (exp(abs(ny)) - 1), 
+            sign(ny) * (exp(abs(ny)) - 1),
             sign(nz) * (exp(abs(nz)) - 1)
         )
     }
