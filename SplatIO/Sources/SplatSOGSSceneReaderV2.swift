@@ -97,10 +97,40 @@ public class SplatSOGSSceneReaderV2: SplatSceneReader {
     private func loadCompressedDataV2(metadata: SOGSMetadataV2) throws -> SOGSCompressedDataV2 {
         print("SplatSOGSSceneReaderV2: Loading v2 WebP texture files...")
         
+        // Validate required file lists upfront
+        guard metadata.means.files.count == 2 else {
+            throw SOGSV2Error.invalidMetadata
+        }
+        guard let quatsFilename = metadata.quats.files.first else {
+            throw SOGSV2Error.invalidMetadata
+        }
+        guard let scalesFilename = metadata.scales.files.first else {
+            throw SOGSV2Error.invalidMetadata
+        }
+        guard let sh0Filename = metadata.sh0.files.first else {
+            throw SOGSV2Error.invalidMetadata
+        }
+        
+        var shCentroidsFilename: String?
+        var shLabelsFilename: String?
+        if let shN = metadata.shN {
+            for filename in shN.files {
+                let lower = filename.lowercased()
+                if lower.contains("centroid") {
+                    shCentroidsFilename = filename
+                } else if lower.contains("label") {
+                    shLabelsFilename = filename
+                }
+            }
+            if shCentroidsFilename == nil || shLabelsFilename == nil {
+                throw SOGSV2Error.invalidMetadata
+            }
+        }
+
         // Use concurrent loading for better performance
         let queue = DispatchQueue(label: "sogsv2.webp.loading", attributes: .concurrent)
         let group = DispatchGroup()
-        
+
         // Storage for results
         var means_l: WebPDecoder.DecodedImage?
         var means_u: WebPDecoder.DecodedImage?
@@ -154,7 +184,7 @@ public class SplatSOGSSceneReaderV2: SplatSceneReader {
         queue.async {
             defer { group.leave() }
             do {
-                quats = try self.loadAndDecodeWebPV2(metadata.quats.files[0])
+                quats = try self.loadAndDecodeWebPV2(quatsFilename)
             } catch {
                 errorLock.lock()
                 loadingErrors.append(error)
@@ -167,7 +197,7 @@ public class SplatSOGSSceneReaderV2: SplatSceneReader {
         queue.async {
             defer { group.leave() }
             do {
-                scales = try self.loadAndDecodeWebPV2(metadata.scales.files[0])
+                scales = try self.loadAndDecodeWebPV2(scalesFilename)
             } catch {
                 errorLock.lock()
                 loadingErrors.append(error)
@@ -180,7 +210,7 @@ public class SplatSOGSSceneReaderV2: SplatSceneReader {
         queue.async {
             defer { group.leave() }
             do {
-                sh0 = try self.loadAndDecodeWebPV2(metadata.sh0.files[0])
+                sh0 = try self.loadAndDecodeWebPV2(sh0Filename)
             } catch {
                 errorLock.lock()
                 loadingErrors.append(error)
@@ -189,13 +219,14 @@ public class SplatSOGSSceneReaderV2: SplatSceneReader {
         }
         
         // Load optional spherical harmonics textures
-        if let shN = metadata.shN, shN.files.count >= 2 {
+        if metadata.shN != nil {
             // Load centroids
             group.enter()
             queue.async {
                 defer { group.leave() }
                 do {
-                    sh_centroids = try self.loadAndDecodeWebPV2(shN.files[0])
+                    guard let filename = shCentroidsFilename else { throw SOGSV2Error.invalidMetadata }
+                    sh_centroids = try self.loadAndDecodeWebPV2(filename)
                     print("SplatSOGSSceneReaderV2: Loaded SH centroids texture")
                 } catch {
                     errorLock.lock()
@@ -209,7 +240,8 @@ public class SplatSOGSSceneReaderV2: SplatSceneReader {
             queue.async {
                 defer { group.leave() }
                 do {
-                    sh_labels = try self.loadAndDecodeWebPV2(shN.files[1])
+                    guard let filename = shLabelsFilename else { throw SOGSV2Error.invalidMetadata }
+                    sh_labels = try self.loadAndDecodeWebPV2(filename)
                     print("SplatSOGSSceneReaderV2: Loaded SH labels texture")
                 } catch {
                     errorLock.lock()
@@ -236,6 +268,15 @@ public class SplatSOGSSceneReaderV2: SplatSceneReader {
             throw SOGSV2Error.webpDecodingFailed("Failed to load required v2 textures")
         }
         
+        try validateSOGSV2Data(metadata: metadata,
+                               means_l: means_l,
+                               means_u: means_u,
+                               quats: quats,
+                               scales: scales,
+                               sh0: sh0,
+                               sh_centroids: sh_centroids,
+                               sh_labels: sh_labels)
+
         print("SplatSOGSSceneReaderV2: Successfully loaded all v2 WebP textures")
         
         return SOGSCompressedDataV2(
@@ -293,6 +334,92 @@ public class SplatSOGSSceneReaderV2: SplatSceneReader {
         }
     }
     
+    private func validateSOGSV2Data(metadata: SOGSMetadataV2,
+                                    means_l: WebPDecoder.DecodedImage,
+                                    means_u: WebPDecoder.DecodedImage,
+                                    quats: WebPDecoder.DecodedImage,
+                                    scales: WebPDecoder.DecodedImage,
+                                    sh0: WebPDecoder.DecodedImage,
+                                    sh_centroids: WebPDecoder.DecodedImage?,
+                                    sh_labels: WebPDecoder.DecodedImage?) throws {
+        let baseWidth = means_l.width
+        let baseHeight = means_l.height
+
+        func matchesBaseDimensions(_ image: WebPDecoder.DecodedImage) -> Bool {
+            image.width == baseWidth && image.height == baseHeight
+        }
+
+        guard matchesBaseDimensions(means_u),
+              matchesBaseDimensions(quats),
+              matchesBaseDimensions(scales),
+              matchesBaseDimensions(sh0) else {
+            throw SOGSV2Error.invalidMetadata
+        }
+
+        guard metadata.count >= 0, metadata.count <= baseWidth * baseHeight else {
+            throw SOGSV2Error.invalidMetadata
+        }
+
+        guard metadata.means.mins.count == 3,
+              metadata.means.maxs.count == 3 else {
+            throw SOGSV2Error.invalidMetadata
+        }
+
+        let scalesHasRange = (metadata.scales.mins?.count ?? 0) >= 3 && (metadata.scales.maxs?.count ?? 0) >= 3
+        let scalesHasCodebook = metadata.scales.codebook.count >= 256
+        guard scalesHasRange || scalesHasCodebook else {
+            throw SOGSV2Error.invalidMetadata
+        }
+
+        let sh0HasRange = (metadata.sh0.mins?.count ?? 0) >= 4 && (metadata.sh0.maxs?.count ?? 0) >= 4
+        let sh0HasCodebook = metadata.sh0.codebook.count >= 256
+        guard sh0HasRange || sh0HasCodebook else {
+            throw SOGSV2Error.invalidMetadata
+        }
+
+        if let shN = metadata.shN {
+            if let bands = shN.bands {
+                guard (1...3).contains(bands) else {
+                    throw SOGSV2Error.invalidMetadata
+                }
+            }
+
+            if let count = shN.count {
+                guard count > 0 else { throw SOGSV2Error.invalidMetadata }
+            }
+
+            let shNHasRange = (shN.mins?.count ?? 0) > 0 && (shN.maxs?.count ?? 0) > 0
+            let shNHasCodebook = shN.codebook.count >= 256
+            guard shNHasRange || shNHasCodebook else {
+                throw SOGSV2Error.invalidMetadata
+            }
+
+            guard let labels = sh_labels,
+                  let centroids = sh_centroids,
+                  matchesBaseDimensions(labels) else {
+                throw SOGSV2Error.invalidMetadata
+            }
+
+            let coefficientsPerEntry = shN.coefficientsPerEntry ?? (centroids.width / 64)
+            guard coefficientsPerEntry > 0,
+                  centroids.width % 64 == 0 else {
+                throw SOGSV2Error.invalidMetadata
+            }
+
+            let expectedWidth = coefficientsPerEntry * 64
+            guard centroids.width == expectedWidth else {
+                throw SOGSV2Error.invalidMetadata
+            }
+
+            if let count = shN.count {
+                let requiredRows = (count + 63) / 64
+                guard centroids.height >= requiredRows else {
+                    throw SOGSV2Error.invalidMetadata
+                }
+            }
+        }
+    }
+
     private func loadStandaloneFile(_ fileURL: URL) throws -> Data {
         // Handle iOS File Provider security scoped resource access
         let shouldStopAccessing = fileURL.startAccessingSecurityScopedResource()
@@ -310,7 +437,7 @@ public class SplatSOGSSceneReaderV2: SplatSceneReader {
         print("SplatSOGSSceneReaderV2: Texture dimensions: \(compressedData.textureWidth)x\(compressedData.textureHeight)")
         print("SplatSOGSSceneReaderV2: Has spherical harmonics: \(compressedData.hasSphericalHarmonics)")
         
-        let batchIterator = SOGSBatchIteratorV2(compressedData)
+        var batchIterator = SOGSBatchIteratorV2(compressedData)
         var allPoints: [SplatScenePoint] = []
         allPoints.reserveCapacity(compressedData.numSplats)
         

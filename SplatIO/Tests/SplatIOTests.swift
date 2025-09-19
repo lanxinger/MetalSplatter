@@ -122,6 +122,8 @@ final class SplatIOTests: XCTestCase {
             },
             "scales": {
                 "codebook": [0.1, 0.2, 0.3, 0.4, 0.5, 0.6],
+                "mins": [-8.0, -7.5, -7.0],
+                "maxs": [-3.0, -2.5, -2.0],
                 "files": ["scales.webp"]
             },
             "quats": {
@@ -129,11 +131,17 @@ final class SplatIOTests: XCTestCase {
             },
             "sh0": {
                 "codebook": [0.5, 0.6, 0.7, 0.8, 0.9, 1.0],
+                "mins": [-0.2, -0.1, -0.3, -3.0],
+                "maxs": [0.2, 0.3, 0.1, 3.0],
                 "files": ["sh0.webp"]
             },
             "shN": {
+                "count": 4,
+                "bands": 3,
                 "codebook": [0.1, 0.15, 0.2, 0.25, 0.3, 0.35],
-                "files": ["shN_centroids.webp", "shN_labels.webp"]
+                "mins": [-0.25],
+                "maxs": [0.25],
+                "files": ["shN_labels.webp", "shN_centroids.webp"]
             }
         }
         """.data(using: .utf8)!
@@ -154,20 +162,73 @@ final class SplatIOTests: XCTestCase {
         
         // Test scales codebook
         XCTAssertEqual(metadata.scales.codebook.count, 6)
+        XCTAssertEqual(metadata.scales.mins, [-8.0, -7.5, -7.0])
+        XCTAssertEqual(metadata.scales.maxs, [-3.0, -2.5, -2.0])
         XCTAssertEqual(metadata.scales.files.count, 1)
         XCTAssertEqual(metadata.scales.files[0], "scales.webp")
         
         // Test sh0 codebook
         XCTAssertEqual(metadata.sh0.codebook.count, 6)
+        XCTAssertEqual(metadata.sh0.mins, [-0.2, -0.1, -0.3, -3.0])
+        XCTAssertEqual(metadata.sh0.maxs, [0.2, 0.3, 0.1, 3.0])
         XCTAssertEqual(metadata.sh0.files.count, 1)
         XCTAssertEqual(metadata.sh0.files[0], "sh0.webp")
         
         // Test shN
         XCTAssertNotNil(metadata.shN)
+        XCTAssertEqual(metadata.shN?.count, 4)
+        XCTAssertEqual(metadata.shN?.bands, 3)
         XCTAssertEqual(metadata.shN?.codebook.count, 6)
+        XCTAssertEqual(metadata.shN?.mins ?? [], [-0.25])
+        XCTAssertEqual(metadata.shN?.maxs ?? [], [0.25])
         XCTAssertEqual(metadata.shN?.files.count, 2)
-        XCTAssertEqual(metadata.shN?.files[0], "shN_centroids.webp")
-        XCTAssertEqual(metadata.shN?.files[1], "shN_labels.webp")
+        XCTAssertEqual(metadata.shN?.files[0], "shN_labels.webp")
+        XCTAssertEqual(metadata.shN?.files[1], "shN_centroids.webp")
+    }
+
+    func testSOGSV2MetadataParsingLegacySH() throws {
+        // Legacy v2 metadata may omit count/bands in the shN block
+        let legacyMetadataJSON = """
+        {
+            "version": 2,
+            "count": 2048,
+            "antialias": true,
+            "means": {
+                "mins": [-1.0, -1.0, -1.0],
+                "maxs": [1.0, 1.0, 1.0],
+                "files": ["means_l.webp", "means_u.webp"]
+            },
+            "scales": {
+                "codebook": [0.1, 0.2, 0.3, 0.4, 0.5, 0.6],
+                "mins": [-7.0, -7.0, -7.0],
+                "maxs": [-2.0, -2.0, -2.0],
+                "files": ["scales.webp"]
+            },
+            "quats": {
+                "files": ["quats.webp"]
+            },
+            "sh0": {
+                "codebook": [0.1, 0.2, 0.3, 0.4, 0.5, 0.6],
+                "mins": [-0.1, -0.1, -0.1, -2.0],
+                "maxs": [0.1, 0.1, 0.1, 2.0],
+                "files": ["sh0.webp"]
+            },
+            "shN": {
+                "codebook": [0.01, 0.02, 0.03, 0.04, 0.05, 0.06],
+                "mins": [-0.2],
+                "maxs": [0.2],
+                "files": ["shN_centroids.webp", "shN_labels.webp"]
+            }
+        }
+        """.data(using: .utf8)!
+
+        let decoder = JSONDecoder()
+        let metadata = try decoder.decode(SOGSMetadataV2.self, from: legacyMetadataJSON)
+
+        XCTAssertNotNil(metadata.shN)
+        XCTAssertNil(metadata.shN?.count)
+        XCTAssertNil(metadata.shN?.bands)
+        XCTAssertEqual(metadata.shN?.files.count, 2)
     }
     
     func testSOGSV2MetadataWithoutSH() throws {
@@ -184,6 +245,8 @@ final class SplatIOTests: XCTestCase {
             },
             "scales": {
                 "codebook": [0.01, 0.02, 0.03],
+                "mins": [-6.0, -6.0, -6.0],
+                "maxs": [-2.0, -2.0, -2.0],
                 "files": ["scales.webp"]
             },
             "quats": {
@@ -191,6 +254,8 @@ final class SplatIOTests: XCTestCase {
             },
             "sh0": {
                 "codebook": [0.1, 0.2, 0.3],
+                "mins": [-0.2, -0.2, -0.2, -2.0],
+                "maxs": [0.2, 0.2, 0.2, 2.0],
                 "files": ["sh0.webp"]
             }
         }
@@ -373,19 +438,27 @@ final class SplatIOTests: XCTestCase {
                 files: ["means_l.webp", "means_u.webp"]
             ),
             scales: SOGSScalesInfoV2(
-                codebook: Array(0..<768).map { Float($0) * 0.01 }, // 256 * 3 = 768 values
+                codebook: Array(0..<256).map { Float($0) * 0.01 },
+                mins: [-7.0, -7.0, -7.0],
+                maxs: [-2.0, -2.0, -2.0],
                 files: ["scales.webp"]
             ),
             quats: SOGSQuatsInfoV2(
                 files: ["quats.webp"]
             ),
             sh0: SOGSH0InfoV2(
-                codebook: Array(0..<768).map { Float($0) * 0.001 }, // 256 * 3 = 768 values
+                codebook: Array(0..<256).map { Float($0) * 0.001 },
+                mins: [-0.2, -0.2, -0.2, -3.0],
+                maxs: [0.2, 0.2, 0.2, 3.0],
                 files: ["sh0.webp"]
             ),
             shN: SOGSSHNInfoV2(
+                count: 128,
+                bands: 3,
                 codebook: Array(0..<256).map { Float($0) * 0.1 },
-                files: ["shN_centroids.webp", "shN_labels.webp"]
+                mins: [-0.3],
+                maxs: [0.3],
+                files: ["shN_labels.webp", "shN_centroids.webp"]
             )
         )
     }

@@ -32,15 +32,18 @@ extension SplatRenderer {
     struct SplatSH {
         var position: MTLPackedFloat3
         var baseColor: PackedRGBHalf4      // Base color (DC term) + opacity
+        var rotation: simd_float4          // Quaternion (x,y,z,w)
         var covA: PackedHalf3
         var covB: PackedHalf3
         var shPaletteIndex: UInt32         // Index into SH palette (for SOGS)
         var shDegree: UInt16               // SH degree (0-3)
-        
+        var padding: UInt16 = 0            // Alignment padding
+
         /// Convert from regular Splat + SH info
-        init(splat: Splat, shIndex: UInt32 = 0, shDegree: UInt16 = 0) {
+        init(splat: Splat, rotation: simd_quatf, shIndex: UInt32 = 0, shDegree: UInt16 = 0) {
             self.position = splat.position
             self.baseColor = splat.color
+            self.rotation = rotation.vector
             self.covA = splat.covA
             self.covB = splat.covB
             self.shPaletteIndex = shIndex
@@ -58,9 +61,6 @@ public class FastSHSplatRenderer: SplatRenderer {
         /// Enable fast SH evaluation (vs per-splat evaluation)
         public var enabled: Bool = true
         
-        /// Use texture-based evaluation for better edge accuracy
-        public var useTextureEvaluation: Bool = false
-        
         /// Maximum number of unique SH coefficient sets (palette size)
         public var maxPaletteSize: Int = 65536
         
@@ -72,24 +72,49 @@ public class FastSHSplatRenderer: SplatRenderer {
     
     // Fast SH specific properties
     public var fastSHConfig = FastSHConfiguration()
-    private var shEvaluator: SphericalHarmonicsEvaluator?
     private var shPaletteBuffer: MTLBuffer?
-    private var evaluatedSHBuffer: MTLBuffer?
-    private var evaluatedSHTexture: MTLTexture?
     private var fastSHPipelineState: MTLRenderPipelineState?
-    private var textureSHPipelineState: MTLRenderPipelineState?
-    private var framesSinceLastSHUpdate = 0
     
     // SH data storage
     public private(set) var shCoefficients: [[SIMD3<Float>]] = []
     private var shPaletteMap: [Int: UInt32] = [:] // Maps from splat index to palette index
     public private(set) var shDegree: Int = 0
+    private var shCoefficientsPerEntry: Int = 0
     
     // Extended splat buffer for SH
     private var splatSHBuffer: MetalBuffer<SplatSH>
     private var splatSHBufferPrime: MetalBuffer<SplatSH>
     private let splatSHBufferPool: MetalBufferPool<SplatSH>
-    
+
+    private struct FastSHShaderParameters {
+        var coeffsPerEntry: UInt32 = 0
+        var paletteSize: UInt32 = 0
+        var degree: UInt32 = 0
+        var padding: UInt32 = 0
+    }
+
+    private var shaderParameters = FastSHShaderParameters()
+
+    public override func prepareForSorting(count: Int) throws {
+        try super.prepareForSorting(count: count)
+        if splatSHBufferPrime.capacity < count {
+            splatSHBufferPool.release(splatSHBufferPrime)
+            splatSHBufferPrime = try splatSHBufferPool.acquire(minimumCapacity: count)
+        }
+        splatSHBufferPrime.count = 0
+    }
+
+    public override func appendSplatForSorting(from oldIndex: Int) {
+        super.appendSplatForSorting(from: oldIndex)
+        if oldIndex < splatSHBuffer.count {
+            splatSHBufferPrime.append(splatSHBuffer, fromIndex: oldIndex)
+        }
+    }
+
+    public override func didSwapSplatBuffers() {
+        swap(&splatSHBuffer, &splatSHBufferPrime)
+    }
+
     public override init(device: MTLDevice,
                         colorFormat: MTLPixelFormat,
                         depthFormat: MTLPixelFormat,
@@ -114,15 +139,12 @@ public class FastSHSplatRenderer: SplatRenderer {
                       maxViewCount: maxViewCount,
                       maxSimultaneousRenders: maxSimultaneousRenders)
         
-        // Initialize SH evaluator
+        // Initialize fast SH render pipeline
         do {
             let library = try device.makeDefaultLibrary(bundle: Bundle.module)
-            self.shEvaluator = try SphericalHarmonicsEvaluator(device: device, library: library)
-            
-            // Create fast SH render pipeline
             setupFastSHPipeline(library: library)
         } catch {
-            print("Failed to initialize fast SH support: \(error)")
+            print("Failed to initialize fast SH pipeline: \(error)")
         }
     }
     
@@ -152,31 +174,6 @@ public class FastSHSplatRenderer: SplatRenderer {
                 
                 fastSHPipelineState = try device.makeRenderPipelineState(descriptor: pipelineDescriptor)
             }
-            
-            // Texture-based SH pipeline
-            let textureVertexFunction = library.makeFunction(name: "textureSHSplatVertexShader")
-            
-            if let vertexFunction = textureVertexFunction, let fragmentFunction = fragmentFunction {
-                let pipelineDescriptor = MTLRenderPipelineDescriptor()
-                pipelineDescriptor.label = "Texture SH Splat Pipeline"
-                pipelineDescriptor.vertexFunction = vertexFunction
-                pipelineDescriptor.fragmentFunction = fragmentFunction
-                pipelineDescriptor.colorAttachments[0].pixelFormat = colorFormat
-                pipelineDescriptor.colorAttachments[0].isBlendingEnabled = true
-                pipelineDescriptor.colorAttachments[0].sourceRGBBlendFactor = .one
-                pipelineDescriptor.colorAttachments[0].destinationRGBBlendFactor = .oneMinusSourceAlpha
-                pipelineDescriptor.colorAttachments[0].sourceAlphaBlendFactor = .one
-                pipelineDescriptor.colorAttachments[0].destinationAlphaBlendFactor = .oneMinusSourceAlpha
-                pipelineDescriptor.depthAttachmentPixelFormat = depthFormat
-                pipelineDescriptor.sampleCount = sampleCount
-                
-                if #available(iOS 17.0, macOS 14.0, *) {
-                    pipelineDescriptor.maxVertexAmplificationCount = maxViewCount
-                }
-                
-                textureSHPipelineState = try device.makeRenderPipelineState(descriptor: pipelineDescriptor)
-            }
-            
         } catch {
             print("Failed to create fast SH pipeline: \(error)")
         }
@@ -244,6 +241,19 @@ public class FastSHSplatRenderer: SplatRenderer {
             
             shCoefficients = uniqueSHSets
             print("Created SH palette with \(uniqueSHSets.count) unique sets, degree \(shDegree)")
+            shCoefficientsPerEntry = coeffsPerEntry
+            shaderParameters = FastSHShaderParameters(
+                coeffsPerEntry: UInt32(coeffsPerEntry),
+                paletteSize: UInt32(uniqueSHSets.count),
+                degree: UInt32(shDegree),
+                padding: 0
+            )
+        }
+        else {
+            shPaletteBuffer = nil
+            shCoefficients = []
+            shCoefficientsPerEntry = 0
+            shaderParameters = FastSHShaderParameters()
         }
         
         // Create extended splat buffer with SH info
@@ -251,10 +261,13 @@ public class FastSHSplatRenderer: SplatRenderer {
         
         for (index, splat) in splats.enumerated() {
             let baseSplat = Splat(splat)
-            let shIndex = shPaletteMap[index] ?? 0
+            let shIndex = shPaletteMap[index] ?? UInt32.max
             let shDeg = (shPaletteMap[index] != nil) ? UInt16(shDegree) : 0
-            
-            let splatSH = SplatSH(splat: baseSplat, shIndex: shIndex, shDegree: shDeg)
+
+            let splatSH = SplatSH(splat: baseSplat,
+                                   rotation: splat.rotation.normalized,
+                                   shIndex: shIndex,
+                                   shDegree: shDeg)
             splatSHBuffer.append(splatSH)
         }
         
@@ -271,50 +284,6 @@ public class FastSHSplatRenderer: SplatRenderer {
         }
         splatSHBuffer.count = 0
         splatSHBufferPrime.count = 0
-    }
-    
-    /// Update SH evaluation based on current camera direction
-    private func updateSHEvaluation(viewDirection: SIMD3<Float>, commandBuffer: MTLCommandBuffer) {
-        guard fastSHConfig.enabled,
-              let evaluator = shEvaluator,
-              let paletteBuffer = shPaletteBuffer,
-              !shCoefficients.isEmpty else { 
-            print("Fast SH evaluation skipped: enabled=\(fastSHConfig.enabled), evaluator=\(shEvaluator != nil), palette=\(shPaletteBuffer != nil), coeffs=\(!shCoefficients.isEmpty)")
-            return 
-        }
-        
-        // Check if we should update this frame
-        framesSinceLastSHUpdate += 1
-        if framesSinceLastSHUpdate < fastSHConfig.updateFrequency {
-            return
-        }
-        framesSinceLastSHUpdate = 0
-        
-        let paletteSize = shCoefficients.count
-        
-        if fastSHConfig.useTextureEvaluation {
-            // Calculate texture size to fit palette
-            let textureWidth = min(paletteSize, 256) // Limit width for cache efficiency
-            let textureHeight = (paletteSize + textureWidth - 1) / textureWidth
-            let textureSize = MTLSize(width: textureWidth, height: textureHeight, depth: 1)
-            
-            evaluatedSHTexture = evaluator.evaluateToTexture(
-                shPalette: paletteBuffer,
-                textureSize: textureSize,
-                degree: shDegree,
-                viewDirection: viewDirection,
-                commandBuffer: commandBuffer
-            )
-        } else {
-            evaluatedSHBuffer = evaluator.evaluatePalette(
-                shPalette: paletteBuffer,
-                paletteSize: paletteSize,
-                degree: shDegree,
-                viewDirection: viewDirection,
-                commandBuffer: commandBuffer
-            )
-            print("Fast SH: Evaluated palette with \(paletteSize) entries, degree \(shDegree), buffer=\(evaluatedSHBuffer != nil)")
-        }
     }
     
     /// Override read method to use Fast SH loading pipeline
@@ -337,18 +306,6 @@ extension FastSHSplatRenderer {
                        to commandBuffer: MTLCommandBuffer) throws {
         
         // Update camera direction for SH evaluation
-        if fastSHConfig.enabled && !viewports.isEmpty {
-            // Calculate mean camera forward direction
-            let cameraForwards = viewports.map { viewport -> SIMD3<Float> in
-                let viewMatrix = viewport.viewMatrix
-                return -SIMD3<Float>(viewMatrix[0][2], viewMatrix[1][2], viewMatrix[2][2])
-            }
-            let meanForward = cameraForwards.mean ?? SIMD3<Float>(0, 0, -1)
-            
-            // Update SH evaluation
-            updateSHEvaluation(viewDirection: meanForward, commandBuffer: commandBuffer)
-        }
-        
         // Convert to SplatRenderer.ViewportDescriptor
         let splatViewports = viewports.map { viewport -> SplatRenderer.ViewportDescriptor in
             SplatRenderer.ViewportDescriptor(
@@ -361,8 +318,10 @@ extension FastSHSplatRenderer {
         
         // Use fast SH pipeline if enabled and available
         if fastSHConfig.enabled,
-           let pipeline = fastSHConfig.useTextureEvaluation ? textureSHPipelineState : fastSHPipelineState,
-           (evaluatedSHBuffer != nil || evaluatedSHTexture != nil) {
+           let pipeline = fastSHPipelineState,
+           shPaletteBuffer != nil,
+           shDegree > 0,
+           shCoefficientsPerEntry > 0 {
             
             // Render using fast SH pipeline
             try renderWithFastSH(viewports: viewports,
@@ -425,16 +384,11 @@ extension FastSHSplatRenderer {
         renderEncoder.setVertexBuffer(splatSHBuffer.buffer, offset: 0, index: BufferIndex.splat.rawValue)
         renderEncoder.setVertexBuffer(dynamicUniformBuffers, offset: uniformBufferOffset, index: BufferIndex.uniforms.rawValue)
         
-        // Set evaluated SH data
-        if fastSHConfig.useTextureEvaluation, let texture = evaluatedSHTexture {
-            renderEncoder.setVertexTexture(texture, index: 0)
-        } else if let buffer = evaluatedSHBuffer {
-            renderEncoder.setVertexBuffer(buffer, offset: 0, index: 3)
-        } else {
-            // This should not happen due to the check in render(), but safety fallback
-            print("Error: Fast SH pipeline called without evaluated SH buffer")
-            renderEncoder.endEncoding()
-            return
+        // Set SH palette data
+        if let paletteBuffer = shPaletteBuffer {
+            renderEncoder.setVertexBuffer(paletteBuffer, offset: 0, index: 3)
+            var params = shaderParameters
+            renderEncoder.setVertexBytes(&params, length: MemoryLayout<FastSHShaderParameters>.stride, index: 4)
         }
         
         // Set up viewports and draw

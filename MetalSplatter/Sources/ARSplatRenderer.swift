@@ -166,7 +166,7 @@ public class ARSplatRenderer: NSObject {
         loadedFileURL = url
         
         // Check if this is SOGS v2 format
-        isSOGSv2Format = url.path.hasSuffix(".sog")
+        isSOGSv2Format = url.path.lowercased().hasSuffix(".sog")
         print("ARSplatRenderer: File format detection - isSOGSv2Format: \(isSOGSv2Format)")
         
         // Reset placement state when loading new splats
@@ -197,7 +197,7 @@ public class ARSplatRenderer: NSObject {
     /// Set the source file information for format-specific transformations
     public func setSourceFormat(url: URL) {
         loadedFileURL = url
-        isSOGSv2Format = url.path.hasSuffix(".sog")
+        isSOGSv2Format = url.path.lowercased().hasSuffix(".sog")
         print("ARSplatRenderer: Source format set - path: \(url.path), isSOGSv2Format: \(isSOGSv2Format)")
     }
     

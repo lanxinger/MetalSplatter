@@ -355,8 +355,11 @@ public class SplatRenderer {
     /// Efficiently swaps buffers using the buffer pool to optimize memory allocation
     private func swapSplatBuffers() {
         swap(&splatBuffer, &splatBufferPrime)
+        didSwapSplatBuffers()
     }
-    
+
+    open func didSwapSplatBuffers() {}
+
     /// Ensures splatBufferPrime has sufficient capacity, acquiring a new buffer from pool if needed
     private func ensurePrimeBufferCapacity(_ minimumCapacity: Int) throws {
         if splatBufferPrime.capacity < minimumCapacity {
@@ -365,6 +368,14 @@ public class SplatRenderer {
             splatBufferPrime = try splatBufferPool.acquire(minimumCapacity: minimumCapacity)
         }
         splatBufferPrime.count = 0
+    }
+
+    open func prepareForSorting(count: Int) throws {
+        try ensurePrimeBufferCapacity(count)
+    }
+
+    open func appendSplatForSorting(from oldIndex: Int) {
+        splatBufferPrime.append(splatBuffer, fromIndex: oldIndex)
     }
 
     public func read(from url: URL) async throws {
@@ -875,10 +886,10 @@ public class SplatRenderer {
                 let sortedIndices = indexOutputBuffer.contents().bindMemory(to: Int32.self, capacity: splatCount)
 
                 do {
-                    try self.ensurePrimeBufferCapacity(splatCount)
+                    try self.prepareForSorting(count: splatCount)
                     for newIndex in 0 ..< splatCount {
                         let oldIndex = Int(sortedIndices[newIndex])
-                        splatBufferPrime.append(splatBuffer, fromIndex: oldIndex)
+                        self.appendSplatForSorting(from: oldIndex)
                     }
                     self.swapSplatBuffers()
                 } catch {
@@ -917,10 +928,10 @@ public class SplatRenderer {
                 orderAndDepthTempSort.sort { $0.depth > $1.depth }
 
                 do {
-                    try ensurePrimeBufferCapacity(splatCount)
+                    try prepareForSorting(count: splatCount)
                     for newIndex in 0..<orderAndDepthTempSort.count {
                         let oldIndex = Int(orderAndDepthTempSort[newIndex].index)
-                        splatBufferPrime.append(splatBuffer, fromIndex: oldIndex)
+                        appendSplatForSorting(from: oldIndex)
                     }
 
                     swapSplatBuffers()

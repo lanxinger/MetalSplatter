@@ -8,7 +8,7 @@ public class FastSHSettings: ObservableObject {
     // MARK: - Configuration Properties
     
     /// Enable fast SH evaluation (vs per-splat evaluation)
-    @Published public var enabled: Bool = true {
+    @Published public var enabled: Bool = false {
         didSet {
             if !enabled {
                 isActive = false
@@ -16,9 +16,6 @@ public class FastSHSettings: ObservableObject {
             }
         }
     }
-    
-    /// Use texture-based evaluation for better edge accuracy
-    @Published public var useTextureEvaluation: Bool = false
     
     /// Update SH evaluation every N frames (1 = every frame)
     @Published public var updateFrequency: Int = 1
@@ -79,17 +76,14 @@ public class FastSHSettings: ObservableObject {
         // Adjust settings based on model size and complexity
         if modelSplatCount > 1_000_000 {
             // Large models - prioritize performance
-            useTextureEvaluation = false
             updateFrequency = 2
             maxPaletteSize = min(maxPaletteSize, 32768)
         } else if modelSplatCount > 100_000 {
             // Medium models - balanced approach
-            useTextureEvaluation = false
             updateFrequency = 1
             maxPaletteSize = min(maxPaletteSize, 65536)
         } else {
             // Small models - prioritize quality
-            useTextureEvaluation = true
             updateFrequency = 1
             maxPaletteSize = 131072
         }
@@ -98,7 +92,6 @@ public class FastSHSettings: ObservableObject {
         let compressionRatio = Float(paletteSize) / Float(modelSplatCount)
         if compressionRatio < 0.1 {
             // Highly compressible - can afford higher quality settings
-            useTextureEvaluation = true
             updateFrequency = 1
         }
     }
@@ -134,7 +127,6 @@ public class FastSHSettings: ObservableObject {
     public func configureForSOGS() {
         // SOGS files typically have excellent SH compression
         enabled = true
-        useTextureEvaluation = false // Buffer evaluation is sufficient for SOGS
         updateFrequency = 1
         maxPaletteSize = 65536
     }
@@ -158,7 +150,6 @@ public class FastSHSettings: ObservableObject {
     /// Reset all settings to default values
     public func resetToDefaults() {
         enabled = true
-        useTextureEvaluation = false
         updateFrequency = 1
         maxPaletteSize = 65536
         validateSettings()
@@ -172,7 +163,6 @@ public extension FastSHSettings {
     /// Performance-focused preset
     func applyPerformancePreset() {
         enabled = true
-        useTextureEvaluation = false
         updateFrequency = 3
         maxPaletteSize = 16384
         validateSettings()
@@ -181,7 +171,6 @@ public extension FastSHSettings {
     /// Quality-focused preset
     func applyQualityPreset() {
         enabled = true
-        useTextureEvaluation = true
         updateFrequency = 1
         maxPaletteSize = 131072
         validateSettings()
@@ -190,7 +179,6 @@ public extension FastSHSettings {
     /// Balanced preset
     func applyBalancedPreset() {
         enabled = true
-        useTextureEvaluation = false
         updateFrequency = 1
         maxPaletteSize = 65536
         validateSettings()

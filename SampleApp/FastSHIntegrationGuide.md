@@ -4,7 +4,7 @@ This guide explains how to use the Fast Spherical Harmonics (SH) implementation 
 
 ## What is Fast SH?
 
-Fast SH is an optimization technique that pre-computes spherical harmonics lighting once per frame using the camera direction, instead of evaluating it for each gaussian splat individually. This provides significant performance improvements with minimal visual quality loss.
+Fast SH evaluates spherical harmonics in the vertex shader using the compressed palette provided by SOGS files. Rather than keeping raw SH coefficients per splat, we reuse palette entries and rotate the viewing direction into each Gaussian's local frame. The result matches the PlayCanvas renderer while avoiding per-fragment SH work.
 
 ## Key Benefits
 
@@ -36,8 +36,7 @@ When viewing a 3D scene, you'll see:
 In the settings sheet, you can control:
 
 - **Enable Fast SH**: Toggle the optimization on/off
-- **Use Texture Evaluation**: Better edge accuracy (uses more GPU memory)
-- **Update Frequency**: How often to recalculate SH (1-10 frames)
+- **Update Frequency**: Reserved for future use (kept for UI compatibility)
 - **Max Palette Size**: Maximum unique SH coefficient sets (1K-128K)
 
 ### 4. Performance Information
@@ -58,13 +57,11 @@ The app automatically applies recommended settings based on your model:
 
 ### Medium Models (10K-500K splats)
 - Fast SH: Enabled
-- Buffer-based evaluation
 - Update every frame
 
 ### Large Models (> 500K splats)
 - Fast SH: Enabled
-- Texture-based evaluation for better accuracy
-- Update every 2 frames for performance
+- Update every 2 frames for performance (optional)
 
 ### SOGS Files
 - Always recommended to enable Fast SH
@@ -85,20 +82,14 @@ The app automatically applies recommended settings based on your model:
 
 ### SH Evaluation Modes
 
-1. **Fast Buffer Mode**
-   - Pre-computes all palette entries into a buffer
-   - Single camera direction per frame
-   - Best for most use cases
+1. **Fast Mode**
+   - Evaluates SH per splat using the shared palette
+   - Rotates the view direction into each Gaussian's local frame
+   - Matches the PlayCanvas SOG v2 implementation
 
-2. **Texture Mode**
-   - Stores evaluations in a texture
-   - Better edge accuracy
-   - Higher GPU memory usage
-
-3. **Disabled Mode**
-   - Traditional per-splat evaluation
-   - Highest quality, lowest performance
-   - Fallback for compatibility
+2. **Disabled Mode**
+   - Traditional per-splat evaluation without palette reuse
+   - Fallback for compatibility or debugging
 
 ### Performance Characteristics
 
@@ -116,13 +107,11 @@ The app automatically applies recommended settings based on your model:
 
 ### Performance Issues
 - Try increasing update frequency (update less often)
-- Switch from texture to buffer mode
 - Reduce max palette size for memory-constrained devices
 
 ### Visual Artifacts
 - Disable Fast SH for highest quality
 - Increase update frequency to every frame
-- Switch to texture mode for better edge accuracy
 
 ## Developer Integration
 
@@ -132,17 +121,16 @@ To integrate Fast SH in your own app:
 // Create Fast SH renderer
 let renderer = try FastSHSplatRenderer(device: device, ...)
 
-// Configure settings
+// Configure settings (optional)
 renderer.fastSHConfig.enabled = true
-renderer.fastSHConfig.useTextureEvaluation = false
 renderer.fastSHConfig.updateFrequency = 1
 
-// Load with SH support
+// Load with SH support (use AutodetectSceneReader for SOGS v2)
 try await renderer.loadSplatsWithSH(splats)
 
-// Use FastSHSettings for UI binding
+// Bind settings in the SampleApp UI (FastSHSettings is an ObservableObject)
 let settings = FastSHSettings()
-settings.connect(to: renderer)
+settings.enabled = true
 ```
 
 ## Future Enhancements

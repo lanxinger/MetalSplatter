@@ -52,31 +52,31 @@ public struct SOGSMeansInfoV2: Codable {
 }
 
 public struct SOGSScalesInfoV2: Codable {
-    public let codebook: [Float] // length 256 - k-means codebook for [scale_0, scale_1, scale_2]
-    public let files: [String]   // ["scales.webp"] - per-splat byte labels in RGB
-    
-    public init(codebook: [Float], files: [String]) {
+    public let codebook: [Float]
+    public let mins: [Float]?
+    public let maxs: [Float]?
+    public let files: [String]
+
+    enum CodingKeys: String, CodingKey {
+        case codebook
+        case mins
+        case maxs
+        case files
+    }
+
+    public init(codebook: [Float], mins: [Float]?, maxs: [Float]?, files: [String]) {
         self.codebook = codebook
+        self.mins = mins
+        self.maxs = maxs
         self.files = files
     }
-    
+
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         files = try container.decode([String].self, forKey: .files)
-        
-        // Handle null values in codebook by replacing with 0.0
-        var codebookArray: [Float] = []
-        var arrayContainer = try container.nestedUnkeyedContainer(forKey: .codebook)
-        while !arrayContainer.isAtEnd {
-            if let value = try? arrayContainer.decode(Float.self) {
-                codebookArray.append(value)
-            } else {
-                // Handle null by consuming the value and appending 0.0
-                _ = try? arrayContainer.decodeNil()
-                codebookArray.append(0.0)
-            }
-        }
-        codebook = codebookArray
+        codebook = try decodeFloatArrayIfPresent(in: container, forKey: .codebook) ?? []
+        mins = try decodeFloatArrayIfPresent(in: container, forKey: .mins)
+        maxs = try decodeFloatArrayIfPresent(in: container, forKey: .maxs)
     }
 }
 
@@ -89,60 +89,79 @@ public struct SOGSQuatsInfoV2: Codable {
 }
 
 public struct SOGSH0InfoV2: Codable {
-    public let codebook: [Float] // length 256 - DC color codebook for [f_dc_0, f_dc_1, f_dc_2]
-    public let files: [String]   // ["sh0.webp"] - per-splat byte labels in RGB; A = opacity (sigmoid*255)
-    
-    public init(codebook: [Float], files: [String]) {
+    public let codebook: [Float]
+    public let mins: [Float]?
+    public let maxs: [Float]?
+    public let files: [String]
+
+    enum CodingKeys: String, CodingKey {
+        case codebook
+        case mins
+        case maxs
+        case files
+    }
+
+    public init(codebook: [Float], mins: [Float]?, maxs: [Float]?, files: [String]) {
         self.codebook = codebook
+        self.mins = mins
+        self.maxs = maxs
         self.files = files
     }
-    
+
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         files = try container.decode([String].self, forKey: .files)
-        
-        // Handle null values in codebook by replacing with 0.0
-        var codebookArray: [Float] = []
-        var arrayContainer = try container.nestedUnkeyedContainer(forKey: .codebook)
-        while !arrayContainer.isAtEnd {
-            if let value = try? arrayContainer.decode(Float.self) {
-                codebookArray.append(value)
-            } else {
-                // Handle null by consuming the value and appending 0.0
-                _ = try? arrayContainer.decodeNil()
-                codebookArray.append(0.0)
-            }
-        }
-        codebook = codebookArray
+        codebook = try decodeFloatArrayIfPresent(in: container, forKey: .codebook) ?? []
+        mins = try decodeFloatArrayIfPresent(in: container, forKey: .mins)
+        maxs = try decodeFloatArrayIfPresent(in: container, forKey: .maxs)
     }
 }
 
 public struct SOGSSHNInfoV2: Codable {
-    public let codebook: [Float] // length 256 - 1D codebook built over SH centroids
-    public let files: [String]   // ["shN_centroids.webp", "shN_labels.webp"]
-    
-    public init(codebook: [Float], files: [String]) {
+    public let count: Int?       // Palette size (entries)
+    public let bands: Int?       // Number of SH bands (1...3)
+    public let codebook: [Float]
+    public let mins: [Float]?
+    public let maxs: [Float]?
+    public let files: [String]   // File names for labels / centroids textures
+
+    enum CodingKeys: String, CodingKey {
+        case count
+        case bands
+        case codebook
+        case mins
+        case maxs
+        case files
+    }
+
+    public init(count: Int?, bands: Int?, codebook: [Float], mins: [Float]?, maxs: [Float]?, files: [String]) {
+        self.count = count
+        self.bands = bands
         self.codebook = codebook
+        self.mins = mins
+        self.maxs = maxs
         self.files = files
     }
-    
+
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
+        count = try container.decodeIfPresent(Int.self, forKey: .count)
+        bands = try container.decodeIfPresent(Int.self, forKey: .bands)
         files = try container.decode([String].self, forKey: .files)
-        
-        // Handle null values in codebook by replacing with 0.0
-        var codebookArray: [Float] = []
-        var arrayContainer = try container.nestedUnkeyedContainer(forKey: .codebook)
-        while !arrayContainer.isAtEnd {
-            if let value = try? arrayContainer.decode(Float.self) {
-                codebookArray.append(value)
-            } else {
-                // Handle null by consuming the value and appending 0.0
-                _ = try? arrayContainer.decodeNil()
-                codebookArray.append(0.0)
-            }
+        codebook = try decodeFloatArrayIfPresent(in: container, forKey: .codebook) ?? []
+        mins = try decodeFloatArrayIfPresent(in: container, forKey: .mins)
+        maxs = try decodeFloatArrayIfPresent(in: container, forKey: .maxs)
+    }
+
+    /// Helper for computing the expected coefficient count per palette entry based on bands.
+    public var coefficientsPerEntry: Int? {
+        guard let bands else { return nil }
+        switch bands {
+        case 1: return 3
+        case 2: return 8
+        case 3: return 15
+        default: return nil
         }
-        codebook = codebookArray
     }
 }
 
@@ -195,8 +214,12 @@ public struct SOGSIteratorV2 {
     
     // Pre-computed codebooks for performance
     private let scalesCodebook: [Float]  // 256 individual scale values
-    private let sh0Codebook: [Float]     // 256 individual color values  
+    private let sh0Codebook: [Float]     // 256 individual color values
     private let shNCodebook: [Float]?
+    private let shNMin: Float?
+    private let shNMax: Float?
+    private let shNCoefficientCountHint: Int?
+    private let shNPaletteCountHint: Int?
     
     public init(_ data: SOGSCompressedDataV2) {
         self.data = data
@@ -230,7 +253,25 @@ public struct SOGSIteratorV2 {
         }
         
         // Store shN codebook if available
-        self.shNCodebook = data.metadata.shN?.codebook
+        if let shNInfo = data.metadata.shN {
+            let shNCodebookData = shNInfo.codebook
+            self.shNCodebook = shNCodebookData.isEmpty ? nil : Array(shNCodebookData.prefix(256))
+            self.shNCoefficientCountHint = shNInfo.coefficientsPerEntry
+            self.shNPaletteCountHint = shNInfo.count
+            if let mins = shNInfo.mins?.first, let maxs = shNInfo.maxs?.first {
+                self.shNMin = mins
+                self.shNMax = maxs
+            } else {
+                self.shNMin = nil
+                self.shNMax = nil
+            }
+        } else {
+            self.shNCodebook = nil
+            self.shNMin = nil
+            self.shNMax = nil
+            self.shNCoefficientCountHint = nil
+            self.shNPaletteCountHint = nil
+        }
     }
     
     public func readPoint(at index: Int) -> SplatScenePoint {
@@ -359,34 +400,76 @@ public struct SOGSIteratorV2 {
     
     private func readSphericalHarmonics(x: Int, y: Int) -> [SIMD3<Float>] {
         guard let sh_centroids = data.sh_centroids,
-              let sh_labels = data.sh_labels,
-              let codebook = shNCodebook else {
+              let sh_labels = data.sh_labels else {
             return []
         }
-        
+
         // Extract palette index from labels texture (uint16 little-endian in RG)
         let labelPixel = WebPDecoder.getPixelUInt8(from: sh_labels, x: x, y: y)
-        let paletteIndex = Int(labelPixel.x) + Int(labelPixel.y) * 256
-        
-        // Calculate centroid texture coordinates
-        let u = (paletteIndex % 64) * 15  // 15 coefficients per centroid
-        let v = paletteIndex / 64
-        
-        var shCoeffs: [SIMD3<Float>] = []
-        shCoeffs.reserveCapacity(15)
-        
-        // Read 15 consecutive coefficients from centroids texture
-        for i in 0..<15 {
-            let centroidPixel = WebPDecoder.getPixelFloat(from: sh_centroids, x: u + i, y: v)
-            
-            // Use codebook to decode each coefficient component
-            let r = codebook[Int(centroidPixel.x * 255) % 256]
-            let g = codebook[Int(centroidPixel.y * 255) % 256]
-            let b = codebook[Int(centroidPixel.z * 255) % 256]
-            
-            shCoeffs.append(SIMD3<Float>(r, g, b))
+        let paletteIndex = Int(labelPixel.x) + (Int(labelPixel.y) << 8)
+
+        // Derive coefficient count: prefer metadata hint, fall back to texture width
+        let coefficientsPerEntry = shNCoefficientCountHint ?? (sh_centroids.width / 64)
+        guard coefficientsPerEntry > 0,
+              sh_centroids.width % 64 == 0 else {
+            return []
         }
-        
+
+        // Derive palette count: prefer metadata, otherwise infer from texture rows
+        let inferredPaletteCount = sh_centroids.height * 64
+        let paletteCount = shNPaletteCountHint ?? inferredPaletteCount
+        guard paletteCount > 0 else { return [] }
+        guard paletteIndex >= 0 && paletteIndex < paletteCount else {
+            return []
+        }
+
+        // Calculate centroid texture coordinates
+        let u = (paletteIndex % 64) * coefficientsPerEntry
+        let v = paletteIndex / 64
+        guard v < sh_centroids.height else { return [] }
+
+        var shCoeffs: [SIMD3<Float>] = []
+        shCoeffs.reserveCapacity(coefficientsPerEntry)
+
+        for i in 0..<coefficientsPerEntry {
+            let sampleX = u + i
+            guard sampleX < sh_centroids.width else { break }
+            let centroidPixel = WebPDecoder.getPixelUInt8(from: sh_centroids, x: sampleX, y: v)
+
+            let normalized = SIMD3<Float>(
+                Float(centroidPixel.x) / 255.0,
+                Float(centroidPixel.y) / 255.0,
+                Float(centroidPixel.z) / 255.0
+            )
+
+            if let minVal = shNMin, let maxVal = shNMax {
+                let coeff = SIMD3<Float>(
+                    lerp(minVal, maxVal, normalized.x),
+                    lerp(minVal, maxVal, normalized.y),
+                    lerp(minVal, maxVal, normalized.z)
+                )
+                shCoeffs.append(coeff)
+            } else if let codebook = shNCodebook, codebook.count >= 256 {
+                let rIndex = Int(centroidPixel.x)
+                let gIndex = Int(centroidPixel.y)
+                let bIndex = Int(centroidPixel.z)
+
+                if rIndex < codebook.count,
+                   gIndex < codebook.count,
+                   bIndex < codebook.count {
+                    shCoeffs.append(SIMD3<Float>(
+                        codebook[rIndex],
+                        codebook[gIndex],
+                        codebook[bIndex]
+                    ))
+                } else {
+                    shCoeffs.append(.zero)
+                }
+            } else {
+                shCoeffs.append(.zero)
+            }
+        }
+
         return shCoeffs
     }
     
@@ -425,4 +508,19 @@ public struct SOGSBatchIteratorV2 {
         
         return points
     }
+}
+
+@inline(__always)
+fileprivate func decodeFloatArrayIfPresent<T: CodingKey>(in container: KeyedDecodingContainer<T>, forKey key: T) throws -> [Float]? {
+    guard container.contains(key) else { return nil }
+    var nested = try container.nestedUnkeyedContainer(forKey: key)
+    var values: [Float] = []
+    while !nested.isAtEnd {
+        if let value = try? nested.decode(Float.self) {
+            values.append(value)
+        } else if (try? nested.decodeNil()) == true {
+            values.append(0.0)
+        }
+    }
+    return values
 }

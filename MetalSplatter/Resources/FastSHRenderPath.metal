@@ -1,34 +1,79 @@
 #include "ShaderCommon.h"
 #include "SplatProcessing.h"
 
+// Forward declaration from spherical_harmonics_evaluate.metal
+float4 evaluateSH(float3 dir, device const float3* sh_coeffs, uint degree);
+
+struct FastSHParams {
+    uint coeffsPerEntry;
+    uint paletteSize;
+    uint degree;
+    uint padding;
+};
+
 // Extended Splat structure for SH support
 typedef struct {
     packed_float3 position;
     packed_half4 baseColor;      // Base color (DC term) + opacity
+    float4 rotation;             // Quaternion (x,y,z,w)
     packed_half3 covA;
     packed_half3 covB;
     uint shPaletteIndex;         // Index into SH palette (for SOGS)
     ushort shDegree;             // SH degree (0-3)
+    ushort padding;
 } SplatSH;
 
 // Convert SplatSH to regular Splat using pre-evaluated SH
-Splat evaluateSplatWithSH(SplatSH splatSH, 
-                         device const float4* evaluatedSH,
-                         float3 viewDirection) {
+inline float3 cameraWorldPosition(matrix_float4x4 viewMatrix) {
+    float3x3 rotation = float3x3(viewMatrix[0].xyz,
+                                 viewMatrix[1].xyz,
+                                 viewMatrix[2].xyz);
+    float3 translation = viewMatrix[3].xyz;
+    return -(transpose(rotation) * translation);
+}
+
+inline float3 rotateVectorByQuaternion(float4 q, float3 v) {
+    float3 u = q.xyz;
+    float s = q.w;
+    float3 t = 2.0f * cross(u, v);
+    return v + s * t + cross(u, t);
+}
+
+Splat evaluateSplatWithSH(SplatSH splatSH,
+                         Uniforms uniforms,
+                         device const float3* shPalette,
+                         constant FastSHParams& params) {
     Splat splat;
     splat.position = splatSH.position;
     splat.covA = splatSH.covA;
     splat.covB = splatSH.covB;
-    
-    // Use pre-evaluated SH color if available (including degree 0)
-    if (splatSH.shPaletteIndex != 0) {
-        float4 shColor = evaluatedSH[splatSH.shPaletteIndex];
-        splat.color = packed_half4(half4(half3(shColor.rgb), half(splatSH.baseColor.a)));
+
+    const uint invalidIndex = 0xffffffffu;
+    bool hasSH = (splatSH.shDegree > 0) &&
+                 (params.coeffsPerEntry > 0) &&
+                 (splatSH.shPaletteIndex != invalidIndex) &&
+                 (splatSH.shPaletteIndex < params.paletteSize);
+
+    if (hasSH) {
+        device const float3* coeffs = shPalette + params.coeffsPerEntry * splatSH.shPaletteIndex;
+
+    float3 worldPosition = float3(splatSH.position);
+    float3 cameraPosition = cameraWorldPosition(uniforms.viewMatrix);
+    float3 viewDirection = normalize(cameraPosition - worldPosition);
+
+    // Rotate view direction into the Gaussian's local frame
+    float4 q = splatSH.rotation;
+    float4 qConjugate = float4(-q.xyz, q.w);
+
+    float3 localDirection = normalize(rotateVectorByQuaternion(qConjugate, viewDirection));
+
+        float4 shColor = evaluateSH(localDirection, coeffs, params.degree);
+        float3 rgb = shColor.rgb;
+        splat.color = packed_half4(half4(half3(rgb), splatSH.baseColor.w));
     } else {
-        // Fall back to base color for invalid index
         splat.color = splatSH.baseColor;
     }
-    
+
     return splat;
 }
 
@@ -38,7 +83,8 @@ vertex FragmentIn fastSHSplatVertexShader(uint vertexID [[vertex_id]],
                                          ushort amplificationID [[amplification_id]],
                                          constant SplatSH* splatArray [[ buffer(BufferIndexSplat) ]],
                                          constant UniformsArray & uniformsArray [[ buffer(BufferIndexUniforms) ]],
-                                         device const float4* evaluatedSH [[ buffer(3) ]]) {
+                                         device const float3* shPalette [[ buffer(3) ]],
+                                         constant FastSHParams& params [[ buffer(4) ]]) {
     Uniforms uniforms = uniformsArray.uniforms[min(int(amplificationID), kMaxViewCount)];
     
     uint splatID = instanceID * uniforms.indexedSplatCount + (vertexID / 4);
@@ -49,12 +95,8 @@ vertex FragmentIn fastSHSplatVertexShader(uint vertexID [[vertex_id]],
     }
     
     SplatSH splatSH = splatArray[splatID];
-    
-    // Convert to regular splat using pre-evaluated SH
-    float3 viewDirection = normalize(float3(uniforms.viewMatrix[0][2], 
-                                           uniforms.viewMatrix[1][2], 
-                                           uniforms.viewMatrix[2][2]));
-    Splat splat = evaluateSplatWithSH(splatSH, evaluatedSH, viewDirection);
+    // Evaluate in Gaussian local frame
+    Splat splat = evaluateSplatWithSH(splatSH, uniforms, shPalette, params);
     
     return splatVertex(splat, uniforms, vertexID % 4);
 }
@@ -71,7 +113,8 @@ vertex FragmentIn textureSHSplatVertexShader(uint vertexID [[vertex_id]],
                                             ushort amplificationID [[amplification_id]],
                                             constant SplatSH* splatArray [[ buffer(BufferIndexSplat) ]],
                                             constant UniformsArray & uniformsArray [[ buffer(BufferIndexUniforms) ]],
-                                            texture2d<float> evaluatedSHTexture [[ texture(0) ]]) {
+                                            device const float3* shPalette [[ buffer(3) ]],
+                                            constant FastSHParams& params [[ buffer(4) ]]) {
     Uniforms uniforms = uniformsArray.uniforms[min(int(amplificationID), kMaxViewCount)];
     
     uint splatID = instanceID * uniforms.indexedSplatCount + (vertexID / 4);
@@ -82,23 +125,6 @@ vertex FragmentIn textureSHSplatVertexShader(uint vertexID [[vertex_id]],
     }
     
     SplatSH splatSH = splatArray[splatID];
-    Splat splat;
-    splat.position = splatSH.position;
-    splat.covA = splatSH.covA;
-    splat.covB = splatSH.covB;
-    
-    // Sample pre-evaluated SH from texture
-    if (splatSH.shDegree > 0 && splatSH.shPaletteIndex != 0) {
-        // Convert palette index to texture coordinates
-        uint textureWidth = evaluatedSHTexture.get_width();
-        uint2 texCoord = uint2(splatSH.shPaletteIndex % textureWidth,
-                              splatSH.shPaletteIndex / textureWidth);
-        
-        float4 shColor = evaluatedSHTexture.read(texCoord);
-        splat.color = packed_half4(half4(half3(shColor.rgb), half(splatSH.baseColor.a)));
-    } else {
-        splat.color = splatSH.baseColor;
-    }
-    
+    Splat splat = evaluateSplatWithSH(splatSH, uniforms, shPalette, params);
     return splatVertex(splat, uniforms, vertexID % 4);
 }

@@ -87,9 +87,6 @@ struct FastSHSettingsView: View {
                         .help("Pre-compute spherical harmonics once per frame instead of per-splat")
                     
                     if settings.enabled {
-                        Toggle("Use Texture Evaluation", isOn: $settings.useTextureEvaluation)
-                            .help("Use texture-based evaluation for better edge accuracy (more GPU memory)")
-                        
                         Stepper("Update Frequency: \(settings.updateFrequency)", 
                                value: $settings.updateFrequency, 
                                in: 1...10)
@@ -221,7 +218,6 @@ private struct MetalKitSceneViewWithSettings: ViewRepresentable {
     
     private func syncSettings(renderer: MetalKitSceneRenderer, settings: FastSHSettings) {
         renderer.fastSHSettings.enabled = settings.enabled
-        renderer.fastSHSettings.useTextureEvaluation = settings.useTextureEvaluation
         renderer.fastSHSettings.updateFrequency = settings.updateFrequency
         renderer.fastSHSettings.maxPaletteSize = settings.maxPaletteSize
     }

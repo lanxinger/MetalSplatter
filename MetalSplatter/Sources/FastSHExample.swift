@@ -26,7 +26,6 @@ public class FastSHExample {
         
         // Configure fast SH options
         renderer.fastSHConfig.enabled = true
-        renderer.fastSHConfig.useTextureEvaluation = false // Use buffer-based evaluation
         renderer.fastSHConfig.updateFrequency = 1 // Update every frame
         renderer.fastSHConfig.maxPaletteSize = 65536 // Support up to 64K unique SH sets
         
@@ -79,14 +78,8 @@ public class FastSHExample {
     public static func demonstrateModes(renderer: FastSHSplatRenderer) {
         // Fast mode - single direction evaluation
         renderer.fastSHConfig.enabled = true
-        renderer.fastSHConfig.useTextureEvaluation = false
         renderer.fastSHConfig.updateFrequency = 2 // Update every other frame for performance
-        
-        // Accurate mode - per-pixel evaluation (future enhancement)
-        renderer.fastSHConfig.enabled = true
-        renderer.fastSHConfig.useTextureEvaluation = true
-        renderer.fastSHConfig.updateFrequency = 1
-        
+
         // Disable fast SH - fall back to CPU evaluation
         renderer.fastSHConfig.enabled = false
     }

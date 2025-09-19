@@ -37,8 +37,8 @@ float4 evaluateSH(float3 dir, device const float3* sh_coeffs, uint degree) {
     // Normalize direction
     float3 d = normalize(dir);
     
-    // Band 0 (DC term)
-    float3 result = SH_C0 * sh_coeffs[0];
+    // Band 0 (DC term) plus ambient offset (see SOG spec §3.4)
+    float3 result = float3(0.5f) + SH_C0 * sh_coeffs[0];
     
     if (degree >= 1) {
         // Band 1
@@ -73,8 +73,8 @@ float4 evaluateSH(float3 dir, device const float3* sh_coeffs, uint degree) {
         result += SH_C3[6] * d.x * (xx - 3.0f * yy) * sh_coeffs[15];
     }
     
-    // Clamp negative values and return with alpha = 1
-    result = max(result, 0.0f);
+    // Clamp negative values and limit to [0, 1]
+    result = clamp(result, 0.0f, 1.0f);
     return float4(result, 1.0f);
 }
 

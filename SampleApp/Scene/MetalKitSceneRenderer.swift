@@ -162,7 +162,6 @@ class MetalKitSceneRenderer: NSObject, MTKViewDelegate {
             if let fastRenderer = splat as? FastSHSplatRenderer {
                 // Apply settings from FastSHSettings object
                 fastRenderer.fastSHConfig.enabled = fastSHSettings.enabled
-                fastRenderer.fastSHConfig.useTextureEvaluation = fastSHSettings.useTextureEvaluation
                 fastRenderer.fastSHConfig.updateFrequency = fastSHSettings.updateFrequency
                 fastRenderer.fastSHConfig.maxPaletteSize = fastSHSettings.maxPaletteSize
                 
@@ -181,7 +180,6 @@ class MetalKitSceneRenderer: NSObject, MTKViewDelegate {
                 
                 // Apply any updated settings back to renderer
                 fastRenderer.fastSHConfig.enabled = fastSHSettings.enabled
-                fastRenderer.fastSHConfig.useTextureEvaluation = fastSHSettings.useTextureEvaluation
                 fastRenderer.fastSHConfig.updateFrequency = fastSHSettings.updateFrequency
                 fastRenderer.fastSHConfig.maxPaletteSize = fastSHSettings.maxPaletteSize
                 
@@ -226,9 +224,10 @@ class MetalKitSceneRenderer: NSObject, MTKViewDelegate {
         let translationMatrix = matrix4x4_translation(0.0, 0.0, Constants.modelCenterZ)
         // Coordinate system calibration based on file format
         let modelDescription = model?.description ?? ""
-        let isSOGS = modelDescription.contains("meta.json") || modelDescription.contains(".zip")
-        let isSPZ = modelDescription.contains(".spz") || modelDescription.contains(".spx")
-        let isSOGSv2 = modelDescription.contains(".sog")
+        let descriptionLowercased = modelDescription.lowercased()
+        let isSOGS = descriptionLowercased.contains("meta.json") || descriptionLowercased.contains(".zip")
+        let isSPZ = descriptionLowercased.contains(".spz") || descriptionLowercased.contains(".spx")
+        let isSOGSv2 = descriptionLowercased.contains(".sog")
         
         // SPZ files are already correctly oriented like SOGS v1 files
         // SOGS v2 (.sog) files need 180° flip around X axis
