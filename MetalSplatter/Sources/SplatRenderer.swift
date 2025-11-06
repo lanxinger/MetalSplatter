@@ -289,10 +289,10 @@ public class SplatRenderer {
             throw SplatRendererError.failedToCreateLibrary(underlying: error)
         }
         
-        // Initialize compute pipeline for distance calculation
+        // Initialize compute pipeline for distance calculation - use SIMD optimized version
         do {
-            guard let computeFunction = library.makeFunction(name: "computeSplatDistances") else {
-                throw SplatRendererError.failedToLoadShaderFunction(name: "computeSplatDistances")
+            guard let computeFunction = library.makeFunction(name: "computeSplatDistancesSimdOptimized") else {
+                throw SplatRendererError.failedToLoadShaderFunction(name: "computeSplatDistancesSimdOptimized")
             }
             computeDistancesPipelineState = try device.makeComputePipelineState(function: computeFunction)
         } catch {
@@ -830,44 +830,17 @@ public class SplatRenderer {
                 
                 computeEncoder.dispatchThreadgroups(threadgroups, threadsPerThreadgroup: threadsPerThreadgroup)
                 computeEncoder.endEncoding()
+
+                // Use completion handler instead of blocking - allows CPU/GPU overlap
+                commandBuffer.addCompletedHandler { _ in
+                    // Distance computation completed, now run argsort on next command buffer
+                    self.performArgSortAndReorder(distanceBuffer: distanceBuffer,
+                                                  splatCount: splatCount,
+                                                  commandQueue: commandQueue)
+                }
                 commandBuffer.commit()
-                commandBuffer.waitUntilCompleted()
 
-                // Allocate a GPU buffer for the ArgSort output indices
-                guard let indexOutputBuffer = device.makeBuffer(
-                    length: MemoryLayout<Int32>.size * splatCount,
-                    options: .storageModeShared
-                ) else {
-                    Self.log.error("Failed to create output indices buffer.")
-                    self.sorting = false
-                    return
-                }
-
-                // Run argsort, in decending order.
-                let argSort = MPSArgSort(dataType: .float32, descending: true)
-                argSort(commandQueue: commandQueue,
-                        input: distanceBuffer,
-                        output: indexOutputBuffer,
-                        count: splatCount)
-
-                // Read back the sorted indices and reorder splats on the CPU.
-                let sortedIndices = indexOutputBuffer.contents().bindMemory(to: Int32.self, capacity: splatCount)
-
-                do {
-                    try self.ensurePrimeBufferCapacity(splatCount)
-                    for newIndex in 0 ..< splatCount {
-                        let oldIndex = Int(sortedIndices[newIndex])
-                        splatBufferPrime.append(splatBuffer, fromIndex: oldIndex)
-                    }
-                    self.swapSplatBuffers()
-                } catch {
-                    Self.log.error("Failed to reorder splats with pooled buffers: \(error)")
-                }
-
-//                let elapsed = Date().timeIntervalSince(startTime)
-//                Self.log.info("Sort time (GPU): \(elapsed) seconds")
-//                self.onSortComplete?(elapsed)
-                self.sorting = false
+                // Don't wait here - let GPU work async!
             }
         } else {
             Task(priority: .high) {
@@ -913,6 +886,48 @@ public class SplatRenderer {
                 self.sorting = false
             }
         }
+    }
+
+    // Helper function to perform argsort and reordering in a separate command buffer
+    private func performArgSortAndReorder(distanceBuffer: MTLBuffer,
+                                         splatCount: Int,
+                                         commandQueue: MTLCommandQueue) {
+        guard let indexOutputBuffer = device.makeBuffer(
+            length: MemoryLayout<Int32>.size * splatCount,
+            options: .storageModeShared
+        ) else {
+            Self.log.error("Failed to create output indices buffer.")
+            self.sorting = false
+            return
+        }
+
+        // Run argsort, in descending order (async - returns immediately)
+        let argSort = MPSArgSort(dataType: .float32, descending: true)
+        argSort(commandQueue: commandQueue,
+                input: distanceBuffer,
+                output: indexOutputBuffer,
+                count: splatCount)
+
+        // Note: MPSArgSort waits internally, but we're now async relative to the render thread
+
+        // Read back the sorted indices and reorder splats on the CPU
+        let sortedIndices = indexOutputBuffer.contents().bindMemory(to: Int32.self, capacity: splatCount)
+
+        do {
+            try self.ensurePrimeBufferCapacity(splatCount)
+            for newIndex in 0 ..< splatCount {
+                let oldIndex = Int(sortedIndices[newIndex])
+                splatBufferPrime.append(splatBuffer, fromIndex: oldIndex)
+            }
+            self.swapSplatBuffers()
+        } catch {
+            Self.log.error("Failed to reorder splats with pooled buffers: \(error)")
+        }
+
+//        let elapsed = Date().timeIntervalSince(startTime)
+//        Self.log.info("Sort time (GPU): \(elapsed) seconds")
+//        self.onSortComplete?(elapsed)
+        self.sorting = false
     }
 }
 

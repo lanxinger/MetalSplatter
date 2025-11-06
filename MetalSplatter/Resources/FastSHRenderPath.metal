@@ -59,9 +59,15 @@ vertex FragmentIn fastSHSplatVertexShader(uint vertexID [[vertex_id]],
     return splatVertex(splat, uniforms, vertexID % 4);
 }
 
-// Fragment shader remains the same
+// Fragment shader with early discard optimization
 fragment half4 fastSHSplatFragmentShader(FragmentIn in [[stage_in]]) {
     half alpha = splatFragmentAlpha(in.relativePosition, in.color.a);
+
+    // Early fragment discard for transparent fragments - saves blending work
+    if (alpha < 0.01h) {
+        discard_fragment();
+    }
+
     return half4(alpha * in.color.rgb, alpha);
 }
 
