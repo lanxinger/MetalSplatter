@@ -512,8 +512,9 @@ private class SOGSZipArchive {
         
         print("SOGSZipArchive: Extracting \(filename)...")
         var extractedData = Data()
-        if let size = entry.uncompressedSize ?? entry.compressedSize {
-            extractedData.reserveCapacity(Int(size))
+        let estimatedSize = entry.uncompressedSize ?? entry.compressedSize ?? 0
+        if estimatedSize > 0 {
+            extractedData.reserveCapacity(Int(min(estimatedSize, UInt64(Int.max))))
         }
         
         do {
