@@ -469,32 +469,55 @@ public class SplatSOGSSceneReaderV2: SplatSceneReader {
 // MARK: - Zip Archive Reader for Bundled .sog Files
 
 private class SOGSZipArchive {
+    private typealias ZipEntry = ZIPFoundation.Entry
     private let archive: Archive
     private let url: URL
     private let shouldStopAccessing: Bool
+    private let archiveBackingData: Data?
+    private let entriesByName: [String: ZipEntry]
+    private let archiveQueue = DispatchQueue(label: "sogs.zip.archive.serial")
     
     init(_ zipURL: URL) throws {
         self.url = zipURL
         let shouldStopAccessing = zipURL.startAccessingSecurityScopedResource()
-        self.shouldStopAccessing = shouldStopAccessing
+        var stopAccessOnDeinit = shouldStopAccessing
+        var backingData: Data? = nil
         
-        guard let archive = Archive(url: zipURL, accessMode: .read) else {
-            if shouldStopAccessing {
-                zipURL.stopAccessingSecurityScopedResource()
+        do {
+            self.archive = try Archive(url: zipURL, accessMode: .read)
+            self.archiveBackingData = nil
+            self.shouldStopAccessing = stopAccessOnDeinit
+        } catch {
+            print("SOGSZipArchive: File access archive init failed: \(error). Falling back to in-memory loading.")
+            do {
+                backingData = try Data(contentsOf: zipURL)
+                if stopAccessOnDeinit {
+                    zipURL.stopAccessingSecurityScopedResource()
+                    stopAccessOnDeinit = false
+                }
+                self.archive = try Archive(data: backingData ?? Data(), accessMode: .read)
+                self.archiveBackingData = backingData
+                self.shouldStopAccessing = stopAccessOnDeinit
+            } catch {
+                if stopAccessOnDeinit {
+                    zipURL.stopAccessingSecurityScopedResource()
+                }
+                throw SplatSOGSSceneReaderV2.SOGSV2Error.zipDecodingFailed("Unable to open SOG archive: \(error)")
             }
-            throw SplatSOGSSceneReaderV2.SOGSV2Error.zipDecodingFailed("Unable to open SOG archive")
         }
         
-        self.archive = archive
         print("SOGSZipArchive: Opened \(zipURL.lastPathComponent)")
         
         var entryCount = 0
+        var entries: [String: ZipEntry] = [:]
         for entry in archive {
             entryCount += 1
             let compressed = entry.compressedSize ?? 0
             let uncompressed = entry.uncompressedSize ?? 0
             print("  - \(entry.path) (compressed: \(compressed), uncompressed: \(uncompressed))")
+            entries[entry.path] = entry
         }
+        self.entriesByName = entries
         print("SOGSZipArchive: Found \(entryCount) files in archive")
     }
     
@@ -505,27 +528,29 @@ private class SOGSZipArchive {
     }
     
     func extractFile(_ filename: String) throws -> Data {
-        guard let entry = archive.first(where: { $0.path == filename }) else {
-            print("SOGSZipArchive: File not found: \(filename)")
-            throw SplatSOGSSceneReaderV2.SOGSV2Error.missingFile(filename)
-        }
-        
-        print("SOGSZipArchive: Extracting \(filename)...")
-        var extractedData = Data()
-        let estimatedSize = entry.uncompressedSize ?? entry.compressedSize ?? 0
-        if estimatedSize > 0 {
-            extractedData.reserveCapacity(Int(min(estimatedSize, UInt64(Int.max))))
-        }
-        
-        do {
-            _ = try archive.extract(entry, consumer: { data in
-                extractedData.append(data)
-            })
-            print("SOGSZipArchive: Extracted \(extractedData.count) bytes")
-            return extractedData
-        } catch {
-            print("SOGSZipArchive: Failed to extract \(filename): \(error)")
-            throw SplatSOGSSceneReaderV2.SOGSV2Error.zipDecodingFailed("Failed to extract \(filename): \(error.localizedDescription)")
-        }
+        return try archiveQueue.sync(execute: { () throws -> Data in
+            guard let entry = entriesByName[filename] else {
+                print("SOGSZipArchive: File not found: \(filename)")
+                throw SplatSOGSSceneReaderV2.SOGSV2Error.missingFile(filename)
+            }
+            
+            print("SOGSZipArchive: Extracting \(filename)...")
+            var extractedData = Data()
+            let estimatedSize = entry.uncompressedSize ?? entry.compressedSize ?? 0
+            if estimatedSize > 0 {
+                extractedData.reserveCapacity(Int(min(estimatedSize, UInt64(Int.max))))
+            }
+            
+            do {
+                _ = try archive.extract(entry, consumer: { chunk in
+                    extractedData.append(chunk)
+                })
+                print("SOGSZipArchive: Extracted \(extractedData.count) bytes")
+                return extractedData
+            } catch {
+                print("SOGSZipArchive: Failed to extract \(filename): \(error)")
+                throw SplatSOGSSceneReaderV2.SOGSV2Error.zipDecodingFailed("Failed to extract \(filename): \(error.localizedDescription)")
+            }
+        })
     }
 }
