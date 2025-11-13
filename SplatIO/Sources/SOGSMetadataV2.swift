@@ -256,8 +256,19 @@ public struct SOGSIteratorV2 {
         if let shNInfo = data.metadata.shN {
             let shNCodebookData = shNInfo.codebook
             self.shNCodebook = shNCodebookData.isEmpty ? nil : Array(shNCodebookData.prefix(256))
-            self.shNCoefficientCountHint = shNInfo.coefficientsPerEntry
-            self.shNPaletteCountHint = shNInfo.count
+
+            if let coefficientHint = shNInfo.coefficientsPerEntry, coefficientHint > 0 {
+                self.shNCoefficientCountHint = coefficientHint
+            } else {
+                self.shNCoefficientCountHint = nil
+            }
+
+            if let count = shNInfo.count, count > 0 {
+                self.shNPaletteCountHint = count
+            } else {
+                self.shNPaletteCountHint = nil
+            }
+
             if let mins = shNInfo.mins?.first, let maxs = shNInfo.maxs?.first {
                 self.shNMin = mins
                 self.shNMax = maxs
@@ -408,16 +419,21 @@ public struct SOGSIteratorV2 {
         let labelPixel = WebPDecoder.getPixelUInt8(from: sh_labels, x: x, y: y)
         let paletteIndex = Int(labelPixel.x) + (Int(labelPixel.y) << 8)
 
-        // Derive coefficient count: prefer metadata hint, fall back to texture width
-        let coefficientsPerEntry = shNCoefficientCountHint ?? (sh_centroids.width / 64)
-        guard coefficientsPerEntry > 0,
-              sh_centroids.width % 64 == 0 else {
+        // Texture stores 64 entries per row
+        guard sh_centroids.width % 64 == 0,
+              sh_centroids.height > 0 else {
             return []
         }
 
-        // Derive palette count: prefer metadata, otherwise infer from texture rows
+        let coefficientsPerEntry = sh_centroids.width / 64
+        guard coefficientsPerEntry > 0 else {
+            return []
+        }
+
+        // Derive palette count: prefer metadata when valid, otherwise fall back to texture rows
         let inferredPaletteCount = sh_centroids.height * 64
-        let paletteCount = shNPaletteCountHint ?? inferredPaletteCount
+        let paletteCountHint = shNPaletteCountHint ?? 0
+        let paletteCount = paletteCountHint > 0 ? min(paletteCountHint, inferredPaletteCount) : inferredPaletteCount
         guard paletteCount > 0 else { return [] }
         guard paletteIndex >= 0 && paletteIndex < paletteCount else {
             return []

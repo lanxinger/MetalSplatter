@@ -379,44 +379,50 @@ public class SplatSOGSSceneReaderV2: SplatSceneReader {
         }
 
         if let shN = metadata.shN {
-            if let bands = shN.bands {
-                guard (1...3).contains(bands) else {
-                    throw SOGSV2Error.invalidMetadata
-                }
+            if let bands = shN.bands, !(1...3).contains(bands) {
+                print("SplatSOGSSceneReaderV2: Validation warning - shN.bands \(bands) outside 1...3, ignoring hint.")
             }
 
-            if let count = shN.count {
-                guard count > 0 else { throw SOGSV2Error.invalidMetadata }
+            if let count = shN.count, count < 0 {
+                print("SplatSOGSSceneReaderV2: Validation warning - shN.count < 0, ignoring hint.")
             }
 
             let shNHasRange = (shN.mins?.count ?? 0) > 0 && (shN.maxs?.count ?? 0) > 0
             let shNHasCodebook = shN.codebook.count >= 256
             guard shNHasRange || shNHasCodebook else {
+                print("SplatSOGSSceneReaderV2: Validation warning - shN missing codebook/range, SH decoding may be lossy")
                 throw SOGSV2Error.invalidMetadata
             }
 
             guard let labels = sh_labels,
                   let centroids = sh_centroids,
-                  matchesBaseDimensions(labels) else {
+                  matchesBaseDimensions(labels),
+                  centroids.width > 0,
+                  centroids.height > 0 else {
                 throw SOGSV2Error.invalidMetadata
             }
 
-            let coefficientsPerEntry = shN.coefficientsPerEntry ?? (centroids.width / 64)
-            guard coefficientsPerEntry > 0,
-                  centroids.width % 64 == 0 else {
+            guard centroids.width % 64 == 0 else {
                 throw SOGSV2Error.invalidMetadata
             }
 
-            let expectedWidth = coefficientsPerEntry * 64
-            guard centroids.width == expectedWidth else {
+            let coefficientsFromTexture = centroids.width / 64
+            guard coefficientsFromTexture > 0 else {
                 throw SOGSV2Error.invalidMetadata
             }
 
-            if let count = shN.count {
-                let requiredRows = (count + 63) / 64
-                guard centroids.height >= requiredRows else {
-                    throw SOGSV2Error.invalidMetadata
-                }
+            if let coefficientsFromMetadata = shN.coefficientsPerEntry,
+               coefficientsFromMetadata != coefficientsFromTexture {
+                print("SplatSOGSSceneReaderV2: Validation warning - shN bands hint (\(coefficientsFromMetadata)) does not match texture layout (\(coefficientsFromTexture)), using texture data.")
+            }
+
+            let paletteCapacity = centroids.height * 64
+            guard paletteCapacity > 0 else {
+                throw SOGSV2Error.invalidMetadata
+            }
+
+            if let count = shN.count, count > paletteCapacity {
+                print("SplatSOGSSceneReaderV2: Validation warning - shN palette hint (\(count)) exceeds texture capacity (\(paletteCapacity)), clamping to texture.")
             }
         }
     }
