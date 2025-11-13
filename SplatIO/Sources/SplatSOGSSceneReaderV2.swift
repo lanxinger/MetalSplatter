@@ -2,6 +2,7 @@ import Foundation
 import ImageIO
 import CoreGraphics
 import Compression
+import ZIPFoundation
 
 public class SplatSOGSSceneReaderV2: SplatSceneReader {
     public enum SOGSV2Error: Error {
@@ -468,246 +469,62 @@ public class SplatSOGSSceneReaderV2: SplatSceneReader {
 // MARK: - Zip Archive Reader for Bundled .sog Files
 
 private class SOGSZipArchive {
-    private let zipData: Data
-    private let centralDirectory: [ZipCentralDirectoryEntry]
-    
-    struct ZipCentralDirectoryEntry {
-        let filename: String
-        let compressedSize: UInt32
-        let uncompressedSize: UInt32
-        let localHeaderOffset: UInt32
-        let compressionMethod: UInt16
-    }
+    private let archive: Archive
+    private let url: URL
+    private let shouldStopAccessing: Bool
     
     init(_ zipURL: URL) throws {
-        // Load zip file data
+        self.url = zipURL
         let shouldStopAccessing = zipURL.startAccessingSecurityScopedResource()
-        defer {
+        self.shouldStopAccessing = shouldStopAccessing
+        
+        guard let archive = Archive(url: zipURL, accessMode: .read) else {
             if shouldStopAccessing {
                 zipURL.stopAccessingSecurityScopedResource()
             }
+            throw SplatSOGSSceneReaderV2.SOGSV2Error.zipDecodingFailed("Unable to open SOG archive")
         }
         
-        self.zipData = try Data(contentsOf: zipURL)
-        print("SOGSZipArchive: Loaded \(zipData.count) bytes from \(zipURL.lastPathComponent)")
+        self.archive = archive
+        print("SOGSZipArchive: Opened \(zipURL.lastPathComponent)")
         
-        // Parse central directory
-        self.centralDirectory = try Self.parseCentralDirectory(zipData)
-        print("SOGSZipArchive: Found \(centralDirectory.count) files in archive")
-        
-        for entry in centralDirectory {
-            print("  - \(entry.filename) (\(entry.uncompressedSize) bytes)")
+        var entryCount = 0
+        for entry in archive {
+            entryCount += 1
+            let compressed = entry.compressedSize ?? 0
+            let uncompressed = entry.uncompressedSize ?? 0
+            print("  - \(entry.path) (compressed: \(compressed), uncompressed: \(uncompressed))")
+        }
+        print("SOGSZipArchive: Found \(entryCount) files in archive")
+    }
+    
+    deinit {
+        if shouldStopAccessing {
+            url.stopAccessingSecurityScopedResource()
         }
     }
     
     func extractFile(_ filename: String) throws -> Data {
-        guard let entry = centralDirectory.first(where: { $0.filename == filename }) else {
+        guard let entry = archive.first(where: { $0.path == filename }) else {
             print("SOGSZipArchive: File not found: \(filename)")
             throw SplatSOGSSceneReaderV2.SOGSV2Error.missingFile(filename)
         }
         
         print("SOGSZipArchive: Extracting \(filename)...")
-        print("SOGSZipArchive: Entry details - compressed: \(entry.compressedSize), uncompressed: \(entry.uncompressedSize), method: \(entry.compressionMethod)")
-        
-        // Read local file header
-        let localHeaderOffset = Int(entry.localHeaderOffset)
-        guard localHeaderOffset + 30 <= zipData.count else {
-            print("SOGSZipArchive: Invalid local header offset: \(localHeaderOffset), zip size: \(zipData.count)")
-            throw SplatSOGSSceneReaderV2.SOGSV2Error.zipDecodingFailed("Invalid local header offset")
+        var extractedData = Data()
+        if let size = entry.uncompressedSize ?? entry.compressedSize {
+            extractedData.reserveCapacity(Int(size))
         }
         
-        // Parse local header to get filename and extra field lengths using direct byte access
-        // Local file header structure:
-        // 0-3: signature (0x04034b50)
-        // 4-5: version needed to extract
-        // 6-7: general purpose bit flag
-        // 8-9: compression method
-        // 10-11: last mod file time
-        // 12-13: last mod file date
-        // 14-17: CRC-32
-        // 18-21: compressed size
-        // 22-25: uncompressed size
-        // 26-27: filename length
-        // 28-29: extra field length
-        
-        let filenameLength = UInt16(zipData[localHeaderOffset + 26]) | (UInt16(zipData[localHeaderOffset + 27]) << 8)
-        let extraFieldLength = UInt16(zipData[localHeaderOffset + 28]) | (UInt16(zipData[localHeaderOffset + 29]) << 8)
-        
-        // SOGS ZIP files use data descriptors - check general purpose bit flag from central directory
-        // The SOGS writer sets bit 3 (0x8) which indicates data descriptor is present
-        // This means the actual file size comes from the central directory, not local header
-        
-        // Calculate file data offset (skip local header, filename, and extra fields)
-        let fileDataOffset = localHeaderOffset + 30 + Int(filenameLength) + Int(extraFieldLength)
-        
-        // Use size from central directory entry (which is accurate for SOGS format)
-        // SOGS uses uncompressed storage (method=0), so compressed size == uncompressed size
-        let actualFileSize = min(Int(entry.compressedSize), Int(entry.uncompressedSize))
-        let fileDataEnd = fileDataOffset + actualFileSize
-        
-        // Validate bounds - add some buffer for potential data descriptor (16 bytes)
-        guard fileDataEnd + 16 <= zipData.count else {
-            throw SplatSOGSSceneReaderV2.SOGSV2Error.zipDecodingFailed("File data extends beyond archive")
+        do {
+            _ = try archive.extract(entry, consumer: { data in
+                extractedData.append(data)
+            })
+            print("SOGSZipArchive: Extracted \(extractedData.count) bytes")
+            return extractedData
+        } catch {
+            print("SOGSZipArchive: Failed to extract \(filename): \(error)")
+            throw SplatSOGSSceneReaderV2.SOGSV2Error.zipDecodingFailed("Failed to extract \(filename): \(error.localizedDescription)")
         }
-        
-        // Extract the actual file data
-        let fileData = zipData[fileDataOffset..<fileDataEnd]
-        
-        // Handle compression - SOGS always uses method 0 (uncompressed/stored)
-        if entry.compressionMethod == 0 {
-            // Uncompressed/stored - this is what SOGS uses
-            print("SOGSZipArchive: Extracted \(fileData.count) bytes (uncompressed)")
-            return Data(fileData)
-        } else {
-            print("SOGSZipArchive: Unsupported compression method: \(entry.compressionMethod)")
-            throw SplatSOGSSceneReaderV2.SOGSV2Error.zipDecodingFailed("Unsupported compression method")
-        }
-    }
-    
-    private static func parseCentralDirectory(_ zipData: Data) throws -> [ZipCentralDirectoryEntry] {
-        // Find end of central directory record (search backwards)
-        guard let endOfCentralDir = findEndOfCentralDirectory(zipData) else {
-            throw SplatSOGSSceneReaderV2.SOGSV2Error.zipDecodingFailed("End of central directory not found")
-        }
-        
-        // Parse central directory
-        let centralDirOffset = Int(endOfCentralDir.centralDirectoryOffset)
-        let numEntries = Int(endOfCentralDir.totalEntries)
-        
-        var entries: [ZipCentralDirectoryEntry] = []
-        var currentOffset = centralDirOffset
-        
-        for _ in 0..<numEntries {
-            guard currentOffset + 46 <= zipData.count else { break }
-            
-            // Parse central directory entry using direct byte access for safety
-            // Central directory file header structure (relevant fields):
-            // 0-3: signature (0x02014b50)
-            // 4: version made by
-            // 5: host OS
-            // 6-7: version needed to extract
-            // 8-9: general purpose bit flag
-            // 10-11: compression method
-            // 12-13: last mod file time
-            // 14-15: last mod file date
-            // 16-19: CRC-32
-            // 20-23: compressed size
-            // 24-27: uncompressed size
-            // 28-29: filename length
-            // 30-31: extra field length
-            // 32-33: file comment length
-            // 34-35: disk number start
-            // 36-37: internal file attributes
-            // 38-41: external file attributes
-            // 42-45: relative offset of local header
-            
-            // Ensure we have enough bytes for all required fields
-            guard currentOffset + 45 < zipData.count else { break }
-            
-            let compressionMethod = UInt16(zipData[currentOffset + 10]) | (UInt16(zipData[currentOffset + 11]) << 8)
-            let compressedSize = UInt32(zipData[currentOffset + 20]) |
-                               (UInt32(zipData[currentOffset + 21]) << 8) |
-                               (UInt32(zipData[currentOffset + 22]) << 16) |
-                               (UInt32(zipData[currentOffset + 23]) << 24)
-            let uncompressedSize = UInt32(zipData[currentOffset + 24]) |
-                                 (UInt32(zipData[currentOffset + 25]) << 8) |
-                                 (UInt32(zipData[currentOffset + 26]) << 16) |
-                                 (UInt32(zipData[currentOffset + 27]) << 24)
-            let filenameLength = UInt16(zipData[currentOffset + 28]) | (UInt16(zipData[currentOffset + 29]) << 8)
-            let extraFieldLength = UInt16(zipData[currentOffset + 30]) | (UInt16(zipData[currentOffset + 31]) << 8)
-            let commentLength = UInt16(zipData[currentOffset + 32]) | (UInt16(zipData[currentOffset + 33]) << 8)
-            let localHeaderOffset = UInt32(zipData[currentOffset + 42]) |
-                                  (UInt32(zipData[currentOffset + 43]) << 8) |
-                                  (UInt32(zipData[currentOffset + 44]) << 16) |
-                                  (UInt32(zipData[currentOffset + 45]) << 24)
-            
-            // Extract filename
-            let filenameStart = currentOffset + 46
-            let filenameEnd = filenameStart + Int(filenameLength)
-            guard filenameEnd <= zipData.count else { break }
-            
-            let filenameData = zipData[filenameStart..<filenameEnd]
-            let filename = String(data: filenameData, encoding: .utf8) ?? ""
-            
-            entries.append(ZipCentralDirectoryEntry(
-                filename: filename,
-                compressedSize: compressedSize,
-                uncompressedSize: uncompressedSize,
-                localHeaderOffset: localHeaderOffset,
-                compressionMethod: compressionMethod
-            ))
-            
-            // Move to next entry
-            currentOffset = filenameEnd + Int(extraFieldLength) + Int(commentLength)
-        }
-        
-        return entries
-    }
-    
-    private static func findEndOfCentralDirectory(_ zipData: Data) -> EndOfCentralDirectory? {
-        // Search backwards for end of central directory signature (0x06054b50)
-        let signature: [UInt8] = [0x50, 0x4b, 0x05, 0x06]
-        
-        // Ensure we have enough data for the minimum record size (22 bytes)
-        guard zipData.count >= 22 else {
-            return nil
-        }
-        
-        // Calculate search range - search backwards from end, but not beyond max comment size
-        let minOffset = max(0, zipData.count - 65535 - 22) // 65535 is max comment size
-        let maxOffset = zipData.count - 22  // Need at least 22 bytes for the record
-        
-        // Validate range before searching
-        guard minOffset <= maxOffset else {
-            return nil
-        }
-        
-        for i in (minOffset...maxOffset).reversed() {
-            // Double-check bounds before accessing data
-            guard i + 4 <= zipData.count else { continue }
-            
-            if zipData[i..<i + 4].elementsEqual(signature) {
-                // Double-check we have enough data for the full record
-                guard i + 22 <= zipData.count else { continue }
-                
-                // Found signature, parse the record using direct byte access for safety
-                // End of central directory record structure:
-                // 0-3: signature (already validated)
-                // 4-5: number of this disk
-                // 6-7: disk where central directory starts  
-                // 8-9: number of central directory records on this disk
-                // 10-11: total number of central directory records
-                // 12-15: size of central directory
-                // 16-19: offset of central directory
-                // 20-21: comment length
-                
-                // Read values using direct array indexing with bounds checking
-                guard i + 21 < zipData.count else { continue }
-                
-                let totalEntries = UInt16(zipData[i + 10]) | (UInt16(zipData[i + 11]) << 8)
-                let centralDirectorySize = UInt32(zipData[i + 12]) | 
-                                          (UInt32(zipData[i + 13]) << 8) |
-                                          (UInt32(zipData[i + 14]) << 16) |
-                                          (UInt32(zipData[i + 15]) << 24)
-                let centralDirectoryOffset = UInt32(zipData[i + 16]) |
-                                            (UInt32(zipData[i + 17]) << 8) |
-                                            (UInt32(zipData[i + 18]) << 16) |
-                                            (UInt32(zipData[i + 19]) << 24)
-                
-                return EndOfCentralDirectory(
-                    totalEntries: totalEntries,
-                    centralDirectorySize: centralDirectorySize,
-                    centralDirectoryOffset: centralDirectoryOffset
-                )
-            }
-        }
-        
-        return nil
-    }
-    
-    private struct EndOfCentralDirectory {
-        let totalEntries: UInt16
-        let centralDirectorySize: UInt32
-        let centralDirectoryOffset: UInt32
     }
 }
