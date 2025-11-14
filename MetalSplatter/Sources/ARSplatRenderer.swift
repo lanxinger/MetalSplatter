@@ -356,13 +356,11 @@ public class ARSplatRenderer: NSObject {
         // Enable automatic image stabilization for better tracking
         configuration.isAutoFocusEnabled = true
         
-        // Use the highest quality video format available
+        // Prefer a stable mid-resolution format to reduce capture overhead
         let videoFormats = ARWorldTrackingConfiguration.supportedVideoFormats
-        if let highestResFormat = videoFormats.max(by: { 
-            $0.imageResolution.width * $0.imageResolution.height < $1.imageResolution.width * $1.imageResolution.height 
-        }) {
-            configuration.videoFormat = highestResFormat
-            print("ARSplatRenderer: ✅ High resolution camera enabled (\(Int(highestResFormat.imageResolution.width))x\(Int(highestResFormat.imageResolution.height)))")
+        if let preferredFormat = selectPreferredVideoFormat(from: videoFormats) {
+            configuration.videoFormat = preferredFormat
+            print("ARSplatRenderer: ✅ Camera mode set to \(Int(preferredFormat.imageResolution.width))x\(Int(preferredFormat.imageResolution.height)) @ \(preferredFormat.framesPerSecond)fps")
         }
         
         session.run(configuration, options: [.resetTracking, .removeExistingAnchors])
@@ -375,6 +373,37 @@ public class ARSplatRenderer: NSObject {
         print("ARSplatRenderer: - Scene reconstruction: \(configuration.sceneReconstruction)")
         print("ARSplatRenderer: - Frame semantics: \(configuration.frameSemantics)")
         print("ARSplatRenderer: - Auto focus: \(configuration.isAutoFocusEnabled)")
+    }
+
+    private func selectPreferredVideoFormat(from formats: [ARWorldTrackingConfiguration.VideoFormat]) -> ARWorldTrackingConfiguration.VideoFormat? {
+        guard !formats.isEmpty else { return nil }
+
+        func withinBounds(_ format: ARWorldTrackingConfiguration.VideoFormat) -> Bool {
+            let width = Int(format.imageResolution.width)
+            let height = Int(format.imageResolution.height)
+            return (width <= 1920 && height <= 1440) || (width <= 1440 && height <= 1920)
+        }
+
+        if let sixtyFps = formats
+            .filter({ format in withinBounds(format) && format.framesPerSecond >= 60 })
+            .max(by: { ($0.imageResolution.width * $0.imageResolution.height) < ($1.imageResolution.width * $1.imageResolution.height) }) {
+            return sixtyFps
+        }
+
+        if let thirtyFps = formats
+            .filter({ format in withinBounds(format) && format.framesPerSecond >= 30 })
+            .max(by: { ($0.imageResolution.width * $0.imageResolution.height) < ($1.imageResolution.width * $1.imageResolution.height) }) {
+            return thirtyFps
+        }
+
+        return formats.min { lhs, rhs in
+            let lhsFpsPenalty = abs(Int(lhs.framesPerSecond) - 60)
+            let rhsFpsPenalty = abs(Int(rhs.framesPerSecond) - 60)
+            if lhsFpsPenalty == rhsFpsPenalty {
+                return (lhs.imageResolution.width * lhs.imageResolution.height) < (rhs.imageResolution.width * rhs.imageResolution.height)
+            }
+            return lhsFpsPenalty < rhsFpsPenalty
+        }
     }
     
     public func stopARSession() {
