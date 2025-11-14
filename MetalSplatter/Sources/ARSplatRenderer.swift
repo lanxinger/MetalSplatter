@@ -347,10 +347,10 @@ public class ARSplatRenderer: NSObject {
             print("ARSplatRenderer: ⚠️ LiDAR not available, using visual-inertial tracking")
         }
         
-        // Enable frame semantics for better understanding
-        if ARWorldTrackingConfiguration.supportsFrameSemantics(.personSegmentationWithDepth) {
-            configuration.frameSemantics.insert(.personSegmentationWithDepth)
-            print("ARSplatRenderer: ✅ Person segmentation with depth enabled")
+        configuration.frameSemantics = []
+        if ARWorldTrackingConfiguration.supportsFrameSemantics(.sceneDepth) {
+            configuration.frameSemantics.insert(.sceneDepth)
+            print("ARSplatRenderer: ✅ Scene depth enabled")
         }
         
         // Enable automatic image stabilization for better tracking
