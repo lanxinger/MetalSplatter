@@ -43,10 +43,15 @@ class ARSceneRenderer: NSObject, MTKViewDelegate {
         
         // Configure MTKView for AR
         metalKitView.colorPixelFormat = MTLPixelFormat.bgra8Unorm_srgb
-        metalKitView.depthStencilPixelFormat = MTLPixelFormat.invalid // AR doesn't use depth
+        metalKitView.depthStencilPixelFormat = MTLPixelFormat.depth32Float
         metalKitView.sampleCount = 1
         metalKitView.clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 1)
         metalKitView.framebufferOnly = false // Allow texture reading for composition
+    }
+
+    private var effectiveDepthStencilPixelFormat: MTLPixelFormat {
+        let format = metalKitView.depthStencilPixelFormat
+        return format == .invalid ? .depth32Float : format
     }
     
     func load(_ model: ModelIdentifier?) async throws {
@@ -71,7 +76,7 @@ class ARSceneRenderer: NSObject, MTKViewDelegate {
             // Capture needed values from main actor context
             let deviceRef = device
             let colorPixelFormat = metalKitView.colorPixelFormat
-            let depthStencilPixelFormat = metalKitView.depthStencilPixelFormat
+            let depthStencilPixelFormat = effectiveDepthStencilPixelFormat
             let sampleCount = metalKitView.sampleCount
             
             // Create AR splat renderer entirely in nonisolated context  
@@ -99,7 +104,7 @@ class ARSceneRenderer: NSObject, MTKViewDelegate {
             // Create a simple AR renderer without a model for demonstration
             let deviceRef = device
             let colorPixelFormat = metalKitView.colorPixelFormat
-            let depthStencilPixelFormat = metalKitView.depthStencilPixelFormat
+            let depthStencilPixelFormat = effectiveDepthStencilPixelFormat
             let sampleCount = metalKitView.sampleCount
             
             let renderer = try await Task.detached {

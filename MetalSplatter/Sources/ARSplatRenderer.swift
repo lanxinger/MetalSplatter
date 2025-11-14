@@ -8,6 +8,15 @@ import SplatIO
 import simd
 import UIKit
 
+private struct SceneOcclusionUniforms {
+    var inverseProjection: simd_float4x4
+    var viewToDepthTransform: simd_float3x3
+    var viewportSize: SIMD2<UInt32>
+    var occlusionBias: Float
+    var confidenceThreshold: Float
+    var padding: SIMD2<Float> = .zero
+}
+
 public class ARSplatRenderer: NSObject {
     private let device: MTLDevice
     private let commandQueue: MTLCommandQueue
@@ -21,11 +30,28 @@ public class ARSplatRenderer: NSObject {
     
     // Core splat renderer
     private var splatRenderer: SplatRenderer
+    public let configuredDepthFormat: MTLPixelFormat
     
     // Note: Removed offscreen textures and composition pipeline for single-pass rendering
     
     // Current viewport size
     private var viewportSize = CGSize.zero
+    private var inverseProjectionMatrix = matrix_identity_float4x4
+    private var viewToDepthTransform = matrix_identity_float3x3
+
+    // Occlusion resources
+    private var depthTextureCache: CVMetalTextureCache?
+    private var sceneDepthTextureRef: CVMetalTexture?
+    private var sceneConfidenceTextureRef: CVMetalTexture?
+    private var sceneDepthTexture: MTLTexture?
+    private var sceneConfidenceTexture: MTLTexture?
+    private var confidenceFallbackTexture: MTLTexture?
+    private var occlusionPipelineState: MTLComputePipelineState?
+    private var occlusionSamplerState: MTLSamplerState?
+    private var splatDepthTexture: MTLTexture?
+    private var linearDepthTexture: MTLTexture?
+    private let occlusionBias: Float = 0.02
+    private let depthConfidenceThreshold: Float = 0.35
     
     // Splat transform properties for AR interaction
     public var splatPosition: SIMD3<Float> = SIMD3<Float>(0, 0, -1.5) { // 1.5 meters in front of camera
@@ -84,12 +110,18 @@ public class ARSplatRenderer: NSObject {
                 maxViewCount: Int = 1,
                 maxSimultaneousRenders: Int = 3) throws {
         self.device = device
+        self.configuredDepthFormat = depthFormat
         
         guard let commandQueue = device.makeCommandQueue() else {
             throw ARSplatRendererError.failedToCreateCommandQueue
         }
         self.commandQueue = commandQueue
         self.commandBufferManager = CommandBufferManager(commandQueue: commandQueue)
+        
+        var cache: CVMetalTextureCache?
+        CVMetalTextureCacheCreate(nil, nil, device, nil, &cache)
+        self.depthTextureCache = cache
+        self.confidenceFallbackTexture = Self.makeConfidenceFallbackTexture(device: device)
         
         // Use the MetalSplatter bundle's library instead of the default library
         do {
@@ -113,6 +145,18 @@ public class ARSplatRenderer: NSObject {
             }
             
             self.library = library
+            
+            if let occlusionFunction = library.makeFunction(name: "gaussian_splat_scene_occlusion") {
+                do {
+                    self.occlusionPipelineState = try device.makeComputePipelineState(function: occlusionFunction)
+                    self.occlusionSamplerState = Self.makeLinearSampler(device: device)
+                    print("ARSplatRenderer: ✅ Scene occlusion pipeline configured")
+                } catch {
+                    print("ARSplatRenderer: ⚠️ Failed to set up occlusion pipeline: \(error.localizedDescription)")
+                }
+            } else {
+                print("ARSplatRenderer: ⚠️ gaussian_splat_scene_occlusion function not found in library")
+            }
         } catch {
             print("ARSplatRenderer: Error creating Metal library: \(error)")
             throw ARSplatRendererError.failedToCreateLibrary
@@ -351,6 +395,10 @@ public class ARSplatRenderer: NSObject {
         if ARWorldTrackingConfiguration.supportsFrameSemantics(.sceneDepth) {
             configuration.frameSemantics.insert(.sceneDepth)
             print("ARSplatRenderer: ✅ Scene depth enabled")
+        }
+        if ARWorldTrackingConfiguration.supportsFrameSemantics(.smoothedSceneDepth) {
+            configuration.frameSemantics.insert(.smoothedSceneDepth)
+            print("ARSplatRenderer: ✅ Smoothed scene depth enabled")
         }
         
         // Enable automatic image stabilization for better tracking
@@ -667,9 +715,17 @@ public class ARSplatRenderer: NSObject {
             self.viewportSize = viewportSize
             arBackgroundRenderer.resize(viewportSize)
         }
+        ensureDepthResources(for: viewportSize)
         
         // Update AR camera
         arCamera.update(viewportSize: viewportSize)
+        inverseProjectionMatrix = arCamera.projectionMatrix.inverse
+        
+        if let frame = session.currentFrame {
+            updateSceneDepthResources(from: frame, viewportSize: viewportSize)
+        } else {
+            sceneDepthTexture = nil
+        }
         
         guard let commandBuffer = commandBufferManager.makeCommandBuffer() else {
             throw ARSplatRendererError.failedToCreateCommandBuffer
@@ -688,6 +744,8 @@ public class ARSplatRenderer: NSObject {
             // Only render splats if they've been placed (either auto or manually)
             if hasBeenPlaced {
                 try renderSplatsToDrawable(drawable, commandBuffer: commandBuffer)
+                copyDepthBufferIfNeeded(commandBuffer: commandBuffer)
+                applySceneOcclusionIfPossible(commandBuffer: commandBuffer, drawableTexture: drawable.texture)
             }
         }
         
@@ -761,11 +819,207 @@ public class ARSplatRenderer: NSObject {
             colorTexture: drawable.texture,
             colorLoadAction: .load, // Preserve AR background
             colorStoreAction: .store,
-            depthTexture: nil, // AR doesn't use depth buffer for composition
+            depthTexture: splatDepthTexture,
             rasterizationRateMap: nil,
             renderTargetArrayLength: 0,
             to: commandBuffer
         )
+    }
+
+    private func ensureDepthResources(for size: CGSize) {
+        guard splatRenderer.depthFormat != .invalid else {
+            splatDepthTexture = nil
+            linearDepthTexture = nil
+            return
+        }
+        let width = max(Int(size.width), 1)
+        let height = max(Int(size.height), 1)
+        if let depthTexture = splatDepthTexture,
+           depthTexture.width == width,
+           depthTexture.height == height {
+            return
+        }
+
+        let depthDescriptor = MTLTextureDescriptor.texture2DDescriptor(
+            pixelFormat: .depth32Float,
+            width: width,
+            height: height,
+            mipmapped: false)
+        depthDescriptor.resourceOptions = .storageModePrivate
+        depthDescriptor.usage = [.renderTarget]
+        splatDepthTexture = device.makeTexture(descriptor: depthDescriptor)
+        splatDepthTexture?.label = "GaussianSplatDepth"
+
+        let linearDescriptor = MTLTextureDescriptor.texture2DDescriptor(
+            pixelFormat: .r32Float,
+            width: width,
+            height: height,
+            mipmapped: false)
+        linearDescriptor.resourceOptions = .storageModePrivate
+        linearDescriptor.usage = [.shaderRead]
+        linearDepthTexture = device.makeTexture(descriptor: linearDescriptor)
+        linearDepthTexture?.label = "GaussianSplatLinearDepth"
+    }
+
+    private func copyDepthBufferIfNeeded(commandBuffer: MTLCommandBuffer) {
+        guard splatRenderer.depthFormat != .invalid else { return }
+        guard let depthTexture = splatDepthTexture,
+              let linearTexture = linearDepthTexture else { return }
+        guard let blitEncoder = commandBuffer.makeBlitCommandEncoder() else { return }
+        let size = MTLSize(width: depthTexture.width, height: depthTexture.height, depth: 1)
+        blitEncoder.label = "GaussianSplatDepthCopy"
+        blitEncoder.copy(
+            from: depthTexture,
+            sourceSlice: 0,
+            sourceLevel: 0,
+            sourceOrigin: MTLOrigin(x: 0, y: 0, z: 0),
+            sourceSize: size,
+            to: linearTexture,
+            destinationSlice: 0,
+            destinationLevel: 0,
+            destinationOrigin: MTLOrigin(x: 0, y: 0, z: 0))
+        blitEncoder.endEncoding()
+    }
+
+    private func updateSceneDepthResources(from frame: ARFrame, viewportSize: CGSize) {
+        guard let cache = depthTextureCache else { return }
+        guard let depthData = frame.smoothedSceneDepth ?? frame.sceneDepth else {
+            sceneDepthTexture = nil
+            sceneConfidenceTexture = confidenceFallbackTexture
+            return
+        }
+
+        let depthMap = depthData.depthMap
+        let depthWidth = CVPixelBufferGetWidth(depthMap)
+        let depthHeight = CVPixelBufferGetHeight(depthMap)
+
+        var depthTextureRef: CVMetalTexture?
+        let depthStatus = CVMetalTextureCacheCreateTextureFromImage(
+            nil,
+            cache,
+            depthMap,
+            nil,
+            .r32Float,
+            depthWidth,
+            depthHeight,
+            0,
+            &depthTextureRef)
+
+        if depthStatus == kCVReturnSuccess,
+           let depthTextureRef,
+           let texture = CVMetalTextureGetTexture(depthTextureRef) {
+            sceneDepthTextureRef = depthTextureRef
+            sceneDepthTexture = texture
+            sceneDepthTexture?.label = "ARSceneDepth"
+        } else {
+            sceneDepthTexture = nil
+        }
+
+        if let confidenceMap = depthData.confidenceMap {
+            var confidenceRef: CVMetalTexture?
+            let confidenceStatus = CVMetalTextureCacheCreateTextureFromImage(
+                nil,
+                cache,
+                confidenceMap,
+                nil,
+                .r8Unorm,
+                CVPixelBufferGetWidth(confidenceMap),
+                CVPixelBufferGetHeight(confidenceMap),
+                0,
+                &confidenceRef)
+            if confidenceStatus == kCVReturnSuccess,
+               let confidenceRef,
+               let texture = CVMetalTextureGetTexture(confidenceRef) {
+                sceneConfidenceTextureRef = confidenceRef
+                sceneConfidenceTexture = texture
+                sceneConfidenceTexture?.label = "ARSceneDepthConfidence"
+            } else {
+                sceneConfidenceTexture = confidenceFallbackTexture
+            }
+        } else {
+            sceneConfidenceTexture = confidenceFallbackTexture
+        }
+
+        if let orientation = currentInterfaceOrientation() {
+            let transform = frame.displayTransform(for: orientation, viewportSize: viewportSize).inverted()
+            viewToDepthTransform = simd_float3x3(
+                SIMD3(Float(transform.a), Float(transform.b), 0),
+                SIMD3(Float(transform.c), Float(transform.d), 0),
+                SIMD3(Float(transform.tx), Float(transform.ty), 1)
+            )
+        }
+    }
+
+    private func applySceneOcclusionIfPossible(commandBuffer: MTLCommandBuffer, drawableTexture: MTLTexture) {
+        guard splatRenderer.depthFormat != .invalid else { return }
+        guard let occlusionPipelineState,
+              let sampler = occlusionSamplerState,
+              let linearDepthTexture,
+              let sceneDepthTexture,
+              let confidenceTexture = sceneConfidenceTexture ?? confidenceFallbackTexture,
+              let cameraTextureY = arBackgroundRenderer.capturedImageTextureY,
+              let cameraTextureCbCr = arBackgroundRenderer.capturedImageTextureCbCr else {
+            return
+        }
+
+        guard let cameraYTexture = CVMetalTextureGetTexture(cameraTextureY),
+              let cameraCbCrTexture = CVMetalTextureGetTexture(cameraTextureCbCr) else {
+            return
+        }
+
+        guard let computeEncoder = commandBuffer.makeComputeCommandEncoder() else { return }
+        computeEncoder.label = "GaussianSplatSceneOcclusion"
+        computeEncoder.setComputePipelineState(occlusionPipelineState)
+        computeEncoder.setTexture(sceneDepthTexture, index: 0)
+        computeEncoder.setTexture(confidenceTexture, index: 1)
+        computeEncoder.setTexture(linearDepthTexture, index: 2)
+        computeEncoder.setTexture(drawableTexture, index: 3)
+        computeEncoder.setTexture(cameraYTexture, index: 4)
+        computeEncoder.setTexture(cameraCbCrTexture, index: 5)
+        computeEncoder.setSamplerState(sampler, index: 0)
+
+        var uniforms = SceneOcclusionUniforms(
+            inverseProjection: inverseProjectionMatrix,
+            viewToDepthTransform: viewToDepthTransform,
+            viewportSize: SIMD2(UInt32(drawableTexture.width), UInt32(drawableTexture.height)),
+            occlusionBias: occlusionBias,
+            confidenceThreshold: depthConfidenceThreshold,
+            padding: .zero)
+        computeEncoder.setBytes(&uniforms, length: MemoryLayout<SceneOcclusionUniforms>.stride, index: 0)
+
+        let threadsPerThreadgroup = MTLSize(width: 8, height: 8, depth: 1)
+        let threadgroups = MTLSize(
+            width: (drawableTexture.width + threadsPerThreadgroup.width - 1) / threadsPerThreadgroup.width,
+            height: (drawableTexture.height + threadsPerThreadgroup.height - 1) / threadsPerThreadgroup.height,
+            depth: 1)
+        computeEncoder.dispatchThreadgroups(threadgroups, threadsPerThreadgroup: threadsPerThreadgroup)
+        computeEncoder.endEncoding()
+    }
+
+    private func currentInterfaceOrientation() -> UIInterfaceOrientation? {
+        return UIApplication.shared.connectedScenes
+            .compactMap { $0 as? UIWindowScene }
+            .first?.interfaceOrientation
+    }
+
+    private static func makeConfidenceFallbackTexture(device: MTLDevice) -> MTLTexture? {
+        let descriptor = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .r8Unorm, width: 1, height: 1, mipmapped: false)
+        descriptor.usage = [.shaderRead]
+        guard let texture = device.makeTexture(descriptor: descriptor) else { return nil }
+        var value: UInt8 = 255
+        texture.replace(region: MTLRegionMake2D(0, 0, 1, 1), mipmapLevel: 0, withBytes: &value, bytesPerRow: 1)
+        texture.label = "OcclusionConfidenceFallback"
+        return texture
+    }
+
+    private static func makeLinearSampler(device: MTLDevice) -> MTLSamplerState? {
+        let descriptor = MTLSamplerDescriptor()
+        descriptor.minFilter = .linear
+        descriptor.magFilter = .linear
+        descriptor.sAddressMode = .clampToEdge
+        descriptor.tAddressMode = .clampToEdge
+        descriptor.normalizedCoordinates = true
+        return device.makeSamplerState(descriptor: descriptor)
     }
     
     private func renderSplatsDirectlyToTexture(_ texture: MTLTexture, commandBuffer: MTLCommandBuffer) throws {
