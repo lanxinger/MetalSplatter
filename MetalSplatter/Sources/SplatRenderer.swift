@@ -218,6 +218,15 @@ public class SplatRenderer {
     // cameraWorldPosition and Forward vectors are the latest mean camera position across all viewports
     var cameraWorldPosition: SIMD3<Float> = .zero
     var cameraWorldForward: SIMD3<Float> = .init(x: 0, y: 0, z: -1)
+    // Reference camera used to drive sorting (typically viewport[0])
+    private var sortCameraPosition: SIMD3<Float> = .zero
+    private var sortCameraForward: SIMD3<Float> = .init(x: 0, y: 0, z: -1)
+    private var lastSortedCameraPosition: SIMD3<Float>?
+    private var lastSortedCameraForward: SIMD3<Float>?
+    private var sortDirtyDueToData = true
+    private var sortDataRevision: UInt64 = 0
+    private static let sortPositionThreshold: Float = 0.01
+    private static let sortDirectionThreshold: Float = 0.001
 
     typealias IndexType = UInt32
     
@@ -543,6 +552,8 @@ public class SplatRenderer {
         }
 
         splatBuffer.append(points.map { Splat($0) })
+        sortDirtyDueToData = true
+        sortDataRevision &+= 1
     }
 
     public func add(_ point: SplatScenePoint) throws {
@@ -599,6 +610,29 @@ public class SplatRenderer {
         uniforms = UnsafeMutableRawPointer(dynamicUniformBuffers.contents() + uniformBufferOffset).bindMemory(to: UniformsArray.self, capacity: 1)
     }
 
+    private func updateSortReferenceCamera(from viewports: [ViewportDescriptor]) {
+        if let reference = viewports.first {
+            sortCameraPosition = Self.cameraWorldPosition(forViewMatrix: reference.viewMatrix)
+            sortCameraForward = Self.cameraWorldForward(forViewMatrix: reference.viewMatrix).normalized
+        } else {
+            sortCameraPosition = .zero
+            sortCameraForward = .init(x: 0, y: 0, z: -1)
+        }
+    }
+
+    private func shouldResortForCurrentCamera() -> Bool {
+        if sortDirtyDueToData {
+            return true
+        }
+        guard let lastPos = lastSortedCameraPosition,
+              let lastFwd = lastSortedCameraForward else {
+            return true
+        }
+        let positionDelta = simd_distance(sortCameraPosition, lastPos)
+        let forwardDelta = 1 - simd_dot(simd_normalize(sortCameraForward), simd_normalize(lastFwd))
+        return positionDelta > Self.sortPositionThreshold || forwardDelta > Self.sortDirectionThreshold
+    }
+
     internal func updateUniforms(forViewports viewports: [ViewportDescriptor],
                                 splatCount: UInt32,
                                 indexedSplatCount: UInt32) {
@@ -610,11 +644,11 @@ public class SplatRenderer {
                                     indexedSplatCount: indexedSplatCount)
             self.uniforms.pointee.setUniforms(index: i, uniforms)
         }
-
+        updateSortReferenceCamera(from: viewports)
         cameraWorldPosition = viewports.map { Self.cameraWorldPosition(forViewMatrix: $0.viewMatrix) }.mean ?? .zero
         cameraWorldForward = viewports.map { Self.cameraWorldForward(forViewMatrix: $0.viewMatrix) }.mean?.normalized ?? .init(x: 0, y: 0, z: -1)
 
-        if !sorting {
+        if !sorting && shouldResortForCurrentCamera() {
             resort()
         }
     }
@@ -807,9 +841,10 @@ public class SplatRenderer {
         onSortStart?()
 
         let splatCount = splatBuffer.count
-        
-        let cameraWorldForward = cameraWorldForward
-        let cameraWorldPosition = cameraWorldPosition
+        let dataDirtySnapshot = sortDataRevision
+
+        let cameraWorldForward = sortCameraForward
+        let cameraWorldPosition = sortCameraPosition
         
 //        // For benchmark.
 //        guard splatCount > 0 else {
@@ -899,7 +934,15 @@ public class SplatRenderer {
 //                let elapsed = Date().timeIntervalSince(startTime)
 //                Self.log.info("Sort time (GPU): \(elapsed) seconds")
 //                self.onSortComplete?(elapsed)
+                self.lastSortedCameraPosition = cameraWorldPosition
+                self.lastSortedCameraForward = cameraWorldForward
+                if self.sortDataRevision == dataDirtySnapshot {
+                    self.sortDirtyDueToData = false
+                }
                 self.sorting = false
+                if self.shouldResortForCurrentCamera() {
+                    self.resort(useGPU: useGPU)
+                }
             }
         } else {
             Task(priority: .high) {
@@ -942,7 +985,15 @@ public class SplatRenderer {
 //                let elapsedCPU = -cpuStart.timeIntervalSinceNow
 //                Self.log.info("Sort time (CPU): \(elapsedCPU) seconds")
 //                onSortComplete?(elapsedCPU)
+                self.lastSortedCameraPosition = cameraWorldPosition
+                self.lastSortedCameraForward = cameraWorldForward
+                if self.sortDataRevision == dataDirtySnapshot {
+                    self.sortDirtyDueToData = false
+                }
                 self.sorting = false
+                if self.shouldResortForCurrentCamera() {
+                    self.resort(useGPU: useGPU)
+                }
             }
         }
     }
