@@ -113,21 +113,37 @@ public class SplatSOGSSceneReaderV2: SplatSceneReader {
             throw SOGSV2Error.invalidMetadata
         }
         
+        var sanitizedMetadata = metadata
         var shCentroidsFilename: String?
         var shLabelsFilename: String?
+        
         if let shN = metadata.shN {
-            for filename in shN.files {
-                let lower = filename.lowercased()
-                if lower.contains("centroid") {
-                    shCentroidsFilename = filename
-                } else if lower.contains("label") {
-                    shLabelsFilename = filename
+            let shNHasRange = (shN.mins?.count ?? 0) > 0 && (shN.maxs?.count ?? 0) > 0
+            let shNHasCodebook = shN.codebook.count >= 256
+            
+            if !(shNHasRange || shNHasCodebook) {
+                print("SplatSOGSSceneReaderV2: SH metadata missing codebook/range - disabling SH data")
+                sanitizedMetadata = metadataWithoutSphericalHarmonics(metadata)
+            } else {
+                for filename in shN.files {
+                    let lower = filename.lowercased()
+                    if lower.contains("centroid") {
+                        shCentroidsFilename = filename
+                    } else if lower.contains("label") {
+                        shLabelsFilename = filename
+                    }
+                }
+                
+                if shCentroidsFilename == nil || shLabelsFilename == nil {
+                    print("SplatSOGSSceneReaderV2: Missing SH centroid/label textures - disabling SH data")
+                    sanitizedMetadata = metadataWithoutSphericalHarmonics(metadata)
+                    shCentroidsFilename = nil
+                    shLabelsFilename = nil
                 }
             }
-            if shCentroidsFilename == nil || shLabelsFilename == nil {
-                throw SOGSV2Error.invalidMetadata
-            }
         }
+        
+        let shouldLoadSHData = sanitizedMetadata.shN != nil
 
         // Use concurrent loading for better performance
         let queue = DispatchQueue(label: "sogsv2.webp.loading", attributes: .concurrent)
@@ -221,7 +237,7 @@ public class SplatSOGSSceneReaderV2: SplatSceneReader {
         }
         
         // Load optional spherical harmonics textures
-        if metadata.shN != nil {
+        if shouldLoadSHData {
             // Load centroids
             group.enter()
             queue.async {
@@ -270,7 +286,7 @@ public class SplatSOGSSceneReaderV2: SplatSceneReader {
             throw SOGSV2Error.webpDecodingFailed("Failed to load required v2 textures")
         }
         
-        try validateSOGSV2Data(metadata: metadata,
+        try validateSOGSV2Data(metadata: sanitizedMetadata,
                                means_l: means_l,
                                means_u: means_u,
                                quats: quats,
@@ -282,7 +298,7 @@ public class SplatSOGSSceneReaderV2: SplatSceneReader {
         print("SplatSOGSSceneReaderV2: Successfully loaded all v2 WebP textures")
         
         return SOGSCompressedDataV2(
-            metadata: metadata,
+            metadata: sanitizedMetadata,
             means_l: means_l,
             means_u: means_u,
             quats: quats,
@@ -290,6 +306,19 @@ public class SplatSOGSSceneReaderV2: SplatSceneReader {
             sh0: sh0,
             sh_centroids: sh_centroids,
             sh_labels: sh_labels
+        )
+    }
+    
+    private func metadataWithoutSphericalHarmonics(_ metadata: SOGSMetadataV2) -> SOGSMetadataV2 {
+        return SOGSMetadataV2(
+            version: metadata.version,
+            count: metadata.count,
+            antialias: metadata.antialias,
+            means: metadata.means,
+            scales: metadata.scales,
+            quats: metadata.quats,
+            sh0: metadata.sh0,
+            shN: nil
         )
     }
     
