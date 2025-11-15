@@ -2,6 +2,7 @@ import Foundation
 import ImageIO
 import CoreGraphics
 import Compression
+import Dispatch
 import ZIPFoundation
 
 public class SplatSOGSSceneReaderV2: SplatSceneReader {
@@ -440,33 +441,92 @@ public class SplatSOGSSceneReaderV2: SplatSceneReader {
     }
     
     private func decompressDataV2(_ compressedData: SOGSCompressedDataV2) throws -> [SplatScenePoint] {
-        print("SplatSOGSSceneReaderV2: Decompressing \(compressedData.numSplats) v2 splats...")
+        let totalSplats = compressedData.numSplats
+        print("SplatSOGSSceneReaderV2: Decompressing \(totalSplats) v2 splats...")
         print("SplatSOGSSceneReaderV2: Texture dimensions: \(compressedData.textureWidth)x\(compressedData.textureHeight)")
         print("SplatSOGSSceneReaderV2: Has spherical harmonics: \(compressedData.hasSphericalHarmonics)")
-        
+
+        guard totalSplats > 0 else {
+            return []
+        }
+
+        let preferredBatchSize = 8192
+        let hardwareThreads = max(1, ProcessInfo.processInfo.activeProcessorCount)
+        let maxParallelChunks = max(1, min(hardwareThreads, (totalSplats + preferredBatchSize - 1) / preferredBatchSize))
+
+        if maxParallelChunks <= 1 || totalSplats <= preferredBatchSize {
+            return decompressSequentialV2(compressedData, batchSize: preferredBatchSize)
+        }
+
+        let chunkSize = max(preferredBatchSize, (totalSplats + maxParallelChunks - 1) / maxParallelChunks)
+        var chunkDescriptors: [(start: Int, count: Int)] = []
+        chunkDescriptors.reserveCapacity(maxParallelChunks)
+        var startIndex = 0
+        while startIndex < totalSplats {
+            let count = min(chunkSize, totalSplats - startIndex)
+            chunkDescriptors.append((start: startIndex, count: count))
+            startIndex += count
+        }
+
+        var chunkResults = Array(repeating: [SplatScenePoint](), count: chunkDescriptors.count)
+        let progressLock = NSLock()
+        var processed = 0
+        let logStep = max(1, min(preferredBatchSize * 2, totalSplats / max(1, maxParallelChunks)))
+
+        chunkResults.withUnsafeMutableBufferPointer { buffer in
+            DispatchQueue.concurrentPerform(iterations: chunkDescriptors.count) { chunkIndex in
+                let descriptor = chunkDescriptors[chunkIndex]
+                var iterator = SOGSIteratorV2(compressedData)
+                var localPoints: [SplatScenePoint] = []
+                localPoints.reserveCapacity(descriptor.count)
+
+                let end = descriptor.start + descriptor.count
+                for idx in descriptor.start..<end {
+                    localPoints.append(iterator.readPoint(at: idx))
+                }
+
+                buffer[chunkIndex] = localPoints
+
+                progressLock.lock()
+                processed += descriptor.count
+                if processed == totalSplats || processed % logStep == 0 {
+                    print("SplatSOGSSceneReaderV2: Batch processed \(processed)/\(totalSplats) splats")
+                }
+                progressLock.unlock()
+            }
+        }
+
+        var allPoints: [SplatScenePoint] = []
+        allPoints.reserveCapacity(totalSplats)
+        for chunk in chunkResults {
+            allPoints.append(contentsOf: chunk)
+        }
+
+        print("SplatSOGSSceneReaderV2: Successfully decompressed \(allPoints.count) v2 points")
+        return allPoints
+    }
+
+    private func decompressSequentialV2(_ compressedData: SOGSCompressedDataV2, batchSize: Int) -> [SplatScenePoint] {
         var batchIterator = SOGSBatchIteratorV2(compressedData)
         var allPoints: [SplatScenePoint] = []
         allPoints.reserveCapacity(compressedData.numSplats)
-        
-        // Process in batches for optimal performance
-        let batchSize = 8192
+
         let numBatches = (compressedData.numSplats + batchSize - 1) / batchSize
-        
+
         for batchIndex in 0..<numBatches {
             let startIndex = batchIndex * batchSize
             let remainingPoints = compressedData.numSplats - startIndex
             let currentBatchSize = min(batchSize, remainingPoints)
-            
+
             let batchPoints = batchIterator.readBatch(startIndex: startIndex, count: currentBatchSize)
             allPoints.append(contentsOf: batchPoints)
-            
-            // Progress logging
+
             if batchIndex % 10 == 0 || batchIndex == numBatches - 1 {
                 let processed = min(startIndex + currentBatchSize, compressedData.numSplats)
                 print("SplatSOGSSceneReaderV2: Batch processed \(processed)/\(compressedData.numSplats) splats")
             }
         }
-        
+
         print("SplatSOGSSceneReaderV2: Successfully decompressed \(allPoints.count) v2 points")
         return allPoints
     }
