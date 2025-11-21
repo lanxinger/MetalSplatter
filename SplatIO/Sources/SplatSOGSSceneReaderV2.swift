@@ -426,15 +426,10 @@ public class SplatSOGSSceneReaderV2: SplatSceneReader {
 
             guard let labels = sh_labels,
                   let centroids = sh_centroids,
-                  labels.width >= baseWidth,
-                  labels.height >= baseHeight,
+                  matchesBaseDimensions(labels),
                   centroids.width > 0,
                   centroids.height > 0 else {
                 throw SOGSV2Error.invalidMetadata
-            }
-
-            if labels.width != baseWidth || labels.height != baseHeight {
-                print("SplatSOGSSceneReaderV2: Validation warning - SH label texture \(labels.width)x\(labels.height) differs from base \(baseWidth)x\(baseHeight), using top-left region.")
             }
 
             guard centroids.width % 64 == 0 else {
