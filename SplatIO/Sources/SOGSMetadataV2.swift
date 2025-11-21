@@ -215,6 +215,8 @@ public struct SOGSIteratorV2 {
     // Pre-computed codebooks for performance
     private let scalesCodebook: [Float]  // 256 individual scale values
     private let sh0Codebook: [Float]     // 256 individual color values
+    private let sh0AlphaMin: Float?
+    private let sh0AlphaMax: Float?
     private let shNCodebook: [Float]?
     private let shNMin: Float?
     private let shNMax: Float?
@@ -250,6 +252,16 @@ public struct SOGSIteratorV2 {
                 colors.append(0.0)
             }
             self.sh0Codebook = colors
+        }
+        
+        // Alpha is stored as a logit float (same as v1); preserve any provided range for proper sigmoid decoding
+        if let mins = data.metadata.sh0.mins, mins.count > 3,
+           let maxs = data.metadata.sh0.maxs, maxs.count > 3 {
+            self.sh0AlphaMin = mins[3]
+            self.sh0AlphaMax = maxs[3]
+        } else {
+            self.sh0AlphaMin = nil
+            self.sh0AlphaMax = nil
         }
         
         // Store shN codebook if available
@@ -383,8 +395,15 @@ public struct SOGSIteratorV2 {
         let colorG = sh0Codebook[colorGIndex]
         let colorB = sh0Codebook[colorBIndex]
         
-        // Extract opacity directly from alpha channel (sigmoid mapped)
-        let opacityValue = Float(sh0Pixel.w) / 255.0
+        // Alpha channel stores logit-encoded opacity; apply optional range then sigmoid to get linear opacity
+        let normalizedOpacity = Float(sh0Pixel.w) / 255.0
+        let logitOpacity: Float
+        if let min = sh0AlphaMin, let max = sh0AlphaMax {
+            logitOpacity = lerp(min, max, normalizedOpacity)
+        } else {
+            logitOpacity = normalizedOpacity
+        }
+        let opacityValue = 1.0 / (1.0 + exp(-logitOpacity))
         
         // Create base SH coefficients
         let colorTriplet = SIMD3<Float>(colorR, colorG, colorB)
