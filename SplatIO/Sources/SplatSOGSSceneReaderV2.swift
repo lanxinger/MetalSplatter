@@ -426,10 +426,22 @@ public class SplatSOGSSceneReaderV2: SplatSceneReader {
 
             guard let labels = sh_labels,
                   let centroids = sh_centroids,
-                  matchesBaseDimensions(labels),
+                  labels.width > 0,
+                  labels.height > 0,
                   centroids.width > 0,
                   centroids.height > 0 else {
                 throw SOGSV2Error.invalidMetadata
+            }
+
+            // SH labels may be padded; require width match and enough rows for all splats
+            let requiredLabelRows = (metadata.count + baseWidth - 1) / baseWidth
+            guard labels.width >= baseWidth,
+                  labels.height >= requiredLabelRows else {
+                throw SOGSV2Error.invalidMetadata
+            }
+
+            if labels.width != baseWidth || labels.height != baseHeight {
+                print("SplatSOGSSceneReaderV2: Validation warning - SH labels texture padded to \(labels.width)x\(labels.height), expected \(baseWidth)x\(baseHeight)")
             }
 
             guard centroids.width % 64 == 0 else {
