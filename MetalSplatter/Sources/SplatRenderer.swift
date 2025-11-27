@@ -73,9 +73,10 @@ public class SplatRenderer {
     public struct DebugOptions: OptionSet {
         public let rawValue: UInt32
         public init(rawValue: UInt32) { self.rawValue = rawValue }
-        
+
         public static let overdraw = DebugOptions(rawValue: 1 << 0)
         public static let lodTint  = DebugOptions(rawValue: 1 << 1)
+        public static let showAABB = DebugOptions(rawValue: 1 << 2)
     }
     
     public struct FrameStatistics {
@@ -227,7 +228,7 @@ public class SplatRenderer {
     }()
     
     public var sortPositionEpsilon: Float = 0.01
-    public var sortDirectionEpsilon: Float = 0.001
+    public var sortDirectionEpsilon: Float = 0.0001  // ~0.5-1° rotation (reduced from 0.001 to fix flickering during rotation)
     public var minimumSortInterval: TimeInterval = 0
 
     // Performance tracking
@@ -251,6 +252,12 @@ public class SplatRenderer {
     internal var drawSplatDepthState: MTLDepthStencilState?
     private var postprocessPipelineState: MTLRenderPipelineState?
     private var postprocessDepthState: MTLDepthStencilState?
+
+    // Debug AABB rendering
+    private var debugAABBPipelineState: MTLRenderPipelineState?
+    private var debugAABBDepthState: MTLDepthStencilState?
+    private var aabbVertexBuffer: MTLBuffer?
+    private var aabbIndexBuffer: MTLBuffer?
 
     // dynamicUniformBuffers contains maxSimultaneousRenders uniforms buffers,
     // which we round-robin through, one per render; this is managed by switchToNextDynamicBuffer.
@@ -600,6 +607,77 @@ public class SplatRenderer {
         return depthState
     }
 
+    // MARK: - Debug AABB Pipeline
+
+    private func buildDebugAABBPipelineStateIfNeeded() throws {
+        guard debugAABBPipelineState == nil else { return }
+        debugAABBPipelineState = try buildDebugAABBPipelineState()
+        debugAABBDepthState = try buildDebugAABBDepthState()
+    }
+
+    private func buildDebugAABBPipelineState() throws -> MTLRenderPipelineState {
+        let pipelineDescriptor = MTLRenderPipelineDescriptor()
+        pipelineDescriptor.label = "DebugAABBPipeline"
+        pipelineDescriptor.vertexFunction = try library.makeRequiredFunction(name: "aabbVertexShader")
+        pipelineDescriptor.fragmentFunction = try library.makeRequiredFunction(name: "aabbFragmentShader")
+        pipelineDescriptor.rasterSampleCount = sampleCount
+
+        let colorAttachment = pipelineDescriptor.colorAttachments[0]
+        colorAttachment?.pixelFormat = colorFormat
+        colorAttachment?.isBlendingEnabled = true
+        colorAttachment?.sourceRGBBlendFactor = .sourceAlpha
+        colorAttachment?.destinationRGBBlendFactor = .oneMinusSourceAlpha
+        colorAttachment?.sourceAlphaBlendFactor = .one
+        colorAttachment?.destinationAlphaBlendFactor = .oneMinusSourceAlpha
+
+        pipelineDescriptor.depthAttachmentPixelFormat = depthFormat
+        pipelineDescriptor.maxVertexAmplificationCount = maxViewCount
+
+        return try device.makeRenderPipelineState(descriptor: pipelineDescriptor)
+    }
+
+    private func buildDebugAABBDepthState() throws -> MTLDepthStencilState {
+        let depthStateDescriptor = MTLDepthStencilDescriptor()
+        depthStateDescriptor.depthCompareFunction = .less
+        depthStateDescriptor.isDepthWriteEnabled = false // Don't write depth, just test
+        guard let depthState = device.makeDepthStencilState(descriptor: depthStateDescriptor) else {
+            throw SplatRendererError.failedToCreateDepthStencilState
+        }
+        return depthState
+    }
+
+    private func setupAABBBuffers(min: SIMD3<Float>, max: SIMD3<Float>) {
+        // Define 8 vertices of the bounding box
+        let vertices: [SIMD3<Float>] = [
+            SIMD3(min.x, min.y, min.z), // 0
+            SIMD3(max.x, min.y, min.z), // 1
+            SIMD3(max.x, max.y, min.z), // 2
+            SIMD3(min.x, max.y, min.z), // 3
+            SIMD3(min.x, min.y, max.z), // 4
+            SIMD3(max.x, min.y, max.z), // 5
+            SIMD3(max.x, max.y, max.z), // 6
+            SIMD3(min.x, max.y, max.z), // 7
+        ]
+
+        // Define 12 edges (24 indices for lines)
+        let indices: [UInt16] = [
+            // Bottom face
+            0, 1,  1, 2,  2, 3,  3, 0,
+            // Top face
+            4, 5,  5, 6,  6, 7,  7, 4,
+            // Vertical edges
+            0, 4,  1, 5,  2, 6,  3, 7
+        ]
+
+        let vertexBufferSize = vertices.count * MemoryLayout<SIMD3<Float>>.stride
+        aabbVertexBuffer = device.makeBuffer(bytes: vertices, length: vertexBufferSize, options: .storageModeShared)
+        aabbVertexBuffer?.label = "AABB Vertex Buffer"
+
+        let indexBufferSize = indices.count * MemoryLayout<UInt16>.stride
+        aabbIndexBuffer = device.makeBuffer(bytes: indices, length: indexBufferSize, options: .storageModeShared)
+        aabbIndexBuffer?.label = "AABB Index Buffer"
+    }
+
     public func ensureAdditionalCapacity(_ pointCount: Int) throws {
         try splatBuffer.ensureCapacity(splatBuffer.count + pointCount)
     }
@@ -906,6 +984,43 @@ public class SplatRenderer {
             renderEncoder.popDebugGroup()
         } else {
             renderEncoder.popDebugGroup()
+        }
+
+        // Draw debug AABB wireframe if enabled
+        if debugOptions.contains(.showAABB), let bounds = calculateBounds() {
+            do {
+                try buildDebugAABBPipelineStateIfNeeded()
+
+                // Setup AABB buffers if needed
+                if aabbVertexBuffer == nil || aabbIndexBuffer == nil {
+                    setupAABBBuffers(min: bounds.min, max: bounds.max)
+                }
+
+                guard let pipeline = debugAABBPipelineState,
+                      let depthState = debugAABBDepthState,
+                      let vertexBuffer = aabbVertexBuffer,
+                      let indexBuffer = aabbIndexBuffer else {
+                    Self.log.warning("Debug AABB pipeline not initialized")
+                    renderEncoder.endEncoding()
+                    return
+                }
+
+                renderEncoder.pushDebugGroup("Debug AABB")
+                renderEncoder.setRenderPipelineState(pipeline)
+                renderEncoder.setDepthStencilState(depthState)
+                renderEncoder.setVertexBuffer(vertexBuffer, offset: 0, index: 0)
+                renderEncoder.setVertexBuffer(dynamicUniformBuffers, offset: uniformBufferOffset, index: 1)
+                renderEncoder.drawIndexedPrimitives(
+                    type: .line,
+                    indexCount: 24, // 12 edges * 2 vertices
+                    indexType: .uint16,
+                    indexBuffer: indexBuffer,
+                    indexBufferOffset: 0
+                )
+                renderEncoder.popDebugGroup()
+            } catch {
+                Self.log.error("Failed to draw debug AABB: \(error)")
+            }
         }
 
         renderEncoder.endEncoding()

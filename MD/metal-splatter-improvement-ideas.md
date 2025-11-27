@@ -20,6 +20,7 @@ Actionable changes inspired by PlayCanvas' gsplat pipeline (`gaussian-splat-anal
   - ✅ Added `sortJobsInFlight` counter and `maxConcurrentSorts` limit (default: 1) to prevent sort queue buildup.
   - ✅ Sort requests are skipped when max concurrent limit reached; logged at debug level.
   - ✅ Added `sortJobsInFlight` to `FrameStatistics` for monitoring.
+  - ✅ Tuned `sortDirectionEpsilon` to 0.0001 (~0.5-1° rotation) to fix flickering/popping during rotation (reduced from 0.001 which was ~3-4°).
 - ⏳ **Bin precision near camera**:
   - If using bucketed sorts, bias bit budget to near-camera bins (configurable); expose per-viewport mode (distance vs forward-vector vs radial) on `ViewportDescriptor`.
 
@@ -41,8 +42,11 @@ Actionable changes inspired by PlayCanvas' gsplat pipeline (`gaussian-splat-anal
   - ✅ Added `FrameStatistics` struct with `onFrameReady` callback plus `onRenderStart`/`onRenderComplete` hooks.
   - ✅ Tracks: ready state, loading count, sort duration (GPU/CPU), buffer upload count, splat count, frame time.
   - ✅ Accessible via `renderer.onFrameReady = { stats in ... }`.
-- ⏳ **Debug AABBs**:
-  - Optional draw of per-node/per-LOD AABBs for streaming scenarios; useful in AR alignment. Could live in a small debug render pass.
+- ✅ **Debug AABBs**:
+  - ✅ Added `.showAABB` debug option to render wireframe bounding box
+  - ✅ New `DebugAABB.metal` shader with cyan wireframe rendering
+  - ✅ Uses existing `calculateBounds()` to determine scene extents
+  - ✅ Renders as overlay with depth testing (no depth write) for proper occlusion
 
 ## Buffer Management & Reuse
 - ✅ **Worker-side caching and buffer reuse**:
@@ -75,10 +79,13 @@ Actionable changes inspired by PlayCanvas' gsplat pipeline (`gaussian-splat-anal
 5. ✅ **Buffer Safety** - `MetalBuffer.swift` now clamps to `device.maxBufferLength` with warnings
 6. ✅ **Sort Buffer Reuse** - GPU sort path now uses pooled buffers (`sortDistanceBufferPool`, `sortIndexBufferPool`) to eliminate per-frame allocations
 7. ✅ **Jobs-in-Flight Guard** - Prevents sort queue buildup with `sortJobsInFlight` counter and `maxConcurrentSorts` limit (default: 1)
+8. ✅ **Debug AABB Rendering** - Wireframe bounding box visualization via `.showAABB` debug option
 
 ### Usage Notes
-- **Toggle overlays**: `renderer.debugOptions = [.overdraw, .lodTint]`; tune `renderer.lodThresholds` as needed
+- **Toggle overlays**: `renderer.debugOptions = [.overdraw, .lodTint, .showAABB]`; tune `renderer.lodThresholds` as needed
 - **Stats hook**: `renderer.onFrameReady = { stats in ... }` provides ready/loading state, sort duration, upload count, splat count, frame time, buffer pool stats, and jobs-in-flight count
-- **Sort knobs**: Adjust `sortPositionEpsilon`, `sortDirectionEpsilon`, `minimumSortInterval` to reduce re-sort frequency
+- **Sort knobs**: Adjust `sortPositionEpsilon`, `sortDirectionEpsilon` (default: 0.0001 for ~0.5-1° rotation sensitivity), `minimumSortInterval` to balance visual quality vs performance
 - **Buffer pool monitoring**: Check `stats.sortBufferPoolStats` to see available buffers, leased buffers, and memory usage for sort operations
 - **Sort queue monitoring**: Check `stats.sortJobsInFlight` to see how many sorts are currently executing (typically 0 or 1)
+- **AABB visualization**: Enable `.showAABB` to render cyan wireframe box around scene bounds; useful for debugging spatial queries and AR alignment
+- **Flickering fix**: If you experience flickering during rotation, the default `sortDirectionEpsilon` of 0.0001 should prevent it; increase it (e.g., to 0.001) only if you need to reduce sort frequency for performance
