@@ -1,5 +1,7 @@
 #import "SplatProcessing.h"
 
+// Debug flags moved to SplatProcessing.h
+
 float3 calcCovariance2D(float3 viewPos,
                         packed_half3 cov3Da,
                         packed_half3 cov3Db,
@@ -87,6 +89,8 @@ FragmentIn splatVertex(Splat splat,
                        Uniforms uniforms,
                        uint relativeVertexIndex) {
     FragmentIn out;
+    out.debugFlags = uniforms.debugFlags;
+    out.lodBand = 0;
 
     // Optimized matrix multiplication with memory-coalesced access pattern
     // Load position components into SIMD-friendly variables for better memory access
@@ -107,6 +111,8 @@ FragmentIn splatVertex(Splat splat,
     // Early exit for splats behind camera
     if (viewPosition3.z >= 0.0) {
         out.position = float4(1, 1, 0, 1);
+        out.relativePosition = half2(0);
+        out.color = half4(0);
         return out;
     }
 
@@ -153,14 +159,25 @@ FragmentIn splatVertex(Splat splat,
                           projectedCenter.w);
     out.relativePosition = kBoundsRadius * relativeCoordinates;
     out.color = splat.color;
+
+    if ((uniforms.debugFlags & DebugFlagLodTint) != 0) {
+        float distance = length(viewPosition3);
+        float3 thresholds = uniforms.lodThresholds;
+        if (distance > thresholds.z) {
+            out.lodBand = 3;
+        } else if (distance > thresholds.y) {
+            out.lodBand = 2;
+        } else if (distance > thresholds.x) {
+            out.lodBand = 1;
+        } else {
+            out.lodBand = 0;
+        }
+    }
+
     return out;
 }
 
-half splatFragmentAlpha(half2 relativePosition, half splatAlpha) {
-    half negativeMagnitudeSquared = -dot(relativePosition, relativePosition);
-    // Use fast exponential for significant performance improvement
-    return (negativeMagnitudeSquared < -kBoundsRadiusSquared) ? half(0) : fast::exp(half(0.5) * negativeMagnitudeSquared) * splatAlpha;
-}
+// Inline helper functions (splatFragmentAlpha, lodTintForBand, shadeSplat) moved to SplatProcessing.h
 
 // MARK: - AR Background Rendering
 

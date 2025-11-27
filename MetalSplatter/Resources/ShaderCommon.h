@@ -26,6 +26,8 @@ typedef struct
      */
     uint splatCount;
     uint indexedSplatCount;
+    uint debugFlags;
+    float3 lodThresholds;
 } Uniforms;
 
 typedef struct
@@ -46,4 +48,6 @@ typedef struct
     float4 position [[position]];
     half2 relativePosition; // Ranges from -kBoundsRadius to +kBoundsRadius
     half4 color;
+    half lodBand;
+    uint debugFlags;
 } FragmentIn;

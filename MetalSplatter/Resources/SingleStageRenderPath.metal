@@ -11,6 +11,10 @@ vertex FragmentIn singleStageSplatVertexShader(uint vertexID [[vertex_id]],
     if (splatID >= uniforms.splatCount) {
         FragmentIn out;
         out.position = float4(1, 1, 0, 1);
+        out.relativePosition = half2(0);
+        out.color = half4(0);
+        out.lodBand = 0;
+        out.debugFlags = 0;
         return out;
     }
 
@@ -20,6 +24,5 @@ vertex FragmentIn singleStageSplatVertexShader(uint vertexID [[vertex_id]],
 }
 
 fragment half4 singleStageSplatFragmentShader(FragmentIn in [[stage_in]]) {
-    half alpha = splatFragmentAlpha(in.relativePosition, in.color.a);
-    return half4(alpha * in.color.rgb, alpha);
+    return shadeSplat(in);
 }

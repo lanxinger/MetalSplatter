@@ -57,13 +57,16 @@ public class MetalBuffer<T> {
     public func setCapacity(_ newCapacity: Int) throws {
         let newCapacity = max(newCapacity, 1)
         guard newCapacity != capacity else { return }
-        guard capacity <= maxCapacity else {
-            throw Error.capacityGreatedThanMaxCapacity(requested: capacity, max: maxCapacity)
+        guard newCapacity <= self.maxCapacity else {
+            throw Error.capacityGreatedThanMaxCapacity(requested: newCapacity, max: self.maxCapacity)
         }
 
         // Use exponential growth strategy to reduce frequent reallocations
-        let actualNewCapacity = newCapacity > capacity ? 
-            max(newCapacity, capacity * 2) : newCapacity
+        let growthTarget = newCapacity > capacity ? max(newCapacity, capacity * 2) : newCapacity
+        let actualNewCapacity = min(growthTarget, self.maxCapacity)
+        if growthTarget > self.maxCapacity {
+            log.warning("Requested buffer growth to \(growthTarget) exceeds device limit \(self.maxCapacity); clamping to \(actualNewCapacity)")
+        }
 
         log.info("Allocating a new buffer of size \(MemoryLayout<T>.stride) * \(actualNewCapacity) = \(Float(MemoryLayout<T>.stride * actualNewCapacity) / (1024.0 * 1024.0))mb")
         

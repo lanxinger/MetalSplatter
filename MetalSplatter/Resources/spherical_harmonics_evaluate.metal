@@ -6,6 +6,12 @@ using namespace metal;
 
 // Spherical harmonics basis functions
 // Based on: https://github.com/graphdeco-inria/gaussian-splatting/blob/main/utils/sh_utils.py
+// Coefficient order (shared with SphericalHarmonicsEvaluator.swift/FastSHRenderPath.metal):
+// 0: dc,
+// 1: y, 2: z, 3: x,
+// 4: xy, 5: yz, 6: 2zz-xx-yy, 7: xz, 8: xx-yy,
+// 9: y*(3xx-yy), 10: xy*z, 11: y*(4zz-xx-yy), 12: z*(2zz-3xx-3yy),
+// 13: x*(4zz-xx-yy), 14: z*(xx-yy), 15: x*(xx-3yy)
 
 constant float SH_C0 = 0.28209479177387814f;
 constant float SH_C1 = 0.4886025119029199f;

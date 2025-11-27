@@ -39,6 +39,10 @@ vertex FragmentIn multiStageSplatVertexShader(uint vertexID [[vertex_id]],
     if (splatID >= uniforms.splatCount) {
         FragmentIn out;
         out.position = float4(1, 1, 0, 1);
+        out.relativePosition = half2(0);
+        out.color = half4(0);
+        out.lodBand = 0;
+        out.debugFlags = 0;
         return out;
     }
 
@@ -51,8 +55,9 @@ fragment FragmentStore multiStageSplatFragmentShader(FragmentIn in [[stage_in]],
                                                      FragmentValues previousFragmentValues [[imageblock_data]]) {
     FragmentStore out;
 
-    half alpha = splatFragmentAlpha(in.relativePosition, in.color.a);
-    half4 colorWithPremultipliedAlpha = half4(in.color.rgb * alpha, alpha);
+    half4 shaded = shadeSplat(in);
+    half alpha = shaded.a;
+    half4 colorWithPremultipliedAlpha = half4(shaded.rgb, alpha);
 
     half oneMinusAlpha = 1 - alpha;
 
@@ -76,6 +81,10 @@ vertex FragmentIn postprocessVertexShader(uint vertexID [[vertex_id]]) {
     position.zw = 1.0;
 
     out.position = position;
+    out.relativePosition = half2(0);
+    out.color = half4(0);
+    out.lodBand = 0;
+    out.debugFlags = 0;
     return out;
 }
 

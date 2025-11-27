@@ -70,6 +70,35 @@ public class SplatRenderer {
         Logger(subsystem: Bundle.module.bundleIdentifier ?? "com.metalsplatter.unknown",
                category: "SplatRenderer")
     
+    public struct DebugOptions: OptionSet {
+        public let rawValue: UInt32
+        public init(rawValue: UInt32) { self.rawValue = rawValue }
+        
+        public static let overdraw = DebugOptions(rawValue: 1 << 0)
+        public static let lodTint  = DebugOptions(rawValue: 1 << 1)
+    }
+    
+    public struct FrameStatistics {
+        public let ready: Bool
+        public let loadingCount: Int
+        public let sortDuration: TimeInterval?
+        public let bufferUploadCount: Int
+        public let splatCount: Int
+        public let frameTime: TimeInterval
+
+        // Buffer pool statistics for performance monitoring
+        public struct BufferPoolStats {
+            public let availableBuffers: Int
+            public let leasedBuffers: Int
+            public let totalMemoryMB: Float
+        }
+
+        public let sortBufferPoolStats: BufferPoolStats?
+
+        // Sort queue status
+        public let sortJobsInFlight: Int
+    }
+    
     private var computeDepthsPipelineState: MTLComputePipelineState?
     private var computeDistancesPipelineState: MTLComputePipelineState?
     private var frustumCullPipelineState: MTLComputePipelineState?
@@ -102,6 +131,8 @@ public class SplatRenderer {
 
         var splatCount: UInt32
         var indexedSplatCount: UInt32
+        var debugFlags: UInt32
+        var lodThresholds: SIMD3<Float>
     }
 
     // Keep in sync with Shaders.metal : UniformsArray
@@ -187,12 +218,26 @@ public class SplatRenderer {
     public var onSortComplete: ((TimeInterval) -> Void)?
     public var onRenderStart: (() -> Void)?
     public var onRenderComplete: ((TimeInterval) -> Void)?
+    public var onFrameReady: ((FrameStatistics) -> Void)?
     
+    public var debugOptions: DebugOptions = []
+    public var lodThresholds: SIMD3<Float> = {
+        let thresholds = Constants.lodDistanceThresholds
+        return SIMD3<Float>(thresholds[0], thresholds[1], thresholds[2])
+    }()
+    
+    public var sortPositionEpsilon: Float = 0.01
+    public var sortDirectionEpsilon: Float = 0.001
+    public var minimumSortInterval: TimeInterval = 0
+
     // Performance tracking
     private var frameStartTime: CFAbsoluteTime = 0
     private var lastFrameTime: TimeInterval = 0
     public var averageFrameTime: TimeInterval = 0
     private var frameCount: Int = 0
+    private var lastSortDuration: TimeInterval?
+    private var frameBufferUploads: Int = 0
+    private var lastSortTime: CFAbsoluteTime = 0
     private var metal4LoggedOnce: Bool = false
     private var lastSplatCountLogged: Int = 0
 
@@ -225,15 +270,17 @@ public class SplatRenderer {
     private var lastSortedCameraForward: SIMD3<Float>?
     private var sortDirtyDueToData = true
     private var sortDataRevision: UInt64 = 0
-    private static let sortPositionThreshold: Float = 0.01
-    private static let sortDirectionThreshold: Float = 0.001
 
     typealias IndexType = UInt32
     
     // Buffer pools for efficient memory management
     private let splatBufferPool: MetalBufferPool<Splat>
     private let indexBufferPool: MetalBufferPool<UInt32>
-    
+
+    // Sort buffer pools for GPU sorting operations (reuse across frames)
+    private let sortDistanceBufferPool: MetalBufferPool<Float>
+    private let sortIndexBufferPool: MetalBufferPool<Int32>
+
     // splatBuffer contains one entry for each gaussian splat
     var splatBuffer: MetalBuffer<Splat>
     // splatBufferPrime is a copy of splatBuffer, which is not currenly in use for rendering.
@@ -246,8 +293,10 @@ public class SplatRenderer {
     public var splatCount: Int { splatBuffer.count }
 
     var sorting = false
+    private var sortJobsInFlight: Int = 0  // Track concurrent sort operations
+    private let maxConcurrentSorts: Int = 1  // Limit to prevent queue buildup
     var orderAndDepthTempSort: [SplatIndexAndDepth] = []
-    
+
     // Metal 4 command buffer pool for improved performance
     private var commandBufferManager: CommandBufferManager
 
@@ -292,13 +341,28 @@ public class SplatRenderer {
             memoryPressureThreshold: 0.7  // More aggressive cleanup for large buffers
         )
         self.splatBufferPool = MetalBufferPool(device: device, configuration: splatPoolConfig)
-        
+
         let indexPoolConfig = MetalBufferPool<UInt32>.Configuration(
             maxPoolSize: 12,  // Index buffers are smaller, can pool more
             maxBufferAge: 90.0
         )
         self.indexBufferPool = MetalBufferPool(device: device, configuration: indexPoolConfig)
-        
+
+        // Initialize sort buffer pools (optimized for frequent reuse during sorting)
+        let sortDistancePoolConfig = MetalBufferPool<Float>.Configuration(
+            maxPoolSize: 4,  // Keep a few sort buffers cached
+            maxBufferAge: 30.0,  // Short age since sort patterns are stable
+            memoryPressureThreshold: 0.75
+        )
+        self.sortDistanceBufferPool = MetalBufferPool(device: device, configuration: sortDistancePoolConfig)
+
+        let sortIndexPoolConfig = MetalBufferPool<Int32>.Configuration(
+            maxPoolSize: 4,  // Keep a few sort buffers cached
+            maxBufferAge: 30.0,  // Short age since sort patterns are stable
+            memoryPressureThreshold: 0.75
+        )
+        self.sortIndexBufferPool = MetalBufferPool(device: device, configuration: sortIndexPoolConfig)
+
         // Acquire initial buffers from pools
         self.splatBuffer = try splatBufferPool.acquire(minimumCapacity: 1)
         self.splatBufferPrime = try splatBufferPool.acquire(minimumCapacity: 1)
@@ -624,24 +688,31 @@ public class SplatRenderer {
         if sortDirtyDueToData {
             return true
         }
+        let now = CFAbsoluteTimeGetCurrent()
+        if minimumSortInterval > 0 && (now - lastSortTime) < minimumSortInterval {
+            return false
+        }
         guard let lastPos = lastSortedCameraPosition,
               let lastFwd = lastSortedCameraForward else {
             return true
         }
         let positionDelta = simd_distance(sortCameraPosition, lastPos)
         let forwardDelta = 1 - simd_dot(simd_normalize(sortCameraForward), simd_normalize(lastFwd))
-        return positionDelta > Self.sortPositionThreshold || forwardDelta > Self.sortDirectionThreshold
+        return positionDelta > sortPositionEpsilon || forwardDelta > sortDirectionEpsilon
     }
 
     internal func updateUniforms(forViewports viewports: [ViewportDescriptor],
                                 splatCount: UInt32,
                                 indexedSplatCount: UInt32) {
         for (i, viewport) in viewports.enumerated() where i <= maxViewCount {
+            let debugFlags = debugOptions.rawValue
             let uniforms = Uniforms(projectionMatrix: viewport.projectionMatrix,
                                     viewMatrix: viewport.viewMatrix,
                                     screenSize: SIMD2(x: UInt32(viewport.screenSize.x), y: UInt32(viewport.screenSize.y)),
                                     splatCount: splatCount,
-                                    indexedSplatCount: indexedSplatCount)
+                                    indexedSplatCount: indexedSplatCount,
+                                    debugFlags: debugFlags,
+                                    lodThresholds: lodThresholds)
             self.uniforms.pointee.setUniforms(index: i, uniforms)
         }
         updateSortReferenceCamera(from: viewports)
@@ -722,6 +793,10 @@ public class SplatRenderer {
                        rasterizationRateMap: MTLRasterizationRateMap?,
                        renderTargetArrayLength: Int,
                        to commandBuffer: MTLCommandBuffer) throws {
+        onRenderStart?()
+        frameStartTime = CFAbsoluteTimeGetCurrent()
+        frameBufferUploads = 0
+
         let splatCount = splatBuffer.count
         guard splatBuffer.count != 0 else { return }
         let indexedSplatCount = min(splatCount, Constants.maxIndexedSplatCount)
@@ -729,6 +804,7 @@ public class SplatRenderer {
 
         switchToNextDynamicBuffer()
         updateUniforms(forViewports: viewports, splatCount: UInt32(splatCount), indexedSplatCount: UInt32(indexedSplatCount))
+        frameBufferUploads += 1 // uniforms update
 
         // Log Metal 4.0 availability but use standard rendering path (only log once per scene)
         if #available(iOS 26.0, macOS 26.0, tvOS 26.0, visionOS 26.0, *) {
@@ -781,6 +857,7 @@ public class SplatRenderer {
                 indexBuffer.values[i * 6 + 4] = UInt32(i * 4 + 2)
                 indexBuffer.values[i * 6 + 5] = UInt32(i * 4 + 3)
             }
+            frameBufferUploads += 1
         }
 
         if multiStage {
@@ -832,12 +909,49 @@ public class SplatRenderer {
         }
 
         renderEncoder.endEncoding()
+
+        lastFrameTime = CFAbsoluteTimeGetCurrent() - frameStartTime
+        frameCount += 1
+        averageFrameTime += (lastFrameTime - averageFrameTime) / Double(frameCount)
+        
+        onRenderComplete?(lastFrameTime)
+
+        // Collect buffer pool statistics for performance monitoring
+        let distancePoolStats = sortDistanceBufferPool.getStatistics()
+        let indexPoolStats = sortIndexBufferPool.getStatistics()
+
+        // Combine sort buffer pool stats (distance + index buffers)
+        let sortBufferStats = FrameStatistics.BufferPoolStats(
+            availableBuffers: distancePoolStats.availableBuffers + indexPoolStats.availableBuffers,
+            leasedBuffers: distancePoolStats.leasedBuffers + indexPoolStats.leasedBuffers,
+            totalMemoryMB: distancePoolStats.totalMemoryMB + indexPoolStats.totalMemoryMB
+        )
+
+        let stats = FrameStatistics(
+            ready: !sorting,
+            loadingCount: sorting ? 1 : 0,
+            sortDuration: lastSortDuration,
+            bufferUploadCount: frameBufferUploads,
+            splatCount: splatCount,
+            frameTime: lastFrameTime,
+            sortBufferPoolStats: sortBufferStats,
+            sortJobsInFlight: sortJobsInFlight
+        )
+        onFrameReady?(stats)
     }
 
     // Sort splatBuffer (read-only), storing the results in splatBuffer (write-only) then swap splatBuffer and splatBufferPrime
     public func resort(useGPU: Bool = true) {
         guard !sorting else { return }
+
+        // Prevent sort queue buildup - skip if too many sorts already in flight
+        guard self.sortJobsInFlight < self.maxConcurrentSorts else {
+            Self.log.debug("Skipping sort request - \(self.sortJobsInFlight) job(s) already in flight (max: \(self.maxConcurrentSorts))")
+            return
+        }
+
         sorting = true
+        sortJobsInFlight += 1
         onSortStart?()
 
         let splatCount = splatBuffer.count
@@ -845,6 +959,7 @@ public class SplatRenderer {
 
         let cameraWorldForward = sortCameraForward
         let cameraWorldPosition = sortCameraPosition
+        let sortStartTime = CFAbsoluteTimeGetCurrent()
         
 //        // For benchmark.
 //        guard splatCount > 0 else {
@@ -859,13 +974,28 @@ public class SplatRenderer {
             Task(priority: .high) {
 //                let startTime = Date()
 
-                // Allocate a GPU buffer for storing distances.
-                guard let distanceBuffer = device.makeBuffer(
-                    length: MemoryLayout<Float>.size * splatCount,
-                    options: .storageModeShared
-                ) else {
-                    Self.log.error("Failed to create distance buffer.")
+                // Acquire sort buffers from pool (reused across frames for better performance)
+                let distanceBuffer: MetalBuffer<Float>
+                let indexOutputBuffer: MetalBuffer<Int32>
+
+                do {
+                    distanceBuffer = try sortDistanceBufferPool.acquire(minimumCapacity: splatCount)
+                    distanceBuffer.count = splatCount
+                } catch {
+                    Self.log.error("Failed to acquire distance buffer from pool: \(error)")
                     self.sorting = false
+                    self.sortJobsInFlight -= 1
+                    return
+                }
+
+                do {
+                    indexOutputBuffer = try sortIndexBufferPool.acquire(minimumCapacity: splatCount)
+                    indexOutputBuffer.count = splatCount
+                } catch {
+                    Self.log.error("Failed to acquire index output buffer from pool: \(error)")
+                    sortDistanceBufferPool.release(distanceBuffer)
+                    self.sorting = false
+                    self.sortJobsInFlight -= 1
                     return
                 }
 
@@ -874,51 +1004,44 @@ public class SplatRenderer {
                       let computeEncoder = commandBuffer.makeComputeCommandEncoder(),
                       let computePipelineState = computeDistancesPipelineState else {
                     Self.log.error("Failed to create compute command buffer or encoder.")
+                    sortDistanceBufferPool.release(distanceBuffer)
+                    sortIndexBufferPool.release(indexOutputBuffer)
                     self.sorting = false
+                    self.sortJobsInFlight -= 1
                     return
                 }
-                
+
                 // Set up compute shader parameters
                 var cameraPos = cameraWorldPosition
                 var cameraFwd = cameraWorldForward
                 var sortByDist = Constants.sortByDistance
                 var count = UInt32(splatCount)
-                
+
                 computeEncoder.setComputePipelineState(computePipelineState)
                 computeEncoder.setBuffer(splatBuffer.buffer, offset: 0, index: 0)
-                computeEncoder.setBuffer(distanceBuffer, offset: 0, index: 1)
+                computeEncoder.setBuffer(distanceBuffer.buffer, offset: 0, index: 1)
                 computeEncoder.setBytes(&cameraPos, length: MemoryLayout<SIMD3<Float>>.size, index: 2)
                 computeEncoder.setBytes(&cameraFwd, length: MemoryLayout<SIMD3<Float>>.size, index: 3)
                 computeEncoder.setBytes(&sortByDist, length: MemoryLayout<Bool>.size, index: 4)
                 computeEncoder.setBytes(&count, length: MemoryLayout<UInt32>.size, index: 5)
-                
+
                 let threadsPerThreadgroup = MTLSize(width: 256, height: 1, depth: 1)
                 let threadgroups = MTLSize(width: (splatCount + 255) / 256, height: 1, depth: 1)
-                
+
                 computeEncoder.dispatchThreadgroups(threadgroups, threadsPerThreadgroup: threadsPerThreadgroup)
                 computeEncoder.endEncoding()
                 commandBuffer.commit()
                 commandBuffer.waitUntilCompleted()
 
-                // Allocate a GPU buffer for the ArgSort output indices
-                guard let indexOutputBuffer = device.makeBuffer(
-                    length: MemoryLayout<Int32>.size * splatCount,
-                    options: .storageModeShared
-                ) else {
-                    Self.log.error("Failed to create output indices buffer.")
-                    self.sorting = false
-                    return
-                }
-
                 // Run argsort, in decending order.
                 let argSort = MPSArgSort(dataType: .float32, descending: true)
                 argSort(commandQueue: commandBufferManager.queue,
-                        input: distanceBuffer,
-                        output: indexOutputBuffer,
+                        input: distanceBuffer.buffer,
+                        output: indexOutputBuffer.buffer,
                         count: splatCount)
 
                 // Read back the sorted indices and reorder splats on the CPU.
-                let sortedIndices = indexOutputBuffer.contents().bindMemory(to: Int32.self, capacity: splatCount)
+                let sortedIndices = indexOutputBuffer.values
 
                 do {
                     try self.prepareForSorting(count: splatCount)
@@ -931,15 +1054,21 @@ public class SplatRenderer {
                     Self.log.error("Failed to reorder splats with pooled buffers: \(error)")
                 }
 
-//                let elapsed = Date().timeIntervalSince(startTime)
-//                Self.log.info("Sort time (GPU): \(elapsed) seconds")
-//                self.onSortComplete?(elapsed)
+                // Release sort buffers back to pool for reuse
+                sortDistanceBufferPool.release(distanceBuffer)
+                sortIndexBufferPool.release(indexOutputBuffer)
+
+                let elapsed = CFAbsoluteTimeGetCurrent() - sortStartTime
+                self.lastSortDuration = elapsed
+                self.onSortComplete?(elapsed)
                 self.lastSortedCameraPosition = cameraWorldPosition
                 self.lastSortedCameraForward = cameraWorldForward
+                self.lastSortTime = CFAbsoluteTimeGetCurrent()
                 if self.sortDataRevision == dataDirtySnapshot {
                     self.sortDirtyDueToData = false
                 }
                 self.sorting = false
+                self.sortJobsInFlight -= 1
                 if self.shouldResortForCurrentCamera() {
                     self.resort(useGPU: useGPU)
                 }
@@ -982,15 +1111,17 @@ public class SplatRenderer {
                     Self.log.error("Failed to reorder splats with pooled buffers: \(error)")
                 }
 
-//                let elapsedCPU = -cpuStart.timeIntervalSinceNow
-//                Self.log.info("Sort time (CPU): \(elapsedCPU) seconds")
-//                onSortComplete?(elapsedCPU)
+                let elapsedCPU = CFAbsoluteTimeGetCurrent() - sortStartTime
+                self.lastSortDuration = elapsedCPU
+                self.onSortComplete?(elapsedCPU)
                 self.lastSortedCameraPosition = cameraWorldPosition
                 self.lastSortedCameraForward = cameraWorldForward
+                self.lastSortTime = CFAbsoluteTimeGetCurrent()
                 if self.sortDataRevision == dataDirtySnapshot {
                     self.sortDirtyDueToData = false
                 }
                 self.sorting = false
+                self.sortJobsInFlight -= 1
                 if self.shouldResortForCurrentCamera() {
                     self.resort(useGPU: useGPU)
                 }

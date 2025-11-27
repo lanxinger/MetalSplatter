@@ -8,6 +8,23 @@ public class SphericalHarmonicsEvaluator {
     private let computePipeline: MTLComputePipelineState
     private let directionalPipeline: MTLComputePipelineState?
     
+    /// SH coefficient order (Graphdeco/gsplat layout) shared with spherical_harmonics_evaluate.metal and FastSHRenderPath.metal.
+    /// Index 0 is the DC term, followed by Y bands: y, z, x, xy, yz, 2zz-xx-yy, xz, xx-yy, then band 3.
+    public static let coefficientOrder: [String] = [
+        "L0,0 (dc)",
+        "L1,-1 (y)", "L1,0 (z)", "L1,1 (x)",
+        "L2,-2 (xy)", "L2,-1 (yz)", "L2,0 (2zz-xx-yy)", "L2,1 (xz)", "L2,2 (xx-yy)",
+        "L3,-3 (y*(3xx-yy))", "L3,-2 (xy*z)", "L3,-1 (y*(4zz-xx-yy))",
+        "L3,0 (z*(2zz-3xx-3yy))", "L3,1 (x*(4zz-xx-yy))", "L3,2 (z*(xx-yy))", "L3,3 (x*(xx-3yy))"
+    ]
+    
+    @inline(__always)
+    public static func validateLayout(degree: Int, coefficientCount: Int) {
+        let expected = coefficientCountForDegree(degree)
+        let matchesSPZ = degree == 3 && coefficientCount == 15 // SPZ packs 15 coeffs; treated as degree 3
+        assert(coefficientCount == expected || matchesSPZ, "SH count \(coefficientCount) does not match degree \(degree); expected \(expected). Order: \(coefficientOrder)")
+    }
+    
     /// Structure matching the Metal shader parameters
     private struct SHEvaluateParams {
         let viewDirection: SIMD3<Float>
@@ -55,6 +72,11 @@ public class SphericalHarmonicsEvaluator {
         viewDirection: SIMD3<Float>,
         commandBuffer: MTLCommandBuffer
     ) -> MTLBuffer? {
+        if paletteSize > 0 {
+            let coeffCount = (shPalette.length / MemoryLayout<SIMD3<Float>>.stride) / max(paletteSize, 1)
+            Self.validateLayout(degree: degree, coefficientCount: coeffCount)
+        }
+        
         // Calculate buffer size for output
         let outputSize = paletteSize * MemoryLayout<SIMD4<Float>>.stride
         guard let outputBuffer = device.makeBuffer(length: outputSize, options: .storageModePrivate) else {

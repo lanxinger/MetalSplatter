@@ -3,6 +3,7 @@
 
 // Forward declaration from spherical_harmonics_evaluate.metal
 float4 evaluateSH(float3 dir, device const float3* sh_coeffs, uint degree);
+// Coefficients follow the Graphdeco/gsplat ordering documented in spherical_harmonics_evaluate.metal.
 
 struct FastSHParams {
     uint coeffsPerEntry;
@@ -91,6 +92,10 @@ vertex FragmentIn fastSHSplatVertexShader(uint vertexID [[vertex_id]],
     if (splatID >= uniforms.splatCount) {
         FragmentIn out;
         out.position = float4(1, 1, 0, 1);
+        out.relativePosition = half2(0);
+        out.color = half4(0);
+        out.lodBand = 0;
+        out.debugFlags = 0;
         return out;
     }
     
@@ -103,8 +108,7 @@ vertex FragmentIn fastSHSplatVertexShader(uint vertexID [[vertex_id]],
 
 // Fragment shader remains the same
 fragment half4 fastSHSplatFragmentShader(FragmentIn in [[stage_in]]) {
-    half alpha = splatFragmentAlpha(in.relativePosition, in.color.a);
-    return half4(alpha * in.color.rgb, alpha);
+    return shadeSplat(in);
 }
 
 // Texture-based SH evaluation for better edge accuracy
@@ -121,6 +125,10 @@ vertex FragmentIn textureSHSplatVertexShader(uint vertexID [[vertex_id]],
     if (splatID >= uniforms.splatCount) {
         FragmentIn out;
         out.position = float4(1, 1, 0, 1);
+        out.relativePosition = half2(0);
+        out.color = half4(0);
+        out.lodBand = 0;
+        out.debugFlags = 0;
         return out;
     }
     

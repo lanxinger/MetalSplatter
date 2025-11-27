@@ -398,7 +398,9 @@ extension FastSHSplatRenderer {
                 viewMatrix: viewport.viewMatrix,
                 screenSize: SIMD2<UInt32>(UInt32(viewport.screenSize.x), UInt32(viewport.screenSize.y)),
                 splatCount: UInt32(splatCount),
-                indexedSplatCount: UInt32(min(splatCount, Constants.maxIndexedSplatCount))
+                indexedSplatCount: UInt32(min(splatCount, Constants.maxIndexedSplatCount)),
+                debugFlags: debugOptions.rawValue,
+                lodThresholds: lodThresholds
             ))
         }
         

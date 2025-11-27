@@ -21,6 +21,12 @@ You're right, the documentation is entirely missing; it's a major TODO list item
 5. Run
 6. Note: framerate will be better if you run without the debugger attached (hit Stop in Xcode, and go run from the app from the Home screen)
 
+## Debug overlays and instrumentation
+
+- Toggle `SplatRenderer.debugOptions` (`.overdraw`, `.lodTint`) to visualize coverage or distance bands; tune thresholds via `lodThresholds`.
+- Hook `onFrameReady` to receive `FrameStatistics` (ready/loading counts, last sort duration, buffer uploads, splat count, frame time). `onRenderStart/onRenderComplete` now fire around encoding.
+- Metal 4-specific paths stay optional; shaders gate on `__METAL_VERSION__ >= 400` and fall back cleanly when unavailable.
+
 ## Showcase: apps and projects using MetalSplatter
 
 * The [MetalSplatter viewer](https://apps.apple.com/us/app/metalsplatter/id6476895334) is a simple, official Vision Pro app based on this library. This is different from the minimal included sample app (for instance, it has camera controls and a splat gallery). Confusingly, both the (open source) library and (non-open-source) app are called MetalSplatter, and both are by [scier](https://github.com/scier).
