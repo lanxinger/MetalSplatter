@@ -21,6 +21,7 @@ struct MetalKitSceneView: View {
     @State private var metal4BindlessEnabled = true // Default to enabled
     @State private var showDebugAABB = false // Debug: visualize GPU-computed bounds
     @State private var frustumCullingEnabled = false // GPU frustum culling
+    @State private var meshShaderEnabled = false // Metal 3+ mesh shader rendering
     
     var body: some View {
         ZStack {
@@ -30,7 +31,8 @@ struct MetalKitSceneView: View {
                 fastSHEnabled: $fastSHEnabled,
                 metal4BindlessEnabled: $metal4BindlessEnabled,
                 showDebugAABB: $showDebugAABB,
-                frustumCullingEnabled: $frustumCullingEnabled
+                frustumCullingEnabled: $frustumCullingEnabled,
+                meshShaderEnabled: $meshShaderEnabled
             )
             .ignoresSafeArea()
             
@@ -150,6 +152,24 @@ struct MetalKitSceneView: View {
                             
                             Divider()
                             
+                            // Mesh Shader Toggle (Metal 3+)
+                            Toggle(isOn: $meshShaderEnabled) {
+                                VStack(alignment: .leading, spacing: 2) {
+                                    HStack {
+                                        Text("Mesh Shaders")
+                                            .font(.subheadline)
+                                        Text("(Metal 3+)")
+                                            .font(.caption2)
+                                            .foregroundColor(.blue)
+                                    }
+                                    Text("Generate geometry on GPU - compute once per splat")
+                                        .font(.caption)
+                                        .foregroundColor(.secondary)
+                                }
+                            }
+                            
+                            Divider()
+                            
                             // Metal 4 Bindless Toggle
                             Toggle(isOn: $metal4BindlessEnabled) {
                                 VStack(alignment: .leading, spacing: 2) {
@@ -240,6 +260,7 @@ struct MetalKitRendererView: ViewRepresentable {
     @Binding var metal4BindlessEnabled: Bool
     @Binding var showDebugAABB: Bool
     @Binding var frustumCullingEnabled: Bool
+    @Binding var meshShaderEnabled: Bool
 
     class Coordinator: NSObject {
         var renderer: MetalKitSceneRenderer?
@@ -261,6 +282,7 @@ struct MetalKitRendererView: ViewRepresentable {
             renderer?.setMetal4Bindless(parent.metal4BindlessEnabled)
             renderer?.setDebugAABB(parent.showDebugAABB)
             renderer?.setFrustumCulling(parent.frustumCullingEnabled)
+            renderer?.setMeshShader(parent.meshShaderEnabled)
         }
     }
 
@@ -302,6 +324,7 @@ struct MetalKitRendererView: ViewRepresentable {
         renderer?.setMetal4Bindless(metal4BindlessEnabled)
         renderer?.setDebugAABB(showDebugAABB)
         renderer?.setFrustumCulling(frustumCullingEnabled)
+        renderer?.setMeshShader(meshShaderEnabled)
 
         // --- Interactivity: Pan (rotation) and Pinch (zoom) ---
         #if os(iOS)

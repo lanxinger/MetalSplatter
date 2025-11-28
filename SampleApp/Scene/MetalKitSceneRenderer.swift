@@ -426,6 +426,30 @@ class MetalKitSceneRenderer: NSObject, MTKViewDelegate {
         metalKitView.setNeedsDisplay()
         #endif
     }
+    
+    /// Enable or disable mesh shader rendering (Metal 3+)
+    /// When enabled, geometry is generated entirely on GPU - 1 computation per splat instead of 4
+    func setMeshShader(_ enabled: Bool) {
+        if let splat = modelRenderer as? SplatRenderer {
+            if enabled && !splat.isMeshShaderSupported {
+                Self.log.info("Mesh shaders not supported on this device")
+                return
+            }
+            splat.meshShaderEnabled = enabled
+            if enabled {
+                Self.log.info("Mesh shader rendering enabled - geometry generated on GPU")
+            } else {
+                Self.log.info("Mesh shader rendering disabled - using vertex shader path")
+            }
+        }
+
+        // Request redraw
+        #if os(macOS)
+        metalKitView.setNeedsDisplay(metalKitView.bounds)
+        #else
+        metalKitView.setNeedsDisplay()
+        #endif
+    }
 
     // MARK: - User Interaction API
     #if os(iOS)

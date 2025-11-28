@@ -311,6 +311,15 @@ public class SplatRenderer {
     private var postprocessPipelineState: MTLRenderPipelineState?
     private var postprocessDepthState: MTLDepthStencilState?
 
+    // Mesh Shader Pipeline (Metal 3+, Apple Silicon)
+    private var meshShaderPipelineState: MTLRenderPipelineState?
+    private var meshShaderDepthState: MTLDepthStencilState?
+    public var meshShaderEnabled = false
+    private var meshShadersSupported = false
+    
+    /// Returns true if mesh shaders are supported on this device
+    public var isMeshShaderSupported: Bool { meshShadersSupported }
+    
     // Debug AABB rendering
     private var debugAABBPipelineState: MTLRenderPipelineState?
     private var debugAABBDepthState: MTLDepthStencilState?
@@ -511,8 +520,73 @@ public class SplatRenderer {
             Self.log.warning("Failed to create bounds compute pipeline: \(error)")
         }
 
+        // Setup mesh shaders if supported (Metal 3+, Apple Silicon)
+        setupMeshShaders()
+        
         // Setup Metal 4.0 optimizations if available
         setupMetal4Integration()
+    }
+    
+    /// Check if mesh shaders are supported and set up the pipeline
+    private func setupMeshShaders() {
+        // Mesh shaders require Metal 3+ which is available on:
+        // - Apple Silicon Macs (M1+)
+        // - A14+ iOS devices (iPhone 12+)
+        guard device.supportsFamily(.apple7) else {
+            Self.log.info("Mesh shaders not supported (requires Apple7 GPU family or later)")
+            return
+        }
+        
+        do {
+            // Try to load mesh shader functions
+            guard let objectFunction = library.makeFunction(name: "splatObjectShader"),
+                  let meshFunction = library.makeFunction(name: "splatMeshShader"),
+                  let fragmentFunction = library.makeFunction(name: "meshSplatFragmentShader") else {
+                Self.log.info("Mesh shader functions not found in library")
+                return
+            }
+            
+            // Create mesh render pipeline descriptor
+            let meshPipelineDescriptor = MTLMeshRenderPipelineDescriptor()
+            meshPipelineDescriptor.label = "MeshShaderSplatPipeline"
+            meshPipelineDescriptor.objectFunction = objectFunction
+            meshPipelineDescriptor.meshFunction = meshFunction
+            meshPipelineDescriptor.fragmentFunction = fragmentFunction
+            
+            // Configure color attachment (same as single-stage pipeline)
+            let colorAttachment = meshPipelineDescriptor.colorAttachments[0]
+            colorAttachment?.pixelFormat = colorFormat
+            colorAttachment?.isBlendingEnabled = true
+            colorAttachment?.rgbBlendOperation = .add
+            colorAttachment?.alphaBlendOperation = .add
+            colorAttachment?.sourceRGBBlendFactor = .one
+            colorAttachment?.sourceAlphaBlendFactor = .one
+            colorAttachment?.destinationRGBBlendFactor = .oneMinusSourceAlpha
+            colorAttachment?.destinationAlphaBlendFactor = .oneMinusSourceAlpha
+            
+            meshPipelineDescriptor.depthAttachmentPixelFormat = depthFormat
+            meshPipelineDescriptor.rasterSampleCount = sampleCount
+            
+            // Meshlet configuration: 32 splats per meshlet
+            meshPipelineDescriptor.maxTotalThreadsPerObjectThreadgroup = 32
+            meshPipelineDescriptor.maxTotalThreadsPerMeshThreadgroup = 32
+            
+            // Create pipeline state
+            let (pipelineState, _) = try device.makeRenderPipelineState(descriptor: meshPipelineDescriptor, options: [])
+            meshShaderPipelineState = pipelineState
+            
+            // Create depth state (same as single-stage)
+            let depthStateDescriptor = MTLDepthStencilDescriptor()
+            depthStateDescriptor.depthCompareFunction = .always
+            depthStateDescriptor.isDepthWriteEnabled = writeDepth
+            meshShaderDepthState = device.makeDepthStencilState(descriptor: depthStateDescriptor)
+            
+            meshShadersSupported = true
+            Self.log.info("✅ Mesh shaders enabled - geometry generated on GPU")
+            
+        } catch {
+            Self.log.warning("Failed to create mesh shader pipeline: \(error)")
+        }
     }
     
     deinit {
@@ -1302,6 +1376,70 @@ public class SplatRenderer {
             }
         }
 
+        // =========================================================================
+        // MESH SHADER PATH (Metal 3+)
+        // Generates geometry entirely on GPU - significant performance improvement
+        // =========================================================================
+        if meshShaderEnabled && meshShadersSupported,
+           let meshPipeline = meshShaderPipelineState,
+           let meshDepth = meshShaderDepthState,
+           let sortedIndices = sortedIndicesBuffer {
+            
+            let renderEncoder = renderEncoder(multiStage: false,
+                                              viewports: viewports,
+                                              colorTexture: colorTexture,
+                                              colorLoadAction: colorLoadAction,
+                                              colorStoreAction: colorStoreAction,
+                                              depthTexture: depthTexture,
+                                              rasterizationRateMap: rasterizationRateMap,
+                                              renderTargetArrayLength: renderTargetArrayLength,
+                                              for: commandBuffer)
+            
+            renderEncoder.pushDebugGroup("Mesh Shader Splats")
+            renderEncoder.setRenderPipelineState(meshPipeline)
+            renderEncoder.setDepthStencilState(meshDepth)
+            renderEncoder.setCullMode(.none)
+            
+            // Set buffers for object/mesh shaders
+            // BufferIndex matches: 0=uniforms, 1=splats, 2=sortedIndices
+            renderEncoder.setObjectBuffer(dynamicUniformBuffers, offset: uniformBufferOffset, index: BufferIndex.uniforms.rawValue)
+            renderEncoder.setObjectBuffer(splatBuffer.buffer, offset: 0, index: BufferIndex.splat.rawValue)
+            renderEncoder.setObjectBuffer(sortedIndices.buffer, offset: 0, index: BufferIndex.sortedIndices.rawValue)
+            
+            renderEncoder.setMeshBuffer(dynamicUniformBuffers, offset: uniformBufferOffset, index: BufferIndex.uniforms.rawValue)
+            renderEncoder.setMeshBuffer(splatBuffer.buffer, offset: 0, index: BufferIndex.splat.rawValue)
+            renderEncoder.setMeshBuffer(sortedIndices.buffer, offset: 0, index: BufferIndex.sortedIndices.rawValue)
+            
+            // Calculate number of meshlets needed
+            // Each meshlet handles 32 splats
+            let splatsPerMeshlet: Int = 32
+            let meshletCount = (splatCount + splatsPerMeshlet - 1) / splatsPerMeshlet
+            
+            // Dispatch mesh shader grid
+            // Object shader threadgroups = number of meshlets
+            // Each object threadgroup has 32 threads (one per potential splat)
+            let objectThreadsPerGrid = MTLSize(width: splatsPerMeshlet, height: 1, depth: 1)
+            let objectThreadgroupsPerGrid = MTLSize(width: meshletCount, height: 1, depth: 1)
+            
+            renderEncoder.drawMeshThreadgroups(objectThreadgroupsPerGrid,
+                                               threadsPerObjectThreadgroup: objectThreadsPerGrid,
+                                               threadsPerMeshThreadgroup: MTLSize(width: splatsPerMeshlet, height: 1, depth: 1))
+            
+            renderEncoder.popDebugGroup()
+            renderEncoder.endEncoding()
+            
+            // Draw debug AABB if enabled (same as other paths)
+            if debugOptions.contains(.showAABB), let bounds = calculateBounds() {
+                drawDebugAABB(bounds: bounds, viewports: viewports, colorTexture: colorTexture,
+                             depthTexture: depthTexture, rasterizationRateMap: rasterizationRateMap,
+                             renderTargetArrayLength: renderTargetArrayLength, commandBuffer: commandBuffer)
+            }
+            return
+        }
+        
+        // =========================================================================
+        // TRADITIONAL VERTEX SHADER PATH (fallback)
+        // =========================================================================
         let multiStage = useMultiStagePipeline
         if multiStage {
             try buildMultiStagePipelineStatesIfNeeded()
@@ -1467,6 +1605,53 @@ public class SplatRenderer {
             sortJobsInFlight: sortJobsInFlight
         )
         onFrameReady?(stats)
+    }
+    
+    /// Helper to draw debug AABB wireframe - used by both mesh shader and traditional paths
+    private func drawDebugAABB(bounds: (min: SIMD3<Float>, max: SIMD3<Float>),
+                               viewports: [ViewportDescriptor],
+                               colorTexture: MTLTexture,
+                               depthTexture: MTLTexture?,
+                               rasterizationRateMap: MTLRasterizationRateMap?,
+                               renderTargetArrayLength: Int,
+                               commandBuffer: MTLCommandBuffer) {
+        do {
+            try buildDebugAABBPipelineStateIfNeeded()
+            
+            if aabbVertexBuffer == nil || aabbIndexBuffer == nil {
+                setupAABBBuffers(min: bounds.min, max: bounds.max)
+            }
+            
+            guard let pipeline = debugAABBPipelineState,
+                  let depthState = debugAABBDepthState,
+                  let vertexBuffer = aabbVertexBuffer,
+                  let indexBuffer = aabbIndexBuffer else {
+                return
+            }
+            
+            let renderPassDescriptor = MTLRenderPassDescriptor()
+            renderPassDescriptor.colorAttachments[0].texture = colorTexture
+            renderPassDescriptor.colorAttachments[0].loadAction = .load
+            renderPassDescriptor.colorAttachments[0].storeAction = .store
+            if let depthTexture = depthTexture {
+                renderPassDescriptor.depthAttachment.texture = depthTexture
+                renderPassDescriptor.depthAttachment.loadAction = .load
+                renderPassDescriptor.depthAttachment.storeAction = .store
+            }
+            
+            guard let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: renderPassDescriptor) else { return }
+            encoder.label = "Debug AABB Encoder"
+            
+            encoder.setRenderPipelineState(pipeline)
+            encoder.setDepthStencilState(depthState)
+            encoder.setVertexBuffer(vertexBuffer, offset: 0, index: 0)
+            encoder.setVertexBuffer(dynamicUniformBuffers, offset: uniformBufferOffset, index: 1)
+            encoder.drawIndexedPrimitives(type: .line, indexCount: 24, indexType: .uint16,
+                                          indexBuffer: indexBuffer, indexBufferOffset: 0)
+            encoder.endEncoding()
+        } catch {
+            Self.log.error("Failed to draw debug AABB: \(error)")
+        }
     }
 
     // Sort splatBuffer (read-only), storing the results in splatBuffer (write-only) then swap splatBuffer and splatBufferPrime
