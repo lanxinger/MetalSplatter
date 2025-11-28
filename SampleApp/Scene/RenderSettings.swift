@@ -24,6 +24,7 @@ struct Metal4Capabilities {
 struct RenderSettings: View {
     @Binding var fastSHEnabled: Bool
     @Binding var metal4BindlessEnabled: Bool
+    @Binding var showDebugAABB: Bool
     @State private var isMetal4Available: Bool = false
     @State private var metal4SIMDGroupEnabled: Bool = true
     @State private var metal4TensorEnabled: Bool = true
@@ -61,7 +62,20 @@ struct RenderSettings: View {
                         .foregroundColor(.secondary)
                 }
             }
+
+            Divider()
             
+            // Debug AABB Toggle - tests GPU bounds computation
+            Toggle(isOn: $showDebugAABB) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Show Bounding Box")
+                        .font(.subheadline)
+                    Text("Visualize AABB computed by GPU SIMD-group reduction")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+            }
+
             Divider()
             
             // Metal 4 Bindless Toggle
@@ -170,6 +184,7 @@ struct EnhancedMetalKitSceneView: View {
     @State private var showSettings = false
     @State private var fastSHEnabled = true
     @State private var metal4BindlessEnabled = true // Default to enabled
+    @State private var showDebugAABB = false // Debug: visualize GPU-computed bounds
     @State private var showARUnavailableAlert = false
     @State private var navigateToAR = false
     
@@ -179,7 +194,8 @@ struct EnhancedMetalKitSceneView: View {
             MetalKitRendererViewEnhanced(
                 modelIdentifier: modelIdentifier,
                 fastSHEnabled: $fastSHEnabled,
-                metal4BindlessEnabled: $metal4BindlessEnabled
+                metal4BindlessEnabled: $metal4BindlessEnabled,
+                showDebugAABB: $showDebugAABB
             )
             .ignoresSafeArea()
             
@@ -245,6 +261,7 @@ struct EnhancedMetalKitSceneView: View {
                             RenderSettings(
                                 fastSHEnabled: $fastSHEnabled,
                                 metal4BindlessEnabled: $metal4BindlessEnabled,
+                                showDebugAABB: $showDebugAABB,
                                 onDismiss: { showSettings = false }
                             )
                             .padding()
@@ -298,6 +315,7 @@ struct MetalKitRendererViewEnhanced: ViewRepresentable {
     var modelIdentifier: ModelIdentifier?
     @Binding var fastSHEnabled: Bool
     @Binding var metal4BindlessEnabled: Bool
+    @Binding var showDebugAABB: Bool
     
     class Coordinator: NSObject, UIGestureRecognizerDelegate {
         var renderer: MetalKitSceneRenderer?
@@ -316,6 +334,7 @@ struct MetalKitRendererViewEnhanced: ViewRepresentable {
         func updateSettings() {
             renderer?.fastSHSettings.enabled = parent.fastSHEnabled
             renderer?.setMetal4Bindless(parent.metal4BindlessEnabled)
+            renderer?.setDebugAABB(parent.showDebugAABB)
         }
     }
     
@@ -355,6 +374,7 @@ struct MetalKitRendererViewEnhanced: ViewRepresentable {
         // Apply initial settings
         renderer?.fastSHSettings.enabled = fastSHEnabled
         renderer?.setMetal4Bindless(metal4BindlessEnabled)
+        renderer?.setDebugAABB(showDebugAABB)
         
         // Add gesture recognizers (same as original)
         #if os(iOS)

@@ -19,6 +19,8 @@ struct MetalKitSceneView: View {
     @State private var showSettings = false
     @State private var fastSHEnabled = true
     @State private var metal4BindlessEnabled = true // Default to enabled
+    @State private var showDebugAABB = false // Debug: visualize GPU-computed bounds
+    @State private var frustumCullingEnabled = false // GPU frustum culling
     
     var body: some View {
         ZStack {
@@ -26,7 +28,9 @@ struct MetalKitSceneView: View {
             MetalKitRendererView(
                 modelIdentifier: modelIdentifier,
                 fastSHEnabled: $fastSHEnabled,
-                metal4BindlessEnabled: $metal4BindlessEnabled
+                metal4BindlessEnabled: $metal4BindlessEnabled,
+                showDebugAABB: $showDebugAABB,
+                frustumCullingEnabled: $frustumCullingEnabled
             )
             .ignoresSafeArea()
             
@@ -113,6 +117,32 @@ struct MetalKitSceneView: View {
                                     Text("Fast Spherical Harmonics")
                                         .font(.subheadline)
                                     Text("Optimized SH evaluation for better performance")
+                                        .font(.caption)
+                                        .foregroundColor(.secondary)
+                                }
+                            }
+                            
+                            Divider()
+                            
+                            // Debug AABB Toggle - tests GPU SIMD-group bounds computation
+                            Toggle(isOn: $showDebugAABB) {
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text("Show Bounding Box")
+                                        .font(.subheadline)
+                                    Text("Visualize AABB computed by GPU SIMD-group reduction")
+                                        .font(.caption)
+                                        .foregroundColor(.secondary)
+                                }
+                            }
+                            
+                            Divider()
+                            
+                            // Frustum Culling Toggle
+                            Toggle(isOn: $frustumCullingEnabled) {
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text("Frustum Culling")
+                                        .font(.subheadline)
+                                    Text("GPU pre-filters splats outside camera view")
                                         .font(.caption)
                                         .foregroundColor(.secondary)
                                 }
@@ -208,6 +238,8 @@ struct MetalKitRendererView: ViewRepresentable {
     var modelIdentifier: ModelIdentifier?
     @Binding var fastSHEnabled: Bool
     @Binding var metal4BindlessEnabled: Bool
+    @Binding var showDebugAABB: Bool
+    @Binding var frustumCullingEnabled: Bool
 
     class Coordinator: NSObject {
         var renderer: MetalKitSceneRenderer?
@@ -227,6 +259,8 @@ struct MetalKitRendererView: ViewRepresentable {
             // Update renderer settings silently
             renderer?.fastSHSettings.enabled = parent.fastSHEnabled
             renderer?.setMetal4Bindless(parent.metal4BindlessEnabled)
+            renderer?.setDebugAABB(parent.showDebugAABB)
+            renderer?.setFrustumCulling(parent.frustumCullingEnabled)
         }
     }
 
@@ -266,6 +300,8 @@ struct MetalKitRendererView: ViewRepresentable {
         // Apply initial settings
         renderer?.fastSHSettings.enabled = fastSHEnabled
         renderer?.setMetal4Bindless(metal4BindlessEnabled)
+        renderer?.setDebugAABB(showDebugAABB)
+        renderer?.setFrustumCulling(frustumCullingEnabled)
 
         // --- Interactivity: Pan (rotation) and Pinch (zoom) ---
         #if os(iOS)

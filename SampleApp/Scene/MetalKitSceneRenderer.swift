@@ -362,7 +362,7 @@ class MetalKitSceneRenderer: NSObject, MTKViewDelegate {
     /// Enable or disable Metal 4 bindless rendering
     func setMetal4Bindless(_ enabled: Bool) {
         useMetal4Bindless = enabled
-        
+
         // If we already have a renderer, try to initialize Metal 4
         if enabled, let splat = modelRenderer as? SplatRenderer {
             if #available(iOS 26.0, macOS 26.0, tvOS 26.0, visionOS 26.0, *) {
@@ -374,7 +374,35 @@ class MetalKitSceneRenderer: NSObject, MTKViewDelegate {
                 }
             }
         }
-        
+
+        // Request redraw
+        #if os(macOS)
+        metalKitView.setNeedsDisplay(metalKitView.bounds)
+        #else
+        metalKitView.setNeedsDisplay()
+        #endif
+    }
+
+    /// Check if Metal 4 bindless is available on this device
+    var isMetal4BindlessAvailable: Bool {
+        if #available(iOS 26.0, macOS 26.0, tvOS 26.0, visionOS 26.0, *) {
+            return device.supportsFamily(.apple9) // Requires Apple 9 GPU family
+        }
+        return false
+    }
+    
+    /// Enable or disable debug AABB visualization
+    /// This tests the GPU SIMD-group parallel bounds computation
+    func setDebugAABB(_ enabled: Bool) {
+        if let splat = modelRenderer as? SplatRenderer {
+            if enabled {
+                splat.debugOptions.insert(.showAABB)
+            } else {
+                splat.debugOptions.remove(.showAABB)
+            }
+            Self.log.info("Debug AABB \(enabled ? "enabled" : "disabled")")
+        }
+
         // Request redraw
         #if os(macOS)
         metalKitView.setNeedsDisplay(metalKitView.bounds)
@@ -383,17 +411,43 @@ class MetalKitSceneRenderer: NSObject, MTKViewDelegate {
         #endif
     }
     
-    /// Check if Metal 4 bindless is available on this device
-    var isMetal4BindlessAvailable: Bool {
-        if #available(iOS 26.0, macOS 26.0, tvOS 26.0, visionOS 26.0, *) {
-            return device.supportsFamily(.apple9) // Requires Apple 9 GPU family
+    /// Enable or disable GPU frustum culling
+    /// When enabled, splats outside the camera's view frustum are filtered out before rendering
+    func setFrustumCulling(_ enabled: Bool) {
+        if let splat = modelRenderer as? SplatRenderer {
+            splat.frustumCullingEnabled = enabled
+            Self.log.info("Frustum culling \(enabled ? "enabled" : "disabled")")
         }
-        return false
+
+        // Request redraw
+        #if os(macOS)
+        metalKitView.setNeedsDisplay(metalKitView.bounds)
+        #else
+        metalKitView.setNeedsDisplay()
+        #endif
     }
 
     // MARK: - User Interaction API
     #if os(iOS)
+    
+    /// Notify renderer that user interaction has started (for adaptive sort quality)
+    private func notifyInteractionBegan() {
+        if let splat = modelRenderer as? SplatRenderer {
+            splat.beginInteraction()
+        }
+    }
+    
+    /// Notify renderer that user interaction has ended (triggers quality sort)
+    private func notifyInteractionEnded() {
+        if let splat = modelRenderer as? SplatRenderer {
+            splat.endInteraction()
+        }
+    }
+    
     func setUserRotation(_ newRotation: Angle, vertical: Float) {
+        if !userIsInteracting {
+            notifyInteractionBegan()
+        }
         userIsInteracting = true
         rotation = newRotation
         verticalRotation = vertical
@@ -401,24 +455,36 @@ class MetalKitSceneRenderer: NSObject, MTKViewDelegate {
     }
 
     func setUserZoom(_ newZoom: Float) {
+        if !userIsInteracting {
+            notifyInteractionBegan()
+        }
         userIsInteracting = true
         zoom = newZoom
         lastRotationUpdateTimestamp = nil
     }
 
     func setUserRollRotation(_ rollRotation: Float) {
+        if !userIsInteracting {
+            notifyInteractionBegan()
+        }
         userIsInteracting = true
         self.rollRotation = rollRotation
         lastRotationUpdateTimestamp = nil
     }
 
     func setUserTranslation(_ translation: SIMD2<Float>) {
+        if !userIsInteracting {
+            notifyInteractionBegan()
+        }
         userIsInteracting = true
         self.translation = translation
         lastRotationUpdateTimestamp = nil
     }
 
     func endUserInteraction() {
+        if userIsInteracting {
+            notifyInteractionEnded()
+        }
         userIsInteracting = false
         lastRotationUpdateTimestamp = Date()
     }
