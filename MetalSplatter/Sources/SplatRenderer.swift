@@ -104,6 +104,16 @@ public class SplatRenderer {
     private var computeDistancesPipelineState: MTLComputePipelineState?
     private var frustumCullPipelineState: MTLComputePipelineState?
     
+    // SIMD-group parallel bounds computation
+    private var computeBoundsPipelineState: MTLComputePipelineState?
+    private var resetBoundsPipelineState: MTLComputePipelineState?
+    private var boundsMinBuffer: MTLBuffer?  // 3 atomic floats for min bounds
+    private var boundsMaxBuffer: MTLBuffer?  // 3 atomic floats for max bounds
+    
+    // Cached bounds - computed once on GPU, reused until splats change
+    private var cachedBounds: (min: SIMD3<Float>, max: SIMD3<Float>)?
+    private var boundsDirty = true
+    
     public struct ViewportDescriptor {
         public var viewport: MTLViewport
         public var projectionMatrix: simd_float4x4
@@ -423,6 +433,23 @@ public class SplatRenderer {
         } catch {
             Self.log.error("Failed to create frustum culling pipeline state: \(error)")
         }
+        
+        // Initialize SIMD-group parallel bounds computation
+        do {
+            if let boundsFunction = library.makeFunction(name: "computeBoundsParallel") {
+                computeBoundsPipelineState = try device.makeComputePipelineState(function: boundsFunction)
+            }
+            if let resetFunction = library.makeFunction(name: "resetBoundsAtomics") {
+                resetBoundsPipelineState = try device.makeComputePipelineState(function: resetFunction)
+            }
+            // Create buffers for atomic bounds (3 floats each for x, y, z)
+            boundsMinBuffer = device.makeBuffer(length: MemoryLayout<Float>.stride * 3, options: .storageModeShared)
+            boundsMaxBuffer = device.makeBuffer(length: MemoryLayout<Float>.stride * 3, options: .storageModeShared)
+            boundsMinBuffer?.label = "Bounds Min Atomics"
+            boundsMaxBuffer?.label = "Bounds Max Atomics"
+        } catch {
+            Self.log.warning("Failed to create bounds compute pipeline: \(error)")
+        }
 
         // Setup Metal 4.0 optimizations if available
         setupMetal4Integration()
@@ -442,6 +469,10 @@ public class SplatRenderer {
         // Clear current buffers and return them to pools
         splatBufferPool.release(splatBuffer)
         splatBufferPool.release(splatBufferPrime)
+        
+        // Invalidate cached bounds
+        cachedBounds = nil
+        boundsDirty = true
         
         // Acquire fresh small buffers from pools
         do {
@@ -723,6 +754,7 @@ public class SplatRenderer {
         splatBuffer.append(points.map { Splat($0) })
         sortDirtyDueToData = true
         sortDataRevision &+= 1
+        boundsDirty = true  // Invalidate cached bounds
         
         // Initialize sorted indices with identity mapping (0, 1, 2, ...)
         // This ensures rendering works before first sort completes
@@ -755,7 +787,101 @@ public class SplatRenderer {
         try add([ point ])
     }
     
+    /// Get cached AABB bounds - computes on first call or when splats change
+    /// Uses GPU SIMD-group parallel reduction, cached for subsequent calls
+    public func getBounds() -> (min: SIMD3<Float>, max: SIMD3<Float>)? {
+        guard splatCount > 0 else { return nil }
+        
+        // Return cached bounds if valid
+        if !boundsDirty, let cached = cachedBounds {
+            return cached
+        }
+        
+        // Compute bounds (GPU preferred, CPU fallback)
+        let bounds = calculateBoundsGPU() ?? calculateBoundsCPU()
+        
+        // Cache the result
+        if let bounds = bounds {
+            cachedBounds = bounds
+            boundsDirty = false
+        }
+        
+        return bounds
+    }
+    
+    /// Calculate AABB bounds - uses GPU when available, falls back to CPU
+    /// Prefer getBounds() for cached access
     public func calculateBounds() -> (min: SIMD3<Float>, max: SIMD3<Float>)? {
+        return getBounds()
+    }
+    
+    /// GPU-accelerated bounds computation using SIMD-group parallel reduction
+    /// Uses simd_min/simd_max for 32x fewer atomic operations than naive approach
+    private func calculateBoundsGPU() -> (min: SIMD3<Float>, max: SIMD3<Float>)? {
+        guard let computePipeline = computeBoundsPipelineState,
+              let resetPipeline = resetBoundsPipelineState,
+              let minBuffer = boundsMinBuffer,
+              let maxBuffer = boundsMaxBuffer,
+              splatCount > 0 else {
+            return nil
+        }
+        
+        guard let commandBuffer = commandBufferManager.makeCommandBuffer() else {
+            Self.log.warning("Failed to create command buffer for GPU bounds computation")
+            return nil
+        }
+        
+        // Step 1: Reset atomic bounds to initial values
+        guard let resetEncoder = commandBuffer.makeComputeCommandEncoder() else {
+            return nil
+        }
+        resetEncoder.label = "Reset Bounds Atomics"
+        resetEncoder.setComputePipelineState(resetPipeline)
+        resetEncoder.setBuffer(minBuffer, offset: 0, index: 0)
+        resetEncoder.setBuffer(maxBuffer, offset: 0, index: 1)
+        resetEncoder.dispatchThreads(MTLSize(width: 1, height: 1, depth: 1),
+                                     threadsPerThreadgroup: MTLSize(width: 1, height: 1, depth: 1))
+        resetEncoder.endEncoding()
+        
+        // Step 2: Compute bounds with SIMD-group parallel reduction
+        guard let computeEncoder = commandBuffer.makeComputeCommandEncoder() else {
+            return nil
+        }
+        computeEncoder.label = "Compute Bounds Parallel"
+        computeEncoder.setComputePipelineState(computePipeline)
+        computeEncoder.setBuffer(splatBuffer.buffer, offset: 0, index: 0)
+        
+        var count = UInt32(splatCount)
+        computeEncoder.setBytes(&count, length: MemoryLayout<UInt32>.size, index: 1)
+        computeEncoder.setBuffer(minBuffer, offset: 0, index: 2)
+        computeEncoder.setBuffer(maxBuffer, offset: 0, index: 3)
+        
+        let threadsPerThreadgroup = MTLSize(width: 256, height: 1, depth: 1)
+        let threadgroups = MTLSize(width: (splatCount + 255) / 256, height: 1, depth: 1)
+        computeEncoder.dispatchThreadgroups(threadgroups, threadsPerThreadgroup: threadsPerThreadgroup)
+        computeEncoder.endEncoding()
+        
+        // Execute and wait
+        commandBuffer.commit()
+        commandBuffer.waitUntilCompleted()
+        
+        // Read results from GPU
+        let minPtr = minBuffer.contents().bindMemory(to: Float.self, capacity: 3)
+        let maxPtr = maxBuffer.contents().bindMemory(to: Float.self, capacity: 3)
+        
+        let minBounds = SIMD3<Float>(minPtr[0], minPtr[1], minPtr[2])
+        let maxBounds = SIMD3<Float>(maxPtr[0], maxPtr[1], maxPtr[2])
+        
+        // Validate bounds (check for infinity which indicates no valid splats)
+        if minBounds.x.isInfinite || maxBounds.x.isInfinite {
+            return nil
+        }
+        
+        return (min: minBounds, max: maxBounds)
+    }
+    
+    /// CPU fallback for bounds computation
+    private func calculateBoundsCPU() -> (min: SIMD3<Float>, max: SIMD3<Float>)? {
         guard splatCount > 0 else { return nil }
         
         let splats = splatBuffer.values
