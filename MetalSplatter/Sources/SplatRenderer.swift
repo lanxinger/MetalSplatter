@@ -231,6 +231,25 @@ public class SplatRenderer {
     public var sortDirectionEpsilon: Float = 0.0001  // ~0.5-1° rotation (reduced from 0.001 to fix flickering during rotation)
     public var minimumSortInterval: TimeInterval = 0
 
+    // MARK: - Interaction Mode (Adaptive Quality)
+    
+    /// When true, sort parameters are relaxed for smoother interaction (less popping)
+    public private(set) var isInteracting: Bool = false
+    
+    /// Stored "quality" sort parameters to restore after interaction
+    private var qualitySortPositionEpsilon: Float = 0.01
+    private var qualitySortDirectionEpsilon: Float = 0.0001
+    private var qualityMinimumSortInterval: TimeInterval = 0
+    
+    /// Interaction mode sort parameters (relaxed for performance)
+    public var interactionSortPositionEpsilon: Float = 0.05      // 5cm during interaction
+    public var interactionSortDirectionEpsilon: Float = 0.003    // ~2-3° during interaction
+    public var interactionMinimumSortInterval: TimeInterval = 0.033  // Max ~30 sorts/sec
+    
+    /// Delay before forcing a final high-quality sort after interaction ends
+    public var postInteractionSortDelay: TimeInterval = 0.1
+    private var interactionEndTime: CFAbsoluteTime?
+
     // Performance tracking
     private var frameStartTime: CFAbsoluteTime = 0
     private var lastFrameTime: TimeInterval = 0
@@ -399,7 +418,7 @@ public class SplatRenderer {
         } catch {
             Self.log.error("Failed to create frustum culling pipeline state: \(error)")
         }
-        
+
         // Setup Metal 4.0 optimizations if available
         setupMetal4Integration()
     }
@@ -720,6 +739,55 @@ public class SplatRenderer {
         }
         
         return (min: minBounds, max: maxBounds)
+    }
+    
+    // MARK: - Interaction Mode Control
+    
+    /// Begin interaction mode - relaxes sort parameters for smoother user experience
+    /// Call this when user starts panning, pinching, or rotating
+    public func beginInteraction() {
+        guard !isInteracting else { return }
+        
+        isInteracting = true
+        interactionEndTime = nil
+        
+        // Store current quality settings
+        qualitySortPositionEpsilon = sortPositionEpsilon
+        qualitySortDirectionEpsilon = sortDirectionEpsilon
+        qualityMinimumSortInterval = minimumSortInterval
+        
+        // Apply relaxed interaction settings
+        sortPositionEpsilon = interactionSortPositionEpsilon
+        sortDirectionEpsilon = interactionSortDirectionEpsilon
+        minimumSortInterval = interactionMinimumSortInterval
+        
+        Self.log.debug("Interaction mode started - sort thresholds relaxed")
+    }
+    
+    /// End interaction mode - restores quality sort parameters and triggers final sort
+    /// Call this when user ends touch interaction
+    public func endInteraction() {
+        guard isInteracting else { return }
+        
+        isInteracting = false
+        interactionEndTime = CFAbsoluteTimeGetCurrent()
+        
+        // Restore quality settings
+        sortPositionEpsilon = qualitySortPositionEpsilon
+        sortDirectionEpsilon = qualitySortDirectionEpsilon
+        minimumSortInterval = qualityMinimumSortInterval
+        
+        // Schedule a final high-quality sort after a brief delay
+        // This allows the last frame to render before the sort overhead kicks in
+        DispatchQueue.main.asyncAfter(deadline: .now() + postInteractionSortDelay) { [weak self] in
+            guard let self = self else { return }
+            // Only trigger if we haven't started interacting again
+            if !self.isInteracting {
+                Self.log.debug("Interaction mode ended - triggering final sort")
+                self.sortDirtyDueToData = true  // Force a re-sort
+                self.resort(useGPU: true)
+            }
+        }
     }
     
     // MARK: - Buffer Pool Management
@@ -1115,10 +1183,19 @@ public class SplatRenderer {
                 }
 
                 // Create command buffer for distance computation using pooled manager
-                guard let commandBuffer = commandBufferManager.makeCommandBuffer(),
-                      let computeEncoder = commandBuffer.makeComputeCommandEncoder(),
+                guard let commandBuffer = commandBufferManager.makeCommandBuffer() else {
+                    Self.log.error("Failed to create compute command buffer.")
+                    sortDistanceBufferPool.release(distanceBuffer)
+                    sortIndexBufferPool.release(indexOutputBuffer)
+                    self.sorting = false
+                    self.sortJobsInFlight -= 1
+                    return
+                }
+
+                // Standard distance computation
+                guard let computeEncoder = commandBuffer.makeComputeCommandEncoder(),
                       let computePipelineState = computeDistancesPipelineState else {
-                    Self.log.error("Failed to create compute command buffer or encoder.")
+                    Self.log.error("Failed to create compute encoder.")
                     sortDistanceBufferPool.release(distanceBuffer)
                     sortIndexBufferPool.release(indexOutputBuffer)
                     self.sorting = false
@@ -1145,10 +1222,11 @@ public class SplatRenderer {
 
                 computeEncoder.dispatchThreadgroups(threadgroups, threadsPerThreadgroup: threadsPerThreadgroup)
                 computeEncoder.endEncoding()
+
                 commandBuffer.commit()
                 commandBuffer.waitUntilCompleted()
 
-                // Run argsort, in decending order.
+                // Run argsort, in descending order
                 let argSort = MPSArgSort(dataType: .float32, descending: true)
                 argSort(commandQueue: commandBufferManager.queue,
                         input: distanceBuffer.buffer,
