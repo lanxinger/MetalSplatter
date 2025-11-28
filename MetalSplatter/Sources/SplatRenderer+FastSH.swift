@@ -384,6 +384,11 @@ extension FastSHSplatRenderer {
         renderEncoder.setVertexBuffer(splatSHBuffer.buffer, offset: 0, index: BufferIndex.splat.rawValue)
         renderEncoder.setVertexBuffer(dynamicUniformBuffers, offset: uniformBufferOffset, index: BufferIndex.uniforms.rawValue)
         
+        // GPU-only sorting: pass sorted indices buffer to shader
+        if let sortedIndices = sortedIndicesBuffer {
+            renderEncoder.setVertexBuffer(sortedIndices.buffer, offset: 0, index: BufferIndex.sortedIndices.rawValue)
+        }
+        
         // Set SH palette data
         if let paletteBuffer = shPaletteBuffer {
             renderEncoder.setVertexBuffer(paletteBuffer, offset: 0, index: 3)

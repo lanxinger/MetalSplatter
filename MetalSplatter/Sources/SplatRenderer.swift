@@ -118,10 +118,11 @@ public class SplatRenderer {
         }
     }
 
-    // Keep in sync with Shaders.metal : BufferIndex
+    // Keep in sync with ShaderCommon.h : BufferIndex
     enum BufferIndex: NSInteger {
-        case uniforms = 0
-        case splat    = 1
+        case uniforms       = 0
+        case splat          = 1
+        case sortedIndices  = 2  // GPU-side sorted indices for indirect rendering
     }
 
     // Keep in sync with Shaders.metal : Uniforms
@@ -307,11 +308,15 @@ public class SplatRenderer {
     private let sortDistanceBufferPool: MetalBufferPool<Float>
     private let sortIndexBufferPool: MetalBufferPool<Int32>
 
-    // splatBuffer contains one entry for each gaussian splat
+    // splatBuffer contains one entry for each gaussian splat (static, never reordered)
     var splatBuffer: MetalBuffer<Splat>
-    // splatBufferPrime is a copy of splatBuffer, which is not currenly in use for rendering.
-    // We use this for sorting, and when we're done, swap it with splatBuffer.
-    // Multiple buffers from the pool ensure we're never actively sorting a buffer still in use for rendering
+    
+    // GPU-only sorting: sorted indices buffer holds the depth-sorted order
+    // Shaders use this to index into splatBuffer in the correct render order
+    // This eliminates CPU readback and reordering - a major performance win
+    var sortedIndicesBuffer: MetalBuffer<Int32>?
+    
+    // Legacy: splatBufferPrime kept for CPU fallback sorting path
     var splatBufferPrime: MetalBuffer<Splat>
 
     var indexBuffer: MetalBuffer<UInt32>
@@ -428,6 +433,9 @@ public class SplatRenderer {
         splatBufferPool.release(splatBuffer)
         splatBufferPool.release(splatBufferPrime)
         indexBufferPool.release(indexBuffer)
+        if let sortedIndices = sortedIndicesBuffer {
+            sortIndexBufferPool.release(sortedIndices)
+        }
     }
 
     public func reset() {
@@ -715,6 +723,30 @@ public class SplatRenderer {
         splatBuffer.append(points.map { Splat($0) })
         sortDirtyDueToData = true
         sortDataRevision &+= 1
+        
+        // Initialize sorted indices with identity mapping (0, 1, 2, ...)
+        // This ensures rendering works before first sort completes
+        try initializeIdentitySortedIndices()
+    }
+    
+    /// Initialize sorted indices buffer with identity mapping (0, 1, 2, ...)
+    /// Called when splats are added to ensure valid render state before first sort
+    private func initializeIdentitySortedIndices() throws {
+        let count = splatBuffer.count
+        guard count > 0 else { return }
+        
+        // Release previous buffer if it exists
+        if let previous = sortedIndicesBuffer {
+            sortIndexBufferPool.release(previous)
+        }
+        
+        // Acquire new buffer and fill with identity indices
+        let identityBuffer = try sortIndexBufferPool.acquire(minimumCapacity: count)
+        identityBuffer.count = count
+        for i in 0..<count {
+            identityBuffer.values[i] = Int32(i)
+        }
+        sortedIndicesBuffer = identityBuffer
     }
 
     public func add(_ point: SplatScenePoint) throws {
@@ -1030,6 +1062,12 @@ public class SplatRenderer {
 
         renderEncoder.setVertexBuffer(dynamicUniformBuffers, offset: uniformBufferOffset, index: BufferIndex.uniforms.rawValue)
         renderEncoder.setVertexBuffer(splatBuffer.buffer, offset: 0, index: BufferIndex.splat.rawValue)
+        
+        // GPU-only sorting: pass sorted indices buffer to shader
+        // Shader uses this to access splats in depth-sorted order without CPU involvement
+        if let sortedIndices = sortedIndicesBuffer {
+            renderEncoder.setVertexBuffer(sortedIndices.buffer, offset: 0, index: BufferIndex.sortedIndices.rawValue)
+        }
 
         renderEncoder.drawIndexedPrimitives(type: .triangle,
                                             indexCount: indexCount,
@@ -1233,23 +1271,23 @@ public class SplatRenderer {
                         output: indexOutputBuffer.buffer,
                         count: splatCount)
 
-                // Read back the sorted indices and reorder splats on the CPU.
-                let sortedIndices = indexOutputBuffer.values
-
-                do {
-                    try self.prepareForSorting(count: splatCount)
-                    for newIndex in 0 ..< splatCount {
-                        let oldIndex = Int(sortedIndices[newIndex])
-                        self.appendSplatForSorting(from: oldIndex)
-                    }
-                    self.swapSplatBuffers()
-                } catch {
-                    Self.log.error("Failed to reorder splats with pooled buffers: \(error)")
+                // GPU-ONLY SORTING: Keep sorted indices on GPU, no CPU readback needed!
+                // This is a major performance win - eliminates:
+                // 1. GPU→CPU readback of sorted indices
+                // 2. CPU-side splat reordering loop
+                // 3. CPU→GPU upload of reordered splats
+                // The shader will use sortedIndicesBuffer to index into static splatBuffer
+                
+                // Release previous sorted indices buffer if it exists
+                if let previousSortedIndices = self.sortedIndicesBuffer {
+                    sortIndexBufferPool.release(previousSortedIndices)
                 }
-
-                // Release sort buffers back to pool for reuse
+                
+                // Keep the new sorted indices buffer for rendering
+                self.sortedIndicesBuffer = indexOutputBuffer
+                
+                // Release only the distance buffer (sorted indices kept for rendering)
                 sortDistanceBufferPool.release(distanceBuffer)
-                sortIndexBufferPool.release(indexOutputBuffer)
 
                 let elapsed = CFAbsoluteTimeGetCurrent() - sortStartTime
                 self.lastSortDuration = elapsed
@@ -1292,16 +1330,23 @@ public class SplatRenderer {
 
                 orderAndDepthTempSort.sort { $0.depth > $1.depth }
 
+                // CPU fallback: populate sortedIndicesBuffer instead of reordering splats
+                // This maintains consistency with GPU path - splat data stays static
                 do {
-                    try prepareForSorting(count: splatCount)
-                    for newIndex in 0..<orderAndDepthTempSort.count {
-                        let oldIndex = Int(orderAndDepthTempSort[newIndex].index)
-                        appendSplatForSorting(from: oldIndex)
+                    // Release previous sorted indices buffer if it exists
+                    if let previousSortedIndices = self.sortedIndicesBuffer {
+                        sortIndexBufferPool.release(previousSortedIndices)
                     }
-
-                    swapSplatBuffers()
+                    
+                    // Acquire new buffer and fill with sorted indices
+                    let cpuSortedIndices = try sortIndexBufferPool.acquire(minimumCapacity: splatCount)
+                    cpuSortedIndices.count = splatCount
+                    for newIndex in 0..<orderAndDepthTempSort.count {
+                        cpuSortedIndices.values[newIndex] = Int32(orderAndDepthTempSort[newIndex].index)
+                    }
+                    self.sortedIndicesBuffer = cpuSortedIndices
                 } catch {
-                    Self.log.error("Failed to reorder splats with pooled buffers: \(error)")
+                    Self.log.error("Failed to create sorted indices buffer: \(error)")
                 }
 
                 let elapsedCPU = CFAbsoluteTimeGetCurrent() - sortStartTime

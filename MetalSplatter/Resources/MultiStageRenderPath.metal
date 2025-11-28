@@ -28,15 +28,17 @@ kernel void initializeFragmentStore(imageblock<FragmentValues, imageblock_layout
     values->depth = 0.0f;
 }
 
+// GPU-only sorted rendering: uses sorted indices buffer to access splats in depth order
 vertex FragmentIn multiStageSplatVertexShader(uint vertexID [[vertex_id]],
                                               uint instanceID [[instance_id]],
                                               ushort amplificationID [[amplification_id]],
                                               constant Splat* splatArray [[ buffer(BufferIndexSplat) ]],
-                                              constant UniformsArray & uniformsArray [[ buffer(BufferIndexUniforms) ]]) {
+                                              constant UniformsArray & uniformsArray [[ buffer(BufferIndexUniforms) ]],
+                                              constant int32_t* sortedIndices [[ buffer(BufferIndexSortedIndices) ]]) {
     Uniforms uniforms = uniformsArray.uniforms[min(int(amplificationID), kMaxViewCount)];
 
-    uint splatID = instanceID * uniforms.indexedSplatCount + (vertexID / 4);
-    if (splatID >= uniforms.splatCount) {
+    uint logicalSplatID = instanceID * uniforms.indexedSplatCount + (vertexID / 4);
+    if (logicalSplatID >= uniforms.splatCount) {
         FragmentIn out;
         out.position = float4(1, 1, 0, 1);
         out.relativePosition = half2(0);
@@ -46,7 +48,9 @@ vertex FragmentIn multiStageSplatVertexShader(uint vertexID [[vertex_id]],
         return out;
     }
 
-    Splat splat = splatArray[splatID];
+    // Use sorted index to access splat in depth-sorted order
+    uint actualSplatID = uint(sortedIndices[logicalSplatID]);
+    Splat splat = splatArray[actualSplatID];
 
     return splatVertex(splat, uniforms, vertexID % 4);
 }

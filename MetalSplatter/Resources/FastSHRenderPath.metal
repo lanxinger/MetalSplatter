@@ -79,17 +79,19 @@ Splat evaluateSplatWithSH(SplatSH splatSH,
 }
 
 // Fast SH vertex shader using pre-evaluated colors
+// GPU-only sorted rendering: uses sorted indices buffer to access splats in depth order
 vertex FragmentIn fastSHSplatVertexShader(uint vertexID [[vertex_id]],
                                          uint instanceID [[instance_id]],
                                          ushort amplificationID [[amplification_id]],
                                          constant SplatSH* splatArray [[ buffer(BufferIndexSplat) ]],
                                          constant UniformsArray & uniformsArray [[ buffer(BufferIndexUniforms) ]],
+                                         constant int32_t* sortedIndices [[ buffer(BufferIndexSortedIndices) ]],
                                          device const float3* shPalette [[ buffer(3) ]],
                                          constant FastSHParams& params [[ buffer(4) ]]) {
     Uniforms uniforms = uniformsArray.uniforms[min(int(amplificationID), kMaxViewCount)];
     
-    uint splatID = instanceID * uniforms.indexedSplatCount + (vertexID / 4);
-    if (splatID >= uniforms.splatCount) {
+    uint logicalSplatID = instanceID * uniforms.indexedSplatCount + (vertexID / 4);
+    if (logicalSplatID >= uniforms.splatCount) {
         FragmentIn out;
         out.position = float4(1, 1, 0, 1);
         out.relativePosition = half2(0);
@@ -99,7 +101,9 @@ vertex FragmentIn fastSHSplatVertexShader(uint vertexID [[vertex_id]],
         return out;
     }
     
-    SplatSH splatSH = splatArray[splatID];
+    // Use sorted index to access splat in depth-sorted order
+    uint actualSplatID = uint(sortedIndices[logicalSplatID]);
+    SplatSH splatSH = splatArray[actualSplatID];
     // Evaluate in Gaussian local frame
     Splat splat = evaluateSplatWithSH(splatSH, uniforms, shPalette, params);
     
@@ -112,17 +116,19 @@ fragment half4 fastSHSplatFragmentShader(FragmentIn in [[stage_in]]) {
 }
 
 // Texture-based SH evaluation for better edge accuracy
+// GPU-only sorted rendering: uses sorted indices buffer to access splats in depth order
 vertex FragmentIn textureSHSplatVertexShader(uint vertexID [[vertex_id]],
                                             uint instanceID [[instance_id]],
                                             ushort amplificationID [[amplification_id]],
                                             constant SplatSH* splatArray [[ buffer(BufferIndexSplat) ]],
                                             constant UniformsArray & uniformsArray [[ buffer(BufferIndexUniforms) ]],
+                                            constant int32_t* sortedIndices [[ buffer(BufferIndexSortedIndices) ]],
                                             device const float3* shPalette [[ buffer(3) ]],
                                             constant FastSHParams& params [[ buffer(4) ]]) {
     Uniforms uniforms = uniformsArray.uniforms[min(int(amplificationID), kMaxViewCount)];
     
-    uint splatID = instanceID * uniforms.indexedSplatCount + (vertexID / 4);
-    if (splatID >= uniforms.splatCount) {
+    uint logicalSplatID = instanceID * uniforms.indexedSplatCount + (vertexID / 4);
+    if (logicalSplatID >= uniforms.splatCount) {
         FragmentIn out;
         out.position = float4(1, 1, 0, 1);
         out.relativePosition = half2(0);
@@ -132,7 +138,9 @@ vertex FragmentIn textureSHSplatVertexShader(uint vertexID [[vertex_id]],
         return out;
     }
     
-    SplatSH splatSH = splatArray[splatID];
+    // Use sorted index to access splat in depth-sorted order
+    uint actualSplatID = uint(sortedIndices[logicalSplatID]);
+    SplatSH splatSH = splatArray[actualSplatID];
     Splat splat = evaluateSplatWithSH(splatSH, uniforms, shPalette, params);
     return splatVertex(splat, uniforms, vertexID % 4);
 }

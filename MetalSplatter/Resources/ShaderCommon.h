@@ -9,8 +9,9 @@ constant static const half kBoundsRadiusSquared = kBoundsRadius*kBoundsRadius;
 
 enum BufferIndex: int32_t
 {
-    BufferIndexUniforms = 0,
-    BufferIndexSplat    = 1,
+    BufferIndexUniforms      = 0,
+    BufferIndexSplat         = 1,
+    BufferIndexSortedIndices = 2,  // GPU-side sorted indices for indirect rendering
 };
 
 typedef struct
