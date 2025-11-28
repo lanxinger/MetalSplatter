@@ -19,8 +19,9 @@ public class ARSplatRenderer: NSObject {
     public let arCamera: ARPerspectiveCamera
     private let arBackgroundRenderer: ARBackgroundRenderer
     
-    // Core splat renderer
+    // Core splat renderer (uses FastSHSplatRenderer when available for better performance)
     private var splatRenderer: SplatRenderer
+    private var fastSHRenderer: FastSHSplatRenderer?  // Reference for Fast SH specific features
     
     // Note: Removed offscreen textures and composition pipeline for single-pass rendering
     
@@ -69,6 +70,46 @@ public class ARSplatRenderer: NSObject {
     public var isARTrackingNormal: Bool {
         guard let frame = session.currentFrame else { return false }
         return frame.camera.trackingState == .normal
+    }
+    
+    // MARK: - Rendering Optimization Properties
+    
+    /// Sort direction epsilon - controls how often re-sorting occurs
+    /// Lower values = more frequent sorting (better quality, more CPU)
+    /// Higher values = less frequent sorting (better performance)
+    public var sortDirectionEpsilon: Float {
+        get { splatRenderer.sortDirectionEpsilon }
+        set { splatRenderer.sortDirectionEpsilon = newValue }
+    }
+    
+    /// Enable/disable mesh shader rendering (Metal 3+)
+    /// When enabled, geometry is generated on GPU (faster)
+    public var meshShaderEnabled: Bool {
+        get { splatRenderer.meshShaderEnabled }
+        set { splatRenderer.meshShaderEnabled = newValue }
+    }
+    
+    /// Check if mesh shaders are supported on this device
+    public var isMeshShaderSupported: Bool {
+        splatRenderer.isMeshShaderSupported
+    }
+    
+    /// Enable/disable GPU frustum culling
+    /// When enabled, splats outside camera view are skipped
+    public var frustumCullingEnabled: Bool {
+        get { splatRenderer.frustumCullingEnabled }
+        set { splatRenderer.frustumCullingEnabled = newValue }
+    }
+    
+    /// Enable/disable Fast SH evaluation (if FastSHSplatRenderer is in use)
+    public var fastSHEnabled: Bool {
+        get { fastSHRenderer?.fastSHConfig.enabled ?? false }
+        set { fastSHRenderer?.fastSHConfig.enabled = newValue }
+    }
+    
+    /// Check if Fast SH is available
+    public var isFastSHAvailable: Bool {
+        fastSHRenderer != nil
     }
     
     public func isWaitingForSurfaceDetection() -> Bool {
@@ -131,15 +172,37 @@ public class ARSplatRenderer: NSObject {
             throw error
         }
         
-        // Initialize core splat renderer
-        self.splatRenderer = try SplatRenderer(
+        // Initialize core splat renderer - try FastSHSplatRenderer first for better performance
+        if let fastRenderer = try? FastSHSplatRenderer(
             device: device,
             colorFormat: colorFormat,
             depthFormat: depthFormat,
             sampleCount: sampleCount,
             maxViewCount: maxViewCount,
             maxSimultaneousRenders: maxSimultaneousRenders
-        )
+        ) {
+            self.splatRenderer = fastRenderer
+            self.fastSHRenderer = fastRenderer
+            fastRenderer.fastSHConfig.enabled = true
+            print("ARSplatRenderer: ✅ Using FastSHSplatRenderer for optimized SH evaluation")
+        } else {
+            self.splatRenderer = try SplatRenderer(
+                device: device,
+                colorFormat: colorFormat,
+                depthFormat: depthFormat,
+                sampleCount: sampleCount,
+                maxViewCount: maxViewCount,
+                maxSimultaneousRenders: maxSimultaneousRenders
+            )
+            self.fastSHRenderer = nil
+            print("ARSplatRenderer: Using standard SplatRenderer")
+        }
+        
+        // Enable mesh shaders if supported (Metal 3+)
+        if splatRenderer.isMeshShaderSupported {
+            splatRenderer.meshShaderEnabled = true
+            print("ARSplatRenderer: ✅ Mesh shaders enabled - GPU geometry generation")
+        }
         
         // Initialize Metal 4 bindless resources by default (matches other renderers)
         if #available(iOS 26.0, *) {
