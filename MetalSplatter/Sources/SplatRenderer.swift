@@ -363,11 +363,21 @@ public class SplatRenderer {
 
     var sorting = false
     private var sortJobsInFlight: Int = 0  // Track concurrent sort operations
-    private let maxConcurrentSorts: Int = 1  // Limit to prevent queue buildup
+    private let maxConcurrentSorts: Int = 2  // Allow overlap: one sorting while one renders
     var orderAndDepthTempSort: [SplatIndexAndDepth] = []
 
     // Metal 4 command buffer pool for improved performance
     private var commandBufferManager: CommandBufferManager
+    
+    // Async compute overlap: separate queue for sorting
+    private var computeCommandQueue: MTLCommandQueue?
+    private var computeCommandBufferManager: CommandBufferManager?
+    
+    // Double-buffered sorted indices for async overlap
+    // While one is being used for rendering, the other can be filled by sorting
+    private var sortedIndicesBufferA: MetalBuffer<Int32>?
+    private var sortedIndicesBufferB: MetalBuffer<Int32>?
+    private var usingSortedBufferA: Bool = true  // Which buffer is currently used for rendering
 
     public init(device: MTLDevice,
                 colorFormat: MTLPixelFormat,
@@ -387,6 +397,14 @@ public class SplatRenderer {
         }
         commandQueue.label = "SplatRenderer Command Queue"
         self.commandBufferManager = CommandBufferManager(commandQueue: commandQueue)
+        
+        // Create separate compute queue for async sorting overlap
+        // This allows sorting to run in parallel with rendering
+        if let computeQueue = device.makeCommandQueue() {
+            computeQueue.label = "SplatRenderer Compute Queue (Async Sort)"
+            self.computeCommandQueue = computeQueue
+            self.computeCommandBufferManager = CommandBufferManager(commandQueue: computeQueue)
+        }
 
         self.colorFormat = colorFormat
         self.depthFormat = depthFormat
@@ -1551,32 +1569,50 @@ public class SplatRenderer {
                 computeEncoder.dispatchThreadgroups(threadgroups, threadsPerThreadgroup: threadsPerThreadgroup)
                 computeEncoder.endEncoding()
 
+                // === ASYNC COMPUTE OVERLAP ===
+                // Use separate compute queue so sorting doesn't block rendering
+                let sortQueue = self.computeCommandBufferManager?.queue ?? commandBufferManager.queue
+                
+                // Commit distance computation and wait (needed before argsort)
                 commandBuffer.commit()
                 commandBuffer.waitUntilCompleted()
 
-                // Run argsort, in descending order
+                // Run argsort on the compute queue (may overlap with next frame's render)
                 let argSort = MPSArgSort(dataType: .float32, descending: true)
-                argSort(commandQueue: commandBufferManager.queue,
+                argSort(commandQueue: sortQueue,
                         input: distanceBuffer.buffer,
                         output: indexOutputBuffer.buffer,
                         count: splatCount)
 
-                // GPU-ONLY SORTING: Keep sorted indices on GPU, no CPU readback needed!
-                // This is a major performance win - eliminates:
-                // 1. GPU→CPU readback of sorted indices
-                // 2. CPU-side splat reordering loop
-                // 3. CPU→GPU upload of reordered splats
-                // The shader will use sortedIndicesBuffer to index into static splatBuffer
+                // GPU-ONLY SORTING with double-buffering for async overlap
+                // Swap buffers atomically - rendering continues with old buffer
+                // until this completes, then switches to new buffer
                 
-                // Release previous sorted indices buffer if it exists
-                if let previousSortedIndices = self.sortedIndicesBuffer {
-                    sortIndexBufferPool.release(previousSortedIndices)
+                // Release the "other" buffer (the one NOT currently being rendered)
+                if self.usingSortedBufferA {
+                    // Currently rendering with A, so B is safe to replace
+                    if let oldB = self.sortedIndicesBufferB {
+                        sortIndexBufferPool.release(oldB)
+                    }
+                    self.sortedIndicesBufferB = indexOutputBuffer
+                } else {
+                    // Currently rendering with B, so A is safe to replace
+                    if let oldA = self.sortedIndicesBufferA {
+                        sortIndexBufferPool.release(oldA)
+                    }
+                    self.sortedIndicesBufferA = indexOutputBuffer
                 }
                 
-                // Keep the new sorted indices buffer for rendering
-                self.sortedIndicesBuffer = indexOutputBuffer
+                // Flip the active buffer for next render
+                // This is the "swap" - rendering will now use the newly sorted buffer
+                self.usingSortedBufferA = !self.usingSortedBufferA
                 
-                // Release only the distance buffer (sorted indices kept for rendering)
+                // Update the main sortedIndicesBuffer pointer for compatibility
+                self.sortedIndicesBuffer = self.usingSortedBufferA 
+                    ? self.sortedIndicesBufferA 
+                    : self.sortedIndicesBufferB
+                
+                // Release distance buffer
                 sortDistanceBufferPool.release(distanceBuffer)
 
                 let elapsed = CFAbsoluteTimeGetCurrent() - sortStartTime
@@ -1590,6 +1626,9 @@ public class SplatRenderer {
                 }
                 self.sorting = false
                 self.sortJobsInFlight -= 1
+                
+                Self.log.debug("Async sort completed in \(String(format: "%.1f", elapsed * 1000))ms")
+                
                 if self.shouldResortForCurrentCamera() {
                     self.resort(useGPU: useGPU)
                 }
