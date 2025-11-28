@@ -104,6 +104,16 @@ public class SplatRenderer {
     private var computeDistancesPipelineState: MTLComputePipelineState?
     private var frustumCullPipelineState: MTLComputePipelineState?
     
+    // Frustum culling buffers and state
+    private var visibleIndicesBuffer: MTLBuffer?
+    private var visibleCountBuffer: MTLBuffer?
+    private var frustumCullDataBuffer: MTLBuffer?
+    private var indirectDrawArgsBuffer: MTLBuffer?  // For GPU-driven indirect draw
+    private var generateIndirectArgsPipelineState: MTLComputePipelineState?
+    private var resetVisibleCountPipelineState: MTLComputePipelineState?
+    public var frustumCullingEnabled = false  // Enable via settings
+    private var lastVisibleCount: Int = 0
+    
     // SIMD-group parallel bounds computation
     private var computeBoundsPipelineState: MTLComputePipelineState?
     private var resetBoundsPipelineState: MTLComputePipelineState?
@@ -162,6 +172,24 @@ public class SplatRenderer {
             case 1: uniforms1 = uniforms
             default: break
             }
+        }
+    }
+    
+    // Keep in sync with FrustumCulling.metal : FrustumCullData
+    // Simplified struct using view-projection matrix directly for NDC-based culling
+    struct FrustumCullData {
+        var viewProjectionMatrix: matrix_float4x4
+        var cameraPosition: SIMD3<Float>
+        var padding1: Float
+        var maxDistance: Float
+        var padding2: SIMD3<Float>
+        
+        init() {
+            viewProjectionMatrix = matrix_identity_float4x4
+            cameraPosition = .zero
+            padding1 = 0
+            maxDistance = 10000.0  // Large default, effectively disabled
+            padding2 = .zero
         }
     }
 
@@ -425,11 +453,25 @@ public class SplatRenderer {
             Self.log.error("Failed to create compute pipeline state: \(error)")
         }
         
-        // Initialize frustum culling pipeline
+        // Initialize frustum culling pipeline and buffers
         do {
             if let frustumFunction = library.makeFunction(name: "frustumCullSplats") {
                 frustumCullPipelineState = try device.makeComputePipelineState(function: frustumFunction)
             }
+            if let generateArgsFunction = library.makeFunction(name: "generateIndirectDrawArguments") {
+                generateIndirectArgsPipelineState = try device.makeComputePipelineState(function: generateArgsFunction)
+            }
+            if let resetCountFunction = library.makeFunction(name: "resetVisibleCount") {
+                resetVisibleCountPipelineState = try device.makeComputePipelineState(function: resetCountFunction)
+            }
+            // Create frustum culling buffers (will be resized as needed)
+            frustumCullDataBuffer = device.makeBuffer(length: MemoryLayout<FrustumCullData>.stride, options: .storageModeShared)
+            frustumCullDataBuffer?.label = "Frustum Cull Data"
+            visibleCountBuffer = device.makeBuffer(length: MemoryLayout<UInt32>.stride, options: .storageModeShared)
+            visibleCountBuffer?.label = "Visible Count"
+            // Indirect draw arguments buffer (MTLDrawIndexedPrimitivesIndirectArguments = 5 * uint32)
+            indirectDrawArgsBuffer = device.makeBuffer(length: 5 * MemoryLayout<UInt32>.stride, options: .storageModeShared)
+            indirectDrawArgsBuffer?.label = "Indirect Draw Arguments"
         } catch {
             Self.log.error("Failed to create frustum culling pipeline state: \(error)")
         }
@@ -899,6 +941,115 @@ public class SplatRenderer {
         return (min: minBounds, max: maxBounds)
     }
     
+    // MARK: - Frustum Culling
+    
+    /// Encode frustum culling compute pass into command buffer
+    /// Includes: reset count → cull splats → generate indirect draw args
+    private func encodeFrustumCulling(viewport: ViewportDescriptor, to commandBuffer: MTLCommandBuffer) {
+        guard frustumCullingEnabled,
+              let cullPipeline = frustumCullPipelineState,
+              let resetPipeline = resetVisibleCountPipelineState,
+              let generateArgsPipeline = generateIndirectArgsPipelineState,
+              let cullDataBuffer = frustumCullDataBuffer,
+              let countBuffer = visibleCountBuffer,
+              let argsBuffer = indirectDrawArgsBuffer,
+              splatCount > 0 else {
+            return
+        }
+        
+        // Ensure visible indices buffer is large enough
+        let requiredSize = splatCount * MemoryLayout<UInt32>.stride
+        if visibleIndicesBuffer == nil || visibleIndicesBuffer!.length < requiredSize {
+            visibleIndicesBuffer = device.makeBuffer(length: requiredSize, options: .storageModeShared)
+            visibleIndicesBuffer?.label = "Visible Indices"
+        }
+        guard let indicesBuffer = visibleIndicesBuffer else { return }
+        
+        // Prepare view-projection matrix for NDC-based culling
+        let viewProjection = viewport.projectionMatrix * viewport.viewMatrix
+        
+        // Extract camera position from inverse view matrix
+        let invView = viewport.viewMatrix.inverse
+        let cameraPosition = SIMD3<Float>(invView[3][0], invView[3][1], invView[3][2])
+        
+        // Prepare cull data with view-projection matrix
+        var cullData = FrustumCullData()
+        cullData.viewProjectionMatrix = viewProjection
+        cullData.cameraPosition = cameraPosition
+        cullData.maxDistance = 10000.0  // Large value = effectively no distance culling
+        
+        // Copy cull data to buffer
+        cullDataBuffer.contents().copyMemory(from: &cullData, byteCount: MemoryLayout<FrustumCullData>.stride)
+        
+        // === Step 1: Reset visible count on GPU ===
+        guard let resetEncoder = commandBuffer.makeComputeCommandEncoder() else { return }
+        resetEncoder.label = "Reset Visible Count"
+        resetEncoder.setComputePipelineState(resetPipeline)
+        resetEncoder.setBuffer(countBuffer, offset: 0, index: 0)
+        resetEncoder.dispatchThreads(MTLSize(width: 1, height: 1, depth: 1),
+                                     threadsPerThreadgroup: MTLSize(width: 1, height: 1, depth: 1))
+        resetEncoder.endEncoding()
+        
+        // === Step 2: Frustum cull splats ===
+        guard let cullEncoder = commandBuffer.makeComputeCommandEncoder() else { return }
+        cullEncoder.label = "Frustum Culling"
+        cullEncoder.setComputePipelineState(cullPipeline)
+        cullEncoder.setBuffer(splatBuffer.buffer, offset: 0, index: 0)
+        cullEncoder.setBuffer(indicesBuffer, offset: 0, index: 1)
+        cullEncoder.setBuffer(countBuffer, offset: 0, index: 2)
+        cullEncoder.setBuffer(cullDataBuffer, offset: 0, index: 3)
+        
+        var count = UInt32(splatCount)
+        cullEncoder.setBytes(&count, length: MemoryLayout<UInt32>.stride, index: 4)
+        
+        let threadsPerThreadgroup = MTLSize(width: 256, height: 1, depth: 1)
+        let threadgroups = MTLSize(width: (splatCount + 255) / 256, height: 1, depth: 1)
+        cullEncoder.dispatchThreadgroups(threadgroups, threadsPerThreadgroup: threadsPerThreadgroup)
+        cullEncoder.endEncoding()
+        
+        // === Step 3: Generate indirect draw arguments ===
+        guard let argsEncoder = commandBuffer.makeComputeCommandEncoder() else { return }
+        argsEncoder.label = "Generate Indirect Draw Args"
+        argsEncoder.setComputePipelineState(generateArgsPipeline)
+        argsEncoder.setBuffer(argsBuffer, offset: 0, index: 0)
+        argsEncoder.setBuffer(countBuffer, offset: 0, index: 1)
+        
+        var indicesPerSplat: UInt32 = 6  // 2 triangles per splat
+        var maxIndexed = UInt32(Constants.maxIndexedSplatCount)
+        argsEncoder.setBytes(&indicesPerSplat, length: MemoryLayout<UInt32>.stride, index: 2)
+        argsEncoder.setBytes(&maxIndexed, length: MemoryLayout<UInt32>.stride, index: 3)
+        
+        argsEncoder.dispatchThreads(MTLSize(width: 1, height: 1, depth: 1),
+                                    threadsPerThreadgroup: MTLSize(width: 1, height: 1, depth: 1))
+        argsEncoder.endEncoding()
+    }
+    
+    /// Read back frustum culling results after command buffer completes
+    /// Call this in the completion handler
+    private func readFrustumCullingResults() {
+        guard frustumCullingEnabled,
+              let countBuffer = visibleCountBuffer else {
+            return
+        }
+        
+        let visibleCount = countBuffer.contents().load(as: UInt32.self)
+        let previousCount = lastVisibleCount
+        lastVisibleCount = Int(visibleCount)
+        
+        // Log when count changes by more than 5%
+        let totalCount = self.splatCount
+        let changeThreshold = max(totalCount / 20, 100)  // At least 100 splats or 5%
+        if abs(lastVisibleCount - previousCount) > changeThreshold {
+            let percentage = totalCount > 0 ? Int(Float(visibleCount) / Float(totalCount) * 100) : 0
+            Self.log.info("Frustum culling: \(visibleCount)/\(totalCount) visible (\(percentage)%)")
+        }
+    }
+    
+    /// Get the last frustum culling result
+    public var culledSplatCount: Int {
+        frustumCullingEnabled ? lastVisibleCount : splatCount
+    }
+    
     // MARK: - Interaction Mode Control
     
     /// Begin interaction mode - relaxes sort parameters for smoother user experience
@@ -1109,6 +1260,16 @@ public class SplatRenderer {
         switchToNextDynamicBuffer()
         updateUniforms(forViewports: viewports, splatCount: UInt32(splatCount), indexedSplatCount: UInt32(indexedSplatCount))
         frameBufferUploads += 1 // uniforms update
+        
+        // GPU Frustum Culling: encode compute pass before rendering
+        if frustumCullingEnabled, let firstViewport = viewports.first {
+            encodeFrustumCulling(viewport: firstViewport, to: commandBuffer)
+            
+            // Add completion handler to read culling results
+            commandBuffer.addCompletedHandler { [weak self] _ in
+                self?.readFrustumCullingResults()
+            }
+        }
 
         // Log Metal 4.0 availability but use standard rendering path (only log once per scene)
         if #available(iOS 26.0, macOS 26.0, tvOS 26.0, visionOS 26.0, *) {
@@ -1190,11 +1351,14 @@ public class SplatRenderer {
         renderEncoder.setVertexBuffer(splatBuffer.buffer, offset: 0, index: BufferIndex.splat.rawValue)
         
         // GPU-only sorting: pass sorted indices buffer to shader
-        // Shader uses this to access splats in depth-sorted order without CPU involvement
+        // Note: Frustum culling stats are computed but we still use sorted indices for correct rendering
+        // TODO: Implement sort-after-cull for true frustum culling with correct depth order
         if let sortedIndices = sortedIndicesBuffer {
             renderEncoder.setVertexBuffer(sortedIndices.buffer, offset: 0, index: BufferIndex.sortedIndices.rawValue)
         }
 
+        // Standard draw with sorted indices (frustum culling computes stats only for now)
+        // Using unsorted visible indices causes severe flickering due to incorrect alpha blending
         renderEncoder.drawIndexedPrimitives(type: .triangle,
                                             indexCount: indexCount,
                                             indexType: .uint32,
