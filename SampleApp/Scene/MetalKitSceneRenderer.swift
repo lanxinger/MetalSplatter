@@ -223,6 +223,16 @@ class MetalKitSceneRenderer: NSObject, MTKViewDelegate {
         let scaleMatrix = matrix4x4_scale(modelScale, modelScale, modelScale)
         let translationMatrix = matrix4x4_translation(0.0, 0.0, Constants.modelCenterZ)
         // Coordinate system calibration based on file format
+        // SOG coordinate system: x=right, y=up, z=back (−z is forward)
+        //
+        // Camera position difference from web/Plinth viewers:
+        // - Web/Plinth: camera at -Z looking toward origin (after framing)
+        // - MetalSplatter: camera at origin looking toward -Z (model at z=-8)
+        //
+        // Since the camera orientations differ by 180° around Y, we need:
+        // - Web/Plinth use 180° Z rotation
+        // - MetalSplatter needs 180° Z + 180° Y = 180° X rotation
+        // This produces the same visual result from the user's perspective.
         let modelDescription = model?.description ?? ""
         let descriptionLowercased = modelDescription.lowercased()
         let isSOGS = descriptionLowercased.contains("meta.json") || descriptionLowercased.contains(".zip")
@@ -230,7 +240,7 @@ class MetalKitSceneRenderer: NSObject, MTKViewDelegate {
         let isSOGSv2 = descriptionLowercased.contains(".sog")
         
         // SPZ files are already correctly oriented like SOGS v1 files
-        // SOGS v2 (.sog) files need 180° flip around X axis
+        // SOGS v2 (.sog) files need 180° X rotation (equivalent to web's 180° Z with our camera setup)
         // PLY files need 180° rotation around Z axis to be right-side up
         let commonUpCalibration: simd_float4x4
         if isSOGSv2 {

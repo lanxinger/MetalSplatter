@@ -136,12 +136,28 @@ class VisionSceneRenderer {
         let rotationMatrix = matrix4x4_rotation(radians: Float(rotation.radians),
                                                 axis: Constants.rotationAxis)
         let translationMatrix = matrix4x4_translation(0.0, 0.0, Constants.modelCenterZ)
-        // Turn common 3D GS PLY files rightside-up. This isn't generally meaningful, it just
-        // happens to be a useful default for the most common datasets at the moment.
-        // Skip this rotation for SOGS files which are already correctly oriented
+        // Coordinate system calibration based on file format
+        // SOG coordinate system: x=right, y=up, z=back (−z is forward)
+        //
+        // For Vision Pro, we use the same model translation approach as MetalKitSceneRenderer,
+        // so we need the same calibration rotations.
         let modelDescription = model?.description ?? ""
-        let isSOGS = modelDescription.contains("meta.json") || modelDescription.contains(".zip")
-        let commonUpCalibration = isSOGS ? matrix_identity_float4x4 : matrix4x4_rotation(radians: .pi, axis: SIMD3<Float>(0, 0, 1))
+        let descriptionLowercased = modelDescription.lowercased()
+        let isSOGS = descriptionLowercased.contains("meta.json") || descriptionLowercased.contains(".zip")
+        let isSPZ = descriptionLowercased.contains(".spz") || descriptionLowercased.contains(".spx")
+        let isSOGSv2 = descriptionLowercased.contains(".sog")
+        
+        // SPZ files are already correctly oriented like SOGS v1 files
+        // SOGS v2 (.sog) files need 180° X rotation (equivalent to web's 180° Z with our camera setup)
+        // PLY files need 180° rotation around Z axis to be right-side up
+        let commonUpCalibration: simd_float4x4
+        if isSOGSv2 {
+            commonUpCalibration = matrix4x4_rotation(radians: .pi, axis: SIMD3<Float>(1, 0, 0)) // 180° around X for SOGS v2
+        } else if isSOGS || isSPZ {
+            commonUpCalibration = matrix_identity_float4x4 // No rotation for SOGS v1 and SPZ
+        } else {
+            commonUpCalibration = matrix4x4_rotation(radians: .pi, axis: SIMD3<Float>(0, 0, 1)) // 180° around Z for PLY
+        }
 
         let simdDeviceAnchor = deviceAnchor?.originFromAnchorTransform ?? matrix_identity_float4x4
 
