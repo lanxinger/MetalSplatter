@@ -21,7 +21,7 @@ struct MetalKitSceneView: View {
     @State private var metal4BindlessEnabled = true // Default to enabled
     @State private var showDebugAABB = false // Debug: visualize GPU-computed bounds
     @State private var frustumCullingEnabled = false // GPU frustum culling
-    @State private var meshShaderEnabled = false // Metal 3+ mesh shader rendering
+    @State private var meshShaderEnabled = true // Metal 3+ mesh shader rendering - enabled by default
     
     var body: some View {
         ZStack {

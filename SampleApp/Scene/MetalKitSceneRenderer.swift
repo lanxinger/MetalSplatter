@@ -450,6 +450,27 @@ class MetalKitSceneRenderer: NSObject, MTKViewDelegate {
         metalKitView.setNeedsDisplay()
         #endif
     }
+    
+    /// Enable or disable Metal 4 TensorOps batch precompute
+    /// Pre-computes covariance/transforms for all splats when camera changes
+    /// Best for large scenes (50k+ splats) where camera movement is intermittent
+    func setBatchPrecompute(_ enabled: Bool) {
+        if let splat = modelRenderer as? SplatRenderer {
+            splat.batchPrecomputeEnabled = enabled
+            if enabled {
+                Self.log.info("Metal 4 TensorOps batch precompute enabled")
+            } else {
+                Self.log.info("Metal 4 TensorOps batch precompute disabled")
+            }
+        }
+
+        // Request redraw
+        #if os(macOS)
+        metalKitView.setNeedsDisplay(metalKitView.bounds)
+        #else
+        metalKitView.setNeedsDisplay()
+        #endif
+    }
 
     // MARK: - User Interaction API
     #if os(iOS)

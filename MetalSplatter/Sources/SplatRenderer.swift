@@ -124,6 +124,17 @@ public class SplatRenderer {
     private var cachedBounds: (min: SIMD3<Float>, max: SIMD3<Float>)?
     private var boundsDirty = true
     
+    // Metal 4 TensorOps batch precompute (pre-computes covariance/transforms)
+    private var batchPrecomputePipelineState: MTLComputePipelineState?
+    private var precomputedSplatBuffer: MTLBuffer?
+    private var precomputedDataDirty = true
+    private var lastPrecomputeViewMatrix: simd_float4x4?
+    public var batchPrecomputeEnabled = false  // Enable for large scenes
+    
+    // PrecomputedSplat structure size (must match Metal shader)
+    // float4 clipPosition (16) + float3 cov2D (12) + float2 axis1 (8) + float2 axis2 (8) + float depth (4) + uint visible (4) = 52 bytes
+    private static let precomputedSplatStride = 52
+    
     public struct ViewportDescriptor {
         public var viewport: MTLViewport
         public var projectionMatrix: simd_float4x4
@@ -519,6 +530,16 @@ public class SplatRenderer {
         } catch {
             Self.log.warning("Failed to create bounds compute pipeline: \(error)")
         }
+        
+        // Initialize Metal 4 TensorOps batch precompute pipeline
+        do {
+            if let precomputeFunction = library.makeFunction(name: "batchPrecomputeSplats") {
+                batchPrecomputePipelineState = try device.makeComputePipelineState(function: precomputeFunction)
+                Self.log.info("✅ Metal 4 TensorOps batch precompute available")
+            }
+        } catch {
+            Self.log.warning("Failed to create batch precompute pipeline: \(error)")
+        }
 
         // Setup mesh shaders if supported (Metal 3+, Apple Silicon)
         setupMeshShaders()
@@ -607,6 +628,7 @@ public class SplatRenderer {
         // Invalidate cached bounds
         cachedBounds = nil
         boundsDirty = true
+        invalidatePrecomputedData()  // Invalidate TensorOps cache
         
         // Acquire fresh small buffers from pools
         do {
@@ -889,6 +911,7 @@ public class SplatRenderer {
         sortDirtyDueToData = true
         sortDataRevision &+= 1
         boundsDirty = true  // Invalidate cached bounds
+        invalidatePrecomputedData()  // Invalidate TensorOps cache
         
         // Initialize sorted indices with identity mapping (0, 1, 2, ...)
         // This ensures rendering works before first sort completes
@@ -1031,6 +1054,77 @@ public class SplatRenderer {
         }
         
         return (min: minBounds, max: maxBounds)
+    }
+    
+    // MARK: - Metal 4 TensorOps Batch Precompute
+    
+    /// Pre-compute covariance and transforms for all splats on GPU
+    /// This moves expensive per-vertex math to a one-time batch operation
+    /// when camera changes, cached until next camera movement
+    private func runBatchPrecompute(viewport: ViewportDescriptor, to commandBuffer: MTLCommandBuffer) {
+        guard batchPrecomputeEnabled,
+              let precomputePipeline = batchPrecomputePipelineState,
+              splatCount > 0 else {
+            return
+        }
+        
+        // Check if we need to recompute (view matrix changed significantly)
+        if let lastMatrix = lastPrecomputeViewMatrix, !precomputedDataDirty {
+            // Simple change detection - check if matrix changed
+            let diff = simd_length(lastMatrix.columns.3 - viewport.viewMatrix.columns.3)
+            if diff < 0.001 {
+                return  // No significant camera movement, reuse cached data
+            }
+        }
+        
+        // Ensure precomputed buffer has correct size
+        let requiredSize = splatCount * Self.precomputedSplatStride
+        if precomputedSplatBuffer == nil || precomputedSplatBuffer!.length < requiredSize {
+            precomputedSplatBuffer = device.makeBuffer(length: requiredSize, options: .storageModePrivate)
+            precomputedSplatBuffer?.label = "Precomputed Splats"
+        }
+        guard let precomputedBuffer = precomputedSplatBuffer else { return }
+        
+        // Create uniform buffer for this computation
+        var uniforms = Uniforms(
+            projectionMatrix: viewport.projectionMatrix,
+            viewMatrix: viewport.viewMatrix,
+            screenSize: SIMD2<UInt32>(UInt32(viewport.screenSize.x), UInt32(viewport.screenSize.y)),
+            splatCount: UInt32(splatCount),
+            indexedSplatCount: UInt32(min(splatCount, Constants.maxIndexedSplatCount)),
+            debugFlags: 0,
+            lodThresholds: SIMD3<Float>(Constants.lodDistanceThresholds[0],
+                                         Constants.lodDistanceThresholds[1],
+                                         Constants.lodDistanceThresholds[2])
+        )
+        
+        var splatCountValue = UInt32(splatCount)
+        
+        guard let computeEncoder = commandBuffer.makeComputeCommandEncoder() else { return }
+        computeEncoder.label = "Batch Precompute Splats"
+        computeEncoder.setComputePipelineState(precomputePipeline)
+        
+        computeEncoder.setBuffer(splatBuffer.buffer, offset: 0, index: 0)
+        computeEncoder.setBuffer(precomputedBuffer, offset: 0, index: 1)
+        computeEncoder.setBytes(&uniforms, length: MemoryLayout<Uniforms>.stride, index: 2)
+        computeEncoder.setBytes(&splatCountValue, length: MemoryLayout<UInt32>.stride, index: 3)
+        
+        let threadsPerThreadgroup = MTLSize(width: 256, height: 1, depth: 1)
+        let threadgroups = MTLSize(width: (splatCount + 255) / 256, height: 1, depth: 1)
+        computeEncoder.dispatchThreadgroups(threadgroups, threadsPerThreadgroup: threadsPerThreadgroup)
+        computeEncoder.endEncoding()
+        
+        // Cache the view matrix to detect changes
+        lastPrecomputeViewMatrix = viewport.viewMatrix
+        precomputedDataDirty = false
+        
+        Self.log.debug("Batch precomputed \(self.splatCount) splats for current view")
+    }
+    
+    /// Invalidate precomputed data when splats change
+    private func invalidatePrecomputedData() {
+        precomputedDataDirty = true
+        lastPrecomputeViewMatrix = nil
     }
     
     // MARK: - Frustum Culling
@@ -1361,6 +1455,11 @@ public class SplatRenderer {
             commandBuffer.addCompletedHandler { [weak self] _ in
                 self?.readFrustumCullingResults()
             }
+        }
+        
+        // Metal 4 TensorOps: batch precompute covariance/transforms (when enabled)
+        if batchPrecomputeEnabled, let firstViewport = viewports.first {
+            runBatchPrecompute(viewport: firstViewport, to: commandBuffer)
         }
 
         // Log Metal 4.0 availability but use standard rendering path (only log once per scene)

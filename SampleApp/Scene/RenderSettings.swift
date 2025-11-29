@@ -25,10 +25,10 @@ struct RenderSettings: View {
     @Binding var fastSHEnabled: Bool
     @Binding var metal4BindlessEnabled: Bool
     @Binding var showDebugAABB: Bool
+    @Binding var batchPrecomputeEnabled: Bool  // TensorOps batch precompute
+    @Binding var meshShaderEnabled: Bool  // Mesh shaders (Metal 3+)
     @State private var isMetal4Available: Bool = false
     @State private var metal4SIMDGroupEnabled: Bool = true
-    @State private var metal4TensorEnabled: Bool = true
-    @State private var metal4MeshShadersEnabled: Bool = true // Enable by default for full Metal 4 feature set
     @State private var metal4AtomicSortEnabled: Bool = true
     @State private var metal4Capabilities: Metal4Capabilities?
     var onDismiss: (() -> Void)?
@@ -108,13 +108,13 @@ struct RenderSettings: View {
                         Toggle("SIMD-Group Operations", isOn: $metal4SIMDGroupEnabled)
                             .font(.caption)
                         
-                        Toggle("Tensor Operations", isOn: $metal4TensorEnabled)
+                        Toggle("TensorOps Batch Precompute", isOn: $batchPrecomputeEnabled)
+                            .font(.caption)
+                        
+                        Toggle("Mesh Shaders (GPU Geometry)", isOn: $meshShaderEnabled)
                             .font(.caption)
                         
                         Toggle("Advanced Atomic Sort", isOn: $metal4AtomicSortEnabled)
-                            .font(.caption)
-                        
-                        Toggle("Mesh Shaders (Large Scenes)", isOn: $metal4MeshShadersEnabled)
                             .font(.caption)
                     }
                     .padding(.leading, 20)
@@ -171,9 +171,9 @@ struct RenderSettings: View {
         metal4Capabilities = Metal4Capabilities(
             available: true,
             simdGroupOperations: metal4SIMDGroupEnabled,
-            tensorOperations: metal4TensorEnabled,
+            tensorOperations: batchPrecomputeEnabled,
             advancedAtomics: metal4AtomicSortEnabled,
-            meshShaders: metal4MeshShadersEnabled
+            meshShaders: meshShaderEnabled
         )
     }
 }
@@ -185,6 +185,8 @@ struct EnhancedMetalKitSceneView: View {
     @State private var fastSHEnabled = true
     @State private var metal4BindlessEnabled = true // Default to enabled
     @State private var showDebugAABB = false // Debug: visualize GPU-computed bounds
+    @State private var batchPrecomputeEnabled = true // TensorOps batch precompute - enabled by default
+    @State private var meshShaderEnabled = true // Mesh shaders - enabled by default for Metal 3+ devices
     @State private var showARUnavailableAlert = false
     @State private var navigateToAR = false
     
@@ -195,7 +197,9 @@ struct EnhancedMetalKitSceneView: View {
                 modelIdentifier: modelIdentifier,
                 fastSHEnabled: $fastSHEnabled,
                 metal4BindlessEnabled: $metal4BindlessEnabled,
-                showDebugAABB: $showDebugAABB
+                showDebugAABB: $showDebugAABB,
+                batchPrecomputeEnabled: $batchPrecomputeEnabled,
+                meshShaderEnabled: $meshShaderEnabled
             )
             .ignoresSafeArea()
             
@@ -262,6 +266,8 @@ struct EnhancedMetalKitSceneView: View {
                                 fastSHEnabled: $fastSHEnabled,
                                 metal4BindlessEnabled: $metal4BindlessEnabled,
                                 showDebugAABB: $showDebugAABB,
+                                batchPrecomputeEnabled: $batchPrecomputeEnabled,
+                                meshShaderEnabled: $meshShaderEnabled,
                                 onDismiss: { showSettings = false }
                             )
                             .padding()
@@ -316,6 +322,8 @@ struct MetalKitRendererViewEnhanced: ViewRepresentable {
     @Binding var fastSHEnabled: Bool
     @Binding var metal4BindlessEnabled: Bool
     @Binding var showDebugAABB: Bool
+    @Binding var batchPrecomputeEnabled: Bool
+    @Binding var meshShaderEnabled: Bool
     
     class Coordinator: NSObject, UIGestureRecognizerDelegate {
         var renderer: MetalKitSceneRenderer?
@@ -335,6 +343,8 @@ struct MetalKitRendererViewEnhanced: ViewRepresentable {
             renderer?.fastSHSettings.enabled = parent.fastSHEnabled
             renderer?.setMetal4Bindless(parent.metal4BindlessEnabled)
             renderer?.setDebugAABB(parent.showDebugAABB)
+            renderer?.setBatchPrecompute(parent.batchPrecomputeEnabled)
+            renderer?.setMeshShader(parent.meshShaderEnabled)
         }
     }
     
@@ -371,10 +381,12 @@ struct MetalKitRendererViewEnhanced: ViewRepresentable {
         coordinator.renderer = renderer
         metalKitView.delegate = renderer
         
-        // Apply initial settings
+        // Apply initial settings - all optimizations enabled by default
         renderer?.fastSHSettings.enabled = fastSHEnabled
         renderer?.setMetal4Bindless(metal4BindlessEnabled)
         renderer?.setDebugAABB(showDebugAABB)
+        renderer?.setBatchPrecompute(batchPrecomputeEnabled)
+        renderer?.setMeshShader(meshShaderEnabled)
         
         // Add gesture recognizers (same as original)
         #if os(iOS)
