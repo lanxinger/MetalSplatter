@@ -5,12 +5,32 @@ extension SplatSceneReader {
     public func readScene() throws -> [SplatScenePoint] {
         let collector = PointCollector()
         read(to: collector)
-        
+
         if let error = collector.error {
             throw error
         }
-        
+
         return collector.points
+    }
+
+    /// Reads the scene and reorders points using Morton code ordering for improved GPU cache coherency.
+    ///
+    /// Morton ordering clusters spatially nearby 3D points together in memory, which can significantly
+    /// improve rendering performance for large scenes by reducing GPU cache misses.
+    ///
+    /// - Parameter useParallel: If true, uses parallel computation for large datasets (>100K points)
+    /// - Returns: Array of splat scene points reordered by Morton code
+    public func readSceneWithMortonOrdering(useParallel: Bool = true) throws -> [SplatScenePoint] {
+        let points = try readScene()
+
+        guard points.count > 1 else { return points }
+
+        // Use parallel version for large datasets
+        if useParallel && points.count > 100_000 {
+            return MortonOrder.reorderParallel(points)
+        } else {
+            return MortonOrder.reorder(points)
+        }
     }
 }
 

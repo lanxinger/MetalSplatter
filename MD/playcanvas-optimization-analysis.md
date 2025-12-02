@@ -32,81 +32,67 @@ PlayCanvas has a mature, web-optimized Gaussian splatting implementation. While 
 
 ### Features to Consider Adopting
 
-| Feature | PlayCanvas | MetalSplatter | Priority |
-|---------|-----------|---------------|----------|
-| **Morton Order Layout** | ✅ | ❌ | High |
-| **Counting Sort** | ✅ | ❌ | Medium |
-| **Octree LOD Streaming** | ✅ | ❌ | High |
-| **Stochastic Transparency** | ✅ | ❌ | Medium |
-| **Work Buffer Atlas** | ✅ | ❌ | Medium |
-| **SH Update Thresholds** | ✅ | Partial | Low |
+| Feature | PlayCanvas | MetalSplatter | Priority | Status |
+|---------|-----------|---------------|----------|--------|
+| **Morton Order Layout** | ✅ | ✅ | High | **IMPLEMENTED** |
+| **Counting Sort** | ✅ | ❌ | Medium | Pending |
+| **Octree LOD Streaming** | ✅ | ❌ | High | Pending |
+| **Stochastic Transparency** | ✅ | ❌ | Medium | Pending |
+| **Work Buffer Atlas** | ✅ | ❌ | Medium | Pending |
+| **SH Update Thresholds** | ✅ | Partial | Low | Pending |
 
 ---
 
 ## Optimization Recommendations
 
-### 1. Morton Order Data Layout
+### 1. Morton Order Data Layout ✅ IMPLEMENTED
 
 **Priority:** High
 **Effort:** Medium
 **Impact:** Significant GPU cache improvement
+**Status:** **COMPLETED** (2025-12-02)
 
 #### Description
 
 PlayCanvas pre-orders splats using Morton codes (Z-order curve) for spatial coherency. This clusters nearby 3D points together in memory, dramatically improving GPU cache hit rates during rendering.
 
-#### PlayCanvas Implementation
+#### MetalSplatter Implementation
 
-Location: `src/scene/gsplat/gsplat-data.js:365-410`
+**Files added/modified:**
+- `SplatIO/Sources/MortonOrder.swift` - Core Morton code computation and reordering utilities
+- `SplatIO/Sources/SplatSceneReaderExtension.swift` - Added `readSceneWithMortonOrdering()` method
+- `MetalSplatter/Sources/SplatRenderer.swift` - Added `mortonOrderingEnabled` option (default: true)
+- `MetalSplatter/Resources/MortonCode.metal` - GPU-accelerated Morton code computation kernel
+- `SplatIO/Tests/SplatIOTests.swift` - Comprehensive unit tests
 
-```javascript
-calcMortonOrder() {
-    // https://fgiesen.wordpress.com/2009/12/13/decoding-morton-codes/
-    const encodeMorton3 = (x, y, z) => {
-        const expandBits = (v) => {
-            v = (v | (v << 16)) & 0x030000FF;
-            v = (v | (v <<  8)) & 0x0300F00F;
-            v = (v | (v <<  4)) & 0x030C30C3;
-            v = (v | (v <<  2)) & 0x09249249;
-            return v;
-        };
-        return expandBits(x) | (expandBits(y) << 1) | (expandBits(z) << 2);
-    };
+**Usage:**
 
-    // Quantize positions to 10-bit integers within bounding box
-    // Sort by Morton code
-    // Return reordering indices
-}
+```swift
+// Option 1: Automatic (default behavior)
+// Morton ordering is enabled by default in SplatRenderer
+renderer.mortonOrderingEnabled = true  // default
+renderer.add(points)
+
+// Option 2: Explicit reader method
+let reader = try AutodetectSceneReader(url)
+let orderedPoints = try reader.readSceneWithMortonOrdering()
+
+// Option 3: Manual reordering
+let orderedPoints = MortonOrder.reorder(points)
+// Or for large datasets (>100K points):
+let orderedPoints = MortonOrder.reorderParallel(points)
 ```
 
-#### Proposed MetalSplatter Implementation
+**API:**
+- `MortonOrder.encode(x, y, z)` - Encode 10-bit coordinates to 30-bit Morton code
+- `MortonOrder.computeMortonCodes(points)` - Compute codes for all points
+- `MortonOrder.reorder(points)` - Reorder points by Morton code
+- `MortonOrder.reorderParallel(points)` - Parallel version for large datasets
+- `MortonOrder.computeStatistics(points)` - Get distribution statistics
 
-**Files to modify:**
-- `SplatIO/Sources/SplatSceneReader.swift` - Add reordering pass after loading
-- `MetalSplatter/Sources/SplatRenderer.swift` - Option to reorder during `add(splat:)`
-
-**Algorithm:**
-1. Compute axis-aligned bounding box of all splats
-2. Normalize positions to [0, 1023] (10-bit)
-3. Compute Morton code for each splat
-4. Sort splat indices by Morton code
-5. Reorder splat buffer according to sorted indices
-
-**Metal Shader (optional GPU implementation):**
-```metal
-kernel void computeMortonCodes(
-    constant Splat* splats [[buffer(0)]],
-    device uint* mortonCodes [[buffer(1)]],
-    constant float3& boundsMin [[buffer(2)]],
-    constant float3& boundsInvSize [[buffer(3)]],
-    uint index [[thread_position_in_grid]]
-) {
-    float3 pos = float3(splats[index].position);
-    float3 normalized = (pos - boundsMin) * boundsInvSize;
-    uint3 quantized = uint3(clamp(normalized * 1023.0, 0.0, 1023.0));
-    mortonCodes[index] = encodeMorton3(quantized.x, quantized.y, quantized.z);
-}
-```
+**Configuration:**
+- `SplatRenderer.mortonOrderingEnabled` - Enable/disable (default: true)
+- `SplatRenderer.mortonParallelThreshold` - Threshold for parallel processing (default: 100,000)
 
 #### Expected Benefits
 - 20-40% improvement in rendering throughput for large scenes
@@ -374,7 +360,7 @@ MetalSplatter already has similar thresholds for sorting (`sortPositionEpsilon`,
 
 ### Phase 1: Quick Wins (1-2 weeks)
 
-- [ ] **Morton Order Layout** - Implement in `SplatSceneReader`
+- [x] **Morton Order Layout** - ✅ COMPLETED (2025-12-02)
 - [ ] **Stochastic Transparency** - Add dithering option to fragment shader
 - [ ] **SH Update Thresholds** - Add camera movement checks
 
@@ -451,3 +437,4 @@ MetalSplatter already has similar thresholds for sorting (`sortPositionEpsilon`,
 | Date | Change |
 |------|--------|
 | 2025-12-02 | Initial analysis document created |
+| 2025-12-02 | **Morton Order Layout IMPLEMENTED** - Added `MortonOrder.swift`, GPU kernel, SplatRenderer integration, and unit tests |

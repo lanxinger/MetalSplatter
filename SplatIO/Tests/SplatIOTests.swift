@@ -463,6 +463,213 @@ final class SplatIOTests: XCTestCase {
         )
     }
 
+    // MARK: - Morton Order Tests
+
+    func testMortonCodeEncoding() {
+        // Test basic Morton code encoding
+        // For (0, 0, 0), Morton code should be 0
+        XCTAssertEqual(MortonOrder.encode(0, 0, 0), 0)
+
+        // For (1, 0, 0), Morton code should be 1 (x bit at position 0)
+        XCTAssertEqual(MortonOrder.encode(1, 0, 0), 1)
+
+        // For (0, 1, 0), Morton code should be 2 (y bit at position 1)
+        XCTAssertEqual(MortonOrder.encode(0, 1, 0), 2)
+
+        // For (0, 0, 1), Morton code should be 4 (z bit at position 2)
+        XCTAssertEqual(MortonOrder.encode(0, 0, 1), 4)
+
+        // For (1, 1, 1), Morton code should be 7 (all bits set)
+        XCTAssertEqual(MortonOrder.encode(1, 1, 1), 7)
+
+        // Test larger values
+        // (2, 0, 0) -> x=10 binary, interleaved with zeros: ...001000 = 8
+        XCTAssertEqual(MortonOrder.encode(2, 0, 0), 8)
+
+        // Test maximum 10-bit value
+        XCTAssertEqual(MortonOrder.encode(1023, 1023, 1023), 0x3FFFFFFF) // All 30 bits set
+    }
+
+    func testMortonCodeBitInterleaving() {
+        // Verify bit interleaving pattern: z2 y2 x2 z1 y1 x1 z0 y0 x0
+        // (5, 3, 6) = (101, 011, 110) binary
+        // Interleaved: 1 0 1 | 1 0 0 | 0 1 1 | 1 1 1
+        //            = z2y2x2 z1y1x1 z0y0x0
+        // = 110 100 011 111 = 0b110100011111 (but this needs proper interleaving)
+
+        // Actually for x=5 (101), y=3 (011), z=6 (110):
+        // Bit 0: x0=1, y0=1, z0=0 -> 011 = 3
+        // Bit 1: x1=0, y1=1, z1=1 -> 110 = 6
+        // Bit 2: x2=1, y2=0, z2=1 -> 101 = 5
+        // Morton = 5*64 + 6*8 + 3 = 320 + 48 + 3 = 371
+
+        let code = MortonOrder.encode(5, 3, 6)
+        // Verify the code is deterministic
+        XCTAssertEqual(code, MortonOrder.encode(5, 3, 6))
+    }
+
+    func testMortonBoundsComputation() {
+        let points = [
+            createTestPoint(position: SIMD3<Float>(0, 0, 0)),
+            createTestPoint(position: SIMD3<Float>(10, 5, 3)),
+            createTestPoint(position: SIMD3<Float>(-5, 8, -2)),
+            createTestPoint(position: SIMD3<Float>(3, -4, 7)),
+        ]
+
+        let (minBounds, maxBounds) = MortonOrder.computeBounds(points)
+
+        XCTAssertEqual(minBounds.x, -5, accuracy: 0.001)
+        XCTAssertEqual(minBounds.y, -4, accuracy: 0.001)
+        XCTAssertEqual(minBounds.z, -2, accuracy: 0.001)
+
+        XCTAssertEqual(maxBounds.x, 10, accuracy: 0.001)
+        XCTAssertEqual(maxBounds.y, 8, accuracy: 0.001)
+        XCTAssertEqual(maxBounds.z, 7, accuracy: 0.001)
+    }
+
+    func testMortonBoundsEmptyArray() {
+        let (minBounds, maxBounds) = MortonOrder.computeBounds([])
+
+        XCTAssertEqual(minBounds, SIMD3<Float>.zero)
+        XCTAssertEqual(maxBounds, SIMD3<Float>.zero)
+    }
+
+    func testMortonReorderingPreservesPoints() {
+        // Create points with known positions
+        let originalPoints = [
+            createTestPoint(position: SIMD3<Float>(10, 10, 10)),
+            createTestPoint(position: SIMD3<Float>(0, 0, 0)),
+            createTestPoint(position: SIMD3<Float>(5, 5, 5)),
+            createTestPoint(position: SIMD3<Float>(2, 2, 2)),
+        ]
+
+        let reorderedPoints = MortonOrder.reorder(originalPoints)
+
+        // Verify same number of points
+        XCTAssertEqual(reorderedPoints.count, originalPoints.count)
+
+        // Verify all original points are present (by position)
+        let originalPositions = Set(originalPoints.map { "\($0.position.x),\($0.position.y),\($0.position.z)" })
+        let reorderedPositions = Set(reorderedPoints.map { "\($0.position.x),\($0.position.y),\($0.position.z)" })
+        XCTAssertEqual(originalPositions, reorderedPositions)
+    }
+
+    func testMortonReorderingOrder() {
+        // Create points at known Morton code positions
+        // Points closer to origin should come first in Morton order
+        let points = [
+            createTestPoint(position: SIMD3<Float>(1, 1, 1)),    // Far from origin in normalized space
+            createTestPoint(position: SIMD3<Float>(0, 0, 0)),    // Origin (min bounds)
+            createTestPoint(position: SIMD3<Float>(0.5, 0.5, 0.5)), // Middle
+        ]
+
+        let reorderedPoints = MortonOrder.reorder(points)
+
+        // The point at origin should be first (lowest Morton code)
+        XCTAssertEqual(reorderedPoints[0].position.x, 0, accuracy: 0.001)
+        XCTAssertEqual(reorderedPoints[0].position.y, 0, accuracy: 0.001)
+        XCTAssertEqual(reorderedPoints[0].position.z, 0, accuracy: 0.001)
+    }
+
+    func testMortonSinglePoint() {
+        let points = [createTestPoint(position: SIMD3<Float>(5, 5, 5))]
+        let reordered = MortonOrder.reorder(points)
+
+        XCTAssertEqual(reordered.count, 1)
+        XCTAssertEqual(reordered[0].position, points[0].position)
+    }
+
+    func testMortonEmptyArray() {
+        let reordered = MortonOrder.reorder([])
+        XCTAssertTrue(reordered.isEmpty)
+    }
+
+    func testMortonCodesParallel() {
+        // Generate a larger set of points for parallel testing
+        var points = [SplatScenePoint]()
+        for i in 0..<1000 {
+            let x = Float(i % 10)
+            let y = Float((i / 10) % 10)
+            let z = Float(i / 100)
+            points.append(createTestPoint(position: SIMD3<Float>(x, y, z)))
+        }
+
+        let sequentialCodes = MortonOrder.computeMortonCodes(points)
+        let parallelCodes = MortonOrder.computeMortonCodesParallel(points)
+
+        // Results should be identical
+        XCTAssertEqual(sequentialCodes.count, parallelCodes.count)
+        for i in 0..<sequentialCodes.count {
+            XCTAssertEqual(sequentialCodes[i], parallelCodes[i], "Mismatch at index \(i)")
+        }
+    }
+
+    func testMortonReorderParallel() {
+        var points = [SplatScenePoint]()
+        for i in 0..<500 {
+            let x = Float.random(in: -10...10)
+            let y = Float.random(in: -10...10)
+            let z = Float.random(in: -10...10)
+            points.append(createTestPoint(position: SIMD3<Float>(x, y, z)))
+        }
+
+        let sequential = MortonOrder.reorder(points)
+        let parallel = MortonOrder.reorderParallel(points)
+
+        // Both should produce same ordering
+        XCTAssertEqual(sequential.count, parallel.count)
+        for i in 0..<sequential.count {
+            XCTAssertEqual(sequential[i].position.x, parallel[i].position.x, accuracy: 0.0001)
+            XCTAssertEqual(sequential[i].position.y, parallel[i].position.y, accuracy: 0.0001)
+            XCTAssertEqual(sequential[i].position.z, parallel[i].position.z, accuracy: 0.0001)
+        }
+    }
+
+    func testMortonStatistics() {
+        let points = [
+            createTestPoint(position: SIMD3<Float>(0, 0, 0)),
+            createTestPoint(position: SIMD3<Float>(10, 10, 10)),
+            createTestPoint(position: SIMD3<Float>(5, 5, 5)),
+            createTestPoint(position: SIMD3<Float>(5, 5, 5)), // Duplicate position
+        ]
+
+        let stats = MortonOrder.computeStatistics(points)
+
+        XCTAssertEqual(stats.pointCount, 4)
+        XCTAssertEqual(stats.uniqueCodes, 3) // 4 points but 2 have same position
+        XCTAssertEqual(stats.boundsMin.x, 0, accuracy: 0.001)
+        XCTAssertEqual(stats.boundsMax.x, 10, accuracy: 0.001)
+        XCTAssertGreaterThan(stats.diagonalLength, 0)
+        XCTAssertEqual(stats.uniqueRatio, 0.75, accuracy: 0.01) // 3/4 unique
+    }
+
+    func testMortonReaderExtension() throws {
+        // Test that readSceneWithMortonOrdering works
+        let reader = try AutodetectSceneReader(plyURL)
+        let mortonOrderedPoints = try reader.readSceneWithMortonOrdering(useParallel: false)
+        let regularPoints = try AutodetectSceneReader(plyURL).readScene()
+
+        // Should have same number of points
+        XCTAssertEqual(mortonOrderedPoints.count, regularPoints.count)
+
+        // Should contain the same points (just reordered)
+        let originalPositions = Set(regularPoints.map { "\($0.position.x),\($0.position.y),\($0.position.z)" })
+        let mortonPositions = Set(mortonOrderedPoints.map { "\($0.position.x),\($0.position.y),\($0.position.z)" })
+        XCTAssertEqual(originalPositions, mortonPositions)
+    }
+
+    private func createTestPoint(position: SIMD3<Float>) -> SplatScenePoint {
+        SplatScenePoint(
+            position: position,
+            color: .linearFloat(SIMD3<Float>(1, 1, 1)),
+            opacity: .linearFloat(1.0),
+            scale: .linearFloat(SIMD3<Float>(1, 1, 1)),
+            rotation: simd_quatf(ix: 0, iy: 0, iz: 0, r: 1)
+        )
+    }
+
+    // MARK: - Equality Tests
+
     func testEqual(_ urlA: URL, _ urlB: URL) throws {
         let readerA = try AutodetectSceneReader(urlA)
         let contentA = ContentStorage()

@@ -276,7 +276,21 @@ public class SplatRenderer {
         let thresholds = Constants.lodDistanceThresholds
         return SIMD3<Float>(thresholds[0], thresholds[1], thresholds[2])
     }()
-    
+
+    // MARK: - Morton Ordering
+
+    /// When true, splats added via `add(_:)` will be reordered using Morton codes
+    /// for improved GPU cache coherency. This is a one-time cost at load time that
+    /// can significantly improve rendering performance for large scenes.
+    ///
+    /// Note: This only affects newly added splats. Existing splats are not reordered.
+    /// For best results, enable this before loading splat data.
+    public var mortonOrderingEnabled: Bool = true
+
+    /// Threshold for using parallel Morton code computation.
+    /// Scenes with more splats than this will use parallel processing.
+    public var mortonParallelThreshold: Int = 100_000
+
     public var sortPositionEpsilon: Float = 0.01
     public var sortDirectionEpsilon: Float = 0.0001  // ~0.5-1° rotation (reduced from 0.001 to fix flickering during rotation)
     public var minimumSortInterval: TimeInterval = 0
@@ -899,7 +913,7 @@ public class SplatRenderer {
     public func add(_ points: [SplatScenePoint]) throws {
         // Validate all points before adding any
         try SplatDataValidator.validatePoints(points)
-        
+
         do {
             try ensureAdditionalCapacity(points.count)
         } catch {
@@ -907,12 +921,27 @@ public class SplatRenderer {
             return
         }
 
-        splatBuffer.append(points.map { Splat($0) })
+        // Apply Morton ordering if enabled (improves GPU cache coherency)
+        let orderedPoints: [SplatScenePoint]
+        if mortonOrderingEnabled && points.count > 1 {
+            let startTime = CFAbsoluteTimeGetCurrent()
+            if points.count > mortonParallelThreshold {
+                orderedPoints = MortonOrder.reorderParallel(points)
+            } else {
+                orderedPoints = MortonOrder.reorder(points)
+            }
+            let duration = CFAbsoluteTimeGetCurrent() - startTime
+            Self.log.info("Morton ordering \(points.count) splats took \(String(format: "%.2f", duration * 1000))ms")
+        } else {
+            orderedPoints = points
+        }
+
+        splatBuffer.append(orderedPoints.map { Splat($0) })
         sortDirtyDueToData = true
         sortDataRevision &+= 1
         boundsDirty = true  // Invalidate cached bounds
         invalidatePrecomputedData()  // Invalidate TensorOps cache
-        
+
         // Initialize sorted indices with identity mapping (0, 1, 2, ...)
         // This ensures rendering works before first sort completes
         try initializeIdentitySortedIndices()
