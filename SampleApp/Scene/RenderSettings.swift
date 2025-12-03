@@ -27,6 +27,7 @@ struct RenderSettings: View {
     @Binding var showDebugAABB: Bool
     @Binding var batchPrecomputeEnabled: Bool  // TensorOps batch precompute
     @Binding var meshShaderEnabled: Bool  // Mesh shaders (Metal 3+)
+    @Binding var ditheredTransparencyEnabled: Bool  // Stochastic transparency (order-independent)
     @State private var isMetal4Available: Bool = false
     @State private var metal4SIMDGroupEnabled: Bool = true
     @State private var metal4AtomicSortEnabled: Bool = true
@@ -77,7 +78,20 @@ struct RenderSettings: View {
             }
 
             Divider()
-            
+
+            // Dithered Transparency Toggle - order-independent transparency
+            Toggle(isOn: $ditheredTransparencyEnabled) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Dithered Transparency")
+                        .font(.subheadline)
+                    Text("Order-independent, no sorting needed (best with TAA)")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+            }
+
+            Divider()
+
             // Metal 4 Bindless Toggle
             Toggle(isOn: $metal4BindlessEnabled) {
                 VStack(alignment: .leading, spacing: 2) {
@@ -187,6 +201,7 @@ struct EnhancedMetalKitSceneView: View {
     @State private var showDebugAABB = false // Debug: visualize GPU-computed bounds
     @State private var batchPrecomputeEnabled = true // TensorOps batch precompute - enabled by default
     @State private var meshShaderEnabled = true // Mesh shaders - enabled by default for Metal 3+ devices
+    @State private var ditheredTransparencyEnabled = false // Stochastic transparency - disabled by default
     @State private var showARUnavailableAlert = false
     @State private var navigateToAR = false
     
@@ -199,7 +214,8 @@ struct EnhancedMetalKitSceneView: View {
                 metal4BindlessEnabled: $metal4BindlessEnabled,
                 showDebugAABB: $showDebugAABB,
                 batchPrecomputeEnabled: $batchPrecomputeEnabled,
-                meshShaderEnabled: $meshShaderEnabled
+                meshShaderEnabled: $meshShaderEnabled,
+                ditheredTransparencyEnabled: $ditheredTransparencyEnabled
             )
             .ignoresSafeArea()
             
@@ -268,6 +284,7 @@ struct EnhancedMetalKitSceneView: View {
                                 showDebugAABB: $showDebugAABB,
                                 batchPrecomputeEnabled: $batchPrecomputeEnabled,
                                 meshShaderEnabled: $meshShaderEnabled,
+                                ditheredTransparencyEnabled: $ditheredTransparencyEnabled,
                                 onDismiss: { showSettings = false }
                             )
                             .padding()
@@ -324,6 +341,7 @@ struct MetalKitRendererViewEnhanced: ViewRepresentable {
     @Binding var showDebugAABB: Bool
     @Binding var batchPrecomputeEnabled: Bool
     @Binding var meshShaderEnabled: Bool
+    @Binding var ditheredTransparencyEnabled: Bool
     
     class Coordinator: NSObject, UIGestureRecognizerDelegate {
         var renderer: MetalKitSceneRenderer?
@@ -345,6 +363,7 @@ struct MetalKitRendererViewEnhanced: ViewRepresentable {
             renderer?.setDebugAABB(parent.showDebugAABB)
             renderer?.setBatchPrecompute(parent.batchPrecomputeEnabled)
             renderer?.setMeshShader(parent.meshShaderEnabled)
+            renderer?.setDitheredTransparency(parent.ditheredTransparencyEnabled)
         }
     }
     
@@ -387,6 +406,7 @@ struct MetalKitRendererViewEnhanced: ViewRepresentable {
         renderer?.setDebugAABB(showDebugAABB)
         renderer?.setBatchPrecompute(batchPrecomputeEnabled)
         renderer?.setMeshShader(meshShaderEnabled)
+        renderer?.setDitheredTransparency(ditheredTransparencyEnabled)
         
         // Add gesture recognizers (same as original)
         #if os(iOS)

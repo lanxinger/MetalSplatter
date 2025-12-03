@@ -291,6 +291,32 @@ public class SplatRenderer {
     /// Scenes with more splats than this will use parallel processing.
     public var mortonParallelThreshold: Int = 100_000
 
+    // MARK: - Dithered Transparency (Order-Independent)
+
+    /// When true, uses stochastic (dithered) transparency instead of sorted alpha blending.
+    /// This eliminates the need for depth sorting, providing order-independent transparency.
+    ///
+    /// **Benefits:**
+    /// - No sorting overhead - significant performance improvement
+    /// - Order-independent - no popping artifacts from sort order changes
+    /// - Better for VR where sorting latency is problematic
+    ///
+    /// **Trade-offs:**
+    /// - Produces noise/stippling pattern (best paired with TAA)
+    /// - May look grainy without temporal anti-aliasing
+    /// - Different visual aesthetic than smooth alpha blending
+    ///
+    /// Note: When enabled, sorting is still performed but can be deprioritized since
+    /// visual correctness no longer depends on sort order.
+    public var useDitheredTransparency: Bool = false {
+        didSet {
+            if useDitheredTransparency != oldValue {
+                // Invalidate pipeline states to rebuild with correct settings
+                invalidatePipelineStates()
+            }
+        }
+    }
+
     public var sortPositionEpsilon: Float = 0.01
     public var sortDirectionEpsilon: Float = 0.0001  // ~0.5-1° rotation (reduced from 0.001 to fix flickering during rotation)
     public var minimumSortInterval: TimeInterval = 0
@@ -329,6 +355,9 @@ public class SplatRenderer {
     // Single-stage pipeline
     internal var singleStagePipelineState: MTLRenderPipelineState?
     internal var singleStageDepthState: MTLDepthStencilState?
+    // Dithered transparency pipeline (order-independent, no sorting required)
+    private var ditheredPipelineState: MTLRenderPipelineState?
+    private var ditheredDepthState: MTLDepthStencilState?
     // Multi-stage pipeline
     private var initializePipelineState: MTLRenderPipelineState?
     internal var drawSplatPipelineState: MTLRenderPipelineState?
@@ -694,11 +723,17 @@ public class SplatRenderer {
 
     private func resetPipelineStates() {
         singleStagePipelineState = nil
+        ditheredPipelineState = nil
+        ditheredDepthState = nil
         initializePipelineState = nil
         drawSplatPipelineState = nil
         drawSplatDepthState = nil
         postprocessPipelineState = nil
         postprocessDepthState = nil
+    }
+
+    private func invalidatePipelineStates() {
+        resetPipelineStates()
     }
 
     private func buildSingleStagePipelineStatesIfNeeded() throws {
@@ -752,6 +787,47 @@ public class SplatRenderer {
         let depthStateDescriptor = MTLDepthStencilDescriptor()
         depthStateDescriptor.depthCompareFunction = MTLCompareFunction.always
         depthStateDescriptor.isDepthWriteEnabled = writeDepth
+        guard let depthState = device.makeDepthStencilState(descriptor: depthStateDescriptor) else {
+            throw SplatRendererError.failedToCreateDepthStencilState
+        }
+        return depthState
+    }
+
+    // MARK: - Dithered Transparency Pipeline
+
+    private func buildDitheredPipelineStatesIfNeeded() throws {
+        guard ditheredPipelineState == nil else { return }
+
+        ditheredPipelineState = try buildDitheredPipelineState()
+        ditheredDepthState = try buildDitheredDepthState()
+    }
+
+    private func buildDitheredPipelineState() throws -> MTLRenderPipelineState {
+        let pipelineDescriptor = MTLRenderPipelineDescriptor()
+
+        pipelineDescriptor.label = "DitheredTransparencyPipeline"
+        pipelineDescriptor.vertexFunction = try library.makeRequiredFunction(name: "singleStageSplatVertexShader")
+        pipelineDescriptor.fragmentFunction = try library.makeRequiredFunction(name: "singleStageSplatFragmentShaderDithered")
+
+        pipelineDescriptor.rasterSampleCount = sampleCount
+
+        let colorAttachment = pipelineDescriptor.colorAttachments[0]
+        colorAttachment?.pixelFormat = colorFormat
+        // Dithered mode: no blending, fragments are either fully opaque or discarded
+        colorAttachment?.isBlendingEnabled = false
+
+        pipelineDescriptor.depthAttachmentPixelFormat = depthFormat
+
+        pipelineDescriptor.maxVertexAmplificationCount = maxViewCount
+
+        return try device.makeRenderPipelineState(descriptor: pipelineDescriptor)
+    }
+
+    private func buildDitheredDepthState() throws -> MTLDepthStencilState {
+        let depthStateDescriptor = MTLDepthStencilDescriptor()
+        // Dithered mode: use depth testing for proper occlusion (since we're order-independent)
+        depthStateDescriptor.depthCompareFunction = .less
+        depthStateDescriptor.isDepthWriteEnabled = true
         guard let depthState = device.makeDepthStencilState(descriptor: depthStateDescriptor) else {
             throw SplatRendererError.failedToCreateDepthStencilState
         }
@@ -1571,6 +1647,8 @@ public class SplatRenderer {
         let multiStage = useMultiStagePipeline
         if multiStage {
             try buildMultiStagePipelineStatesIfNeeded()
+        } else if useDitheredTransparency {
+            try buildDitheredPipelineStatesIfNeeded()
         } else {
             try buildSingleStagePipelineStatesIfNeeded()
         }
@@ -1622,6 +1700,13 @@ public class SplatRenderer {
             renderEncoder.pushDebugGroup("Draw Splats")
             renderEncoder.setRenderPipelineState(drawSplatPipelineState)
             renderEncoder.setDepthStencilState(drawSplatDepthState)
+        } else if useDitheredTransparency {
+            guard let ditheredPipelineState, let ditheredDepthState
+            else { return }
+
+            renderEncoder.pushDebugGroup("Draw Splats (Dithered)")
+            renderEncoder.setRenderPipelineState(ditheredPipelineState)
+            renderEncoder.setDepthStencilState(ditheredDepthState)
         } else {
             guard let singleStagePipelineState
             else { return }

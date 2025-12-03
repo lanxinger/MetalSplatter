@@ -4,6 +4,9 @@
 constant uint DebugFlagOverdraw = 1u;
 constant uint DebugFlagLodTint = 2u;
 
+// Render mode flags (passed via uniforms.renderModeFlags)
+constant uint RenderModeDitheredTransparency = 1u;
+
 float3 calcCovariance2D(float3 viewPos,
                         packed_half3 cov3Da,
                         packed_half3 cov3Db,
@@ -46,4 +49,33 @@ inline half4 shadeSplat(FragmentIn in) {
     }
 
     return half4(alpha * rgb, alpha);
+}
+
+// Stochastic (dithered) transparency shading.
+// Instead of alpha blending, uses a screen-space hash to stochastically accept/reject fragments.
+// This enables order-independent transparency - no sorting required.
+// Best used with TAA (temporal anti-aliasing) to reduce noise.
+inline half4 shadeSplatDithered(FragmentIn in, float2 screenPos) {
+    half alpha = splatFragmentAlpha(in.relativePosition, in.color.a);
+    half3 rgb = in.color.rgb;
+
+    if ((in.debugFlags & DebugFlagLodTint) != 0) {
+        rgb = lodTintForBand(in.lodBand);
+    }
+    if ((in.debugFlags & DebugFlagOverdraw) != 0) {
+        half intensity = clamp(alpha + 0.05h, 0.05h, 1.0h);
+        rgb = half3(intensity);
+    }
+
+    // Screen-space hash for stochastic test
+    // Uses a simple but effective hash function for temporal stability
+    float hash = fract(sin(dot(screenPos, float2(12.9898, 78.233))) * 43758.5453);
+
+    // Stochastic alpha test: discard if alpha < random threshold
+    if (float(alpha) < hash) {
+        discard_fragment();
+    }
+
+    // Output opaque fragment (no blending needed)
+    return half4(rgb, 1.0h);
 }

@@ -32,3 +32,10 @@ vertex FragmentIn singleStageSplatVertexShader(uint vertexID [[vertex_id]],
 fragment half4 singleStageSplatFragmentShader(FragmentIn in [[stage_in]]) {
     return shadeSplat(in);
 }
+
+// Dithered (stochastic) transparency fragment shader.
+// Uses order-independent transparency via stochastic alpha testing.
+// No sorting required - best paired with TAA for noise reduction.
+fragment half4 singleStageSplatFragmentShaderDithered(FragmentIn in [[stage_in]]) {
+    return shadeSplatDithered(in, in.position.xy);
+}

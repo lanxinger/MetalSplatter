@@ -22,6 +22,7 @@ struct MetalKitSceneView: View {
     @State private var showDebugAABB = false // Debug: visualize GPU-computed bounds
     @State private var frustumCullingEnabled = false // GPU frustum culling
     @State private var meshShaderEnabled = true // Metal 3+ mesh shader rendering - enabled by default
+    @State private var ditheredTransparencyEnabled = false // Stochastic transparency - disabled by default
     
     var body: some View {
         ZStack {
@@ -32,7 +33,8 @@ struct MetalKitSceneView: View {
                 metal4BindlessEnabled: $metal4BindlessEnabled,
                 showDebugAABB: $showDebugAABB,
                 frustumCullingEnabled: $frustumCullingEnabled,
-                meshShaderEnabled: $meshShaderEnabled
+                meshShaderEnabled: $meshShaderEnabled,
+                ditheredTransparencyEnabled: $ditheredTransparencyEnabled
             )
             .ignoresSafeArea()
             
@@ -149,9 +151,22 @@ struct MetalKitSceneView: View {
                                         .foregroundColor(.secondary)
                                 }
                             }
-                            
+
                             Divider()
-                            
+
+                            // Dithered Transparency Toggle
+                            Toggle(isOn: $ditheredTransparencyEnabled) {
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text("Dithered Transparency")
+                                        .font(.subheadline)
+                                    Text("Order-independent, no sorting needed (best with TAA)")
+                                        .font(.caption)
+                                        .foregroundColor(.secondary)
+                                }
+                            }
+
+                            Divider()
+
                             // Mesh Shader Toggle (Metal 3+)
                             Toggle(isOn: $meshShaderEnabled) {
                                 VStack(alignment: .leading, spacing: 2) {
@@ -261,6 +276,7 @@ struct MetalKitRendererView: ViewRepresentable {
     @Binding var showDebugAABB: Bool
     @Binding var frustumCullingEnabled: Bool
     @Binding var meshShaderEnabled: Bool
+    @Binding var ditheredTransparencyEnabled: Bool
 
     class Coordinator: NSObject {
         var renderer: MetalKitSceneRenderer?
@@ -283,6 +299,7 @@ struct MetalKitRendererView: ViewRepresentable {
             renderer?.setDebugAABB(parent.showDebugAABB)
             renderer?.setFrustumCulling(parent.frustumCullingEnabled)
             renderer?.setMeshShader(parent.meshShaderEnabled)
+            renderer?.setDitheredTransparency(parent.ditheredTransparencyEnabled)
         }
     }
 
@@ -325,6 +342,7 @@ struct MetalKitRendererView: ViewRepresentable {
         renderer?.setDebugAABB(showDebugAABB)
         renderer?.setFrustumCulling(frustumCullingEnabled)
         renderer?.setMeshShader(meshShaderEnabled)
+        renderer?.setDitheredTransparency(ditheredTransparencyEnabled)
 
         // --- Interactivity: Pan (rotation) and Pinch (zoom) ---
         #if os(iOS)

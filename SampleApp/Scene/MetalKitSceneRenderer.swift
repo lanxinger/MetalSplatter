@@ -482,6 +482,27 @@ class MetalKitSceneRenderer: NSObject, MTKViewDelegate {
         #endif
     }
 
+    /// Enable or disable dithered (stochastic) transparency
+    /// When enabled, uses order-independent transparency via stochastic alpha testing
+    /// Best paired with TAA for noise reduction - eliminates need for depth sorting
+    func setDitheredTransparency(_ enabled: Bool) {
+        if let splat = modelRenderer as? SplatRenderer {
+            splat.useDitheredTransparency = enabled
+            if enabled {
+                Self.log.info("Dithered transparency enabled - order-independent, no sorting needed")
+            } else {
+                Self.log.info("Dithered transparency disabled - using sorted alpha blending")
+            }
+        }
+
+        // Request redraw
+        #if os(macOS)
+        metalKitView.setNeedsDisplay(metalKitView.bounds)
+        #else
+        metalKitView.setNeedsDisplay()
+        #endif
+    }
+
     // MARK: - User Interaction API
     #if os(iOS)
     
