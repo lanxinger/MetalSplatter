@@ -9,7 +9,7 @@ struct FastSHParams {
     uint coeffsPerEntry;
     uint paletteSize;
     uint degree;
-    uint padding;
+    uint skipSHEvaluation; // When non-zero, skip SH evaluation and use base color only
 };
 
 // Extended Splat structure for SH support
@@ -49,6 +49,13 @@ Splat evaluateSplatWithSH(SplatSH splatSH,
     splat.covA = splatSH.covA;
     splat.covB = splatSH.covB;
 
+    // Skip SH evaluation if flag is set (camera hasn't moved enough to warrant update)
+    // This reuses cached base colors from previous evaluation
+    if (params.skipSHEvaluation != 0) {
+        splat.color = splatSH.baseColor;
+        return splat;
+    }
+
     const uint invalidIndex = 0xffffffffu;
     bool hasSH = (splatSH.shDegree > 0) &&
                  (params.coeffsPerEntry > 0) &&
@@ -58,15 +65,15 @@ Splat evaluateSplatWithSH(SplatSH splatSH,
     if (hasSH) {
         device const float3* coeffs = shPalette + params.coeffsPerEntry * splatSH.shPaletteIndex;
 
-    float3 worldPosition = float3(splatSH.position);
-    float3 cameraPosition = cameraWorldPosition(uniforms.viewMatrix);
-    float3 viewDirection = normalize(cameraPosition - worldPosition);
+        float3 worldPosition = float3(splatSH.position);
+        float3 cameraPosition = cameraWorldPosition(uniforms.viewMatrix);
+        float3 viewDirection = normalize(cameraPosition - worldPosition);
 
-    // Rotate view direction into the Gaussian's local frame
-    float4 q = splatSH.rotation;
-    float4 qConjugate = float4(-q.xyz, q.w);
+        // Rotate view direction into the Gaussian's local frame
+        float4 q = splatSH.rotation;
+        float4 qConjugate = float4(-q.xyz, q.w);
 
-    float3 localDirection = normalize(rotateVectorByQuaternion(qConjugate, viewDirection));
+        float3 localDirection = normalize(rotateVectorByQuaternion(qConjugate, viewDirection));
 
         float4 shColor = evaluateSH(localDirection, coeffs, params.degree);
         float3 rgb = shColor.rgb;

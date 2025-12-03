@@ -321,6 +321,26 @@ public class SplatRenderer {
     public var sortDirectionEpsilon: Float = 0.0001  // ~0.5-1° rotation (reduced from 0.001 to fix flickering during rotation)
     public var minimumSortInterval: TimeInterval = 0
 
+    // MARK: - Spherical Harmonics Update Thresholds
+
+    /// Direction change threshold for SH re-evaluation (in dot product units).
+    /// SH is only re-evaluated when (1 - dot(lastDir, currentDir)) > this threshold.
+    /// Default 0.001 (~2.5° rotation) balances visual quality vs. computation.
+    /// Set to 0 to update every frame; larger values reduce updates but may show lighting lag.
+    public var shDirectionEpsilon: Float = 0.001
+
+    /// Minimum interval between SH updates (seconds). Set to 0 for no limit.
+    public var minimumSHUpdateInterval: TimeInterval = 0
+
+    /// Last camera direction used for SH evaluation (for threshold comparison)
+    internal var lastSHCameraDirection: SIMD3<Float>?
+
+    /// Last time SH was updated
+    internal var lastSHUpdateTime: CFAbsoluteTime = 0
+
+    /// Flag indicating SH needs update due to data change
+    internal var shDirtyDueToData: Bool = true
+
     // MARK: - Interaction Mode (Adaptive Quality)
     
     /// When true, sort parameters are relaxed for smoother interaction (less popping)
@@ -1445,6 +1465,34 @@ public class SplatRenderer {
         let positionDelta = simd_distance(sortCameraPosition, lastPos)
         let forwardDelta = 1 - simd_dot(simd_normalize(sortCameraForward), simd_normalize(lastFwd))
         return positionDelta > sortPositionEpsilon || forwardDelta > sortDirectionEpsilon
+    }
+
+    /// Determines whether spherical harmonics should be re-evaluated based on camera direction change.
+    /// Returns true if SH evaluation is needed, false if cached values can be reused.
+    internal func shouldUpdateSHForCurrentCamera() -> Bool {
+        if shDirtyDueToData {
+            return true
+        }
+
+        let now = CFAbsoluteTimeGetCurrent()
+        if minimumSHUpdateInterval > 0 && (now - lastSHUpdateTime) < minimumSHUpdateInterval {
+            return false
+        }
+
+        guard let lastDir = lastSHCameraDirection else {
+            return true
+        }
+
+        let directionDelta = 1 - simd_dot(simd_normalize(cameraWorldForward), simd_normalize(lastDir))
+        return directionDelta > shDirectionEpsilon
+    }
+
+    /// Marks that SH evaluation has completed for the current camera direction.
+    /// Call this after performing SH evaluation to update the cached state.
+    internal func didUpdateSHForCurrentCamera() {
+        lastSHCameraDirection = cameraWorldForward
+        lastSHUpdateTime = CFAbsoluteTimeGetCurrent()
+        shDirtyDueToData = false
     }
 
     internal func updateUniforms(forViewports viewports: [ViewportDescriptor],

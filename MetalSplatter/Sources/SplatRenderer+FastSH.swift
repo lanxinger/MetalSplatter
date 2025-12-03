@@ -60,13 +60,15 @@ public class FastSHSplatRenderer: SplatRenderer {
     public struct FastSHConfiguration {
         /// Enable fast SH evaluation (vs per-splat evaluation)
         public var enabled: Bool = true
-        
+
         /// Maximum number of unique SH coefficient sets (palette size)
         public var maxPaletteSize: Int = 65536
-        
+
         /// Update SH evaluation every N frames (1 = every frame)
+        /// Note: This is superseded by shDirectionEpsilon threshold-based updates.
+        @available(*, deprecated, message: "Use shDirectionEpsilon for threshold-based updates instead")
         public var updateFrequency: Int = 1
-        
+
         public init() {}
     }
     
@@ -90,7 +92,7 @@ public class FastSHSplatRenderer: SplatRenderer {
         var coeffsPerEntry: UInt32 = 0
         var paletteSize: UInt32 = 0
         var degree: UInt32 = 0
-        var padding: UInt32 = 0
+        var skipSHEvaluation: UInt32 = 0  // When non-zero, skip SH evaluation and use base color
     }
 
     private var shaderParameters = FastSHShaderParameters()
@@ -246,7 +248,7 @@ public class FastSHSplatRenderer: SplatRenderer {
                 coeffsPerEntry: UInt32(coeffsPerEntry),
                 paletteSize: UInt32(uniqueSHSets.count),
                 degree: UInt32(shDegree),
-                padding: 0
+                skipSHEvaluation: 0
             )
         }
         else {
@@ -255,7 +257,10 @@ public class FastSHSplatRenderer: SplatRenderer {
             shCoefficientsPerEntry = 0
             shaderParameters = FastSHShaderParameters()
         }
-        
+
+        // Mark SH as dirty so it gets evaluated on first render
+        shDirtyDueToData = true
+
         // Create extended splat buffer with SH info
         try ensureSHBufferCapacity(splats.count)
         
@@ -352,50 +357,60 @@ extension FastSHSplatRenderer {
                                  renderTargetArrayLength: Int,
                                  commandBuffer: MTLCommandBuffer,
                                  pipelineState: MTLRenderPipelineState) throws {
-        
+
         // Create render pass descriptor
         let renderPassDescriptor = MTLRenderPassDescriptor()
         renderPassDescriptor.colorAttachments[0].texture = colorTexture
         renderPassDescriptor.colorAttachments[0].loadAction = .clear
         renderPassDescriptor.colorAttachments[0].storeAction = colorStoreAction
         renderPassDescriptor.colorAttachments[0].clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 0)
-        
+
         if let depthTexture = depthTexture {
             renderPassDescriptor.depthAttachment.texture = depthTexture
             renderPassDescriptor.depthAttachment.loadAction = .clear
             renderPassDescriptor.depthAttachment.storeAction = .store
             renderPassDescriptor.depthAttachment.clearDepth = 1.0
         }
-        
+
         if let rateMap = rasterizationRateMap {
             renderPassDescriptor.rasterizationRateMap = rateMap
         }
-        
+
         renderPassDescriptor.renderTargetArrayLength = renderTargetArrayLength
-        
+
         guard let renderEncoder = commandBuffer.makeRenderCommandEncoder(descriptor: renderPassDescriptor) else {
             throw SplatRendererError.failedToCreateRenderPipelineState(label: "Fast SH Render Encoder", underlying: NSError(domain: "MetalSplatter", code: 1))
         }
-        
+
         renderEncoder.label = "Fast SH Splat Render"
         renderEncoder.setRenderPipelineState(pipelineState)
-        
+
         // Set buffers
         renderEncoder.setVertexBuffer(splatSHBuffer.buffer, offset: 0, index: BufferIndex.splat.rawValue)
         renderEncoder.setVertexBuffer(dynamicUniformBuffers, offset: uniformBufferOffset, index: BufferIndex.uniforms.rawValue)
-        
+
         // GPU-only sorting: pass sorted indices buffer to shader
         if let sortedIndices = sortedIndicesBuffer {
             renderEncoder.setVertexBuffer(sortedIndices.buffer, offset: 0, index: BufferIndex.sortedIndices.rawValue)
         }
-        
-        // Set SH palette data
+
+        // Check if SH needs re-evaluation based on camera movement threshold
+        let shouldUpdateSH = shouldUpdateSHForCurrentCamera()
+
+        // Set SH palette data with skip flag based on threshold
         if let paletteBuffer = shPaletteBuffer {
             renderEncoder.setVertexBuffer(paletteBuffer, offset: 0, index: 3)
             var params = shaderParameters
+            // Skip SH evaluation if camera hasn't moved enough
+            params.skipSHEvaluation = shouldUpdateSH ? 0 : 1
             renderEncoder.setVertexBytes(&params, length: MemoryLayout<FastSHShaderParameters>.stride, index: 4)
+
+            // Mark SH as updated if we evaluated this frame
+            if shouldUpdateSH {
+                didUpdateSHForCurrentCamera()
+            }
         }
-        
+
         // Set up viewports and draw
         for (viewportIndex, viewport) in viewports.prefix(maxViewCount).enumerated() {
             uniforms.pointee.setUniforms(index: viewportIndex, Uniforms(
@@ -408,11 +423,11 @@ extension FastSHSplatRenderer {
                 lodThresholds: lodThresholds
             ))
         }
-        
+
         // Draw splats
         let indexedCount = min(splatCount, Constants.maxIndexedSplatCount)
         let instanceCount = (splatCount + Constants.maxIndexedSplatCount - 1) / Constants.maxIndexedSplatCount
-        
+
         renderEncoder.drawIndexedPrimitives(
             type: .triangle,
             indexCount: indexBuffer.count,
@@ -423,7 +438,7 @@ extension FastSHSplatRenderer {
             baseVertex: 0,
             baseInstance: 0
         )
-        
+
         renderEncoder.endEncoding()
     }
 }
