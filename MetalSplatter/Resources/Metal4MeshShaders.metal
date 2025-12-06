@@ -12,14 +12,18 @@ struct MeshOutput {
     uint splat_id;
 };
 
+// Increased from 32 to 64 for better GPU occupancy.
+// Metal mesh shaders have max 256 vertices per output, with 4 vertices/splat = 64 max.
+constant constexpr uint MESHLET_SIZE = 64;
+
 struct ObjectPayload {
     uint visible_splat_count;
-    uint splat_indices[32]; // Max 32 splats per meshlet
+    uint splat_indices[64]; // Max 64 splats per meshlet (Metal limit: 256 vertices / 4 = 64)
 };
 
 // Object shader for splat culling and LOD
 [[user_annotation("metal4_object_shader_splats")]]
-[[max_total_threads_per_threadgroup(32)]]
+[[max_total_threads_per_threadgroup(MESHLET_SIZE)]]
 object void splatObjectShader(
     constant SplatArgumentBuffer &argumentBuffer [[buffer(0)]],
     constant Uniforms &uniforms [[buffer(1)]],
@@ -29,7 +33,7 @@ object void splatObjectShader(
 ) {
     uint meshlet_id = threadgroup_position_in_grid.x;
     uint thread_id = thread_position_in_threadgroup.x;
-    uint splats_per_meshlet = 32;
+    uint splats_per_meshlet = MESHLET_SIZE;
     uint splat_start = meshlet_id * splats_per_meshlet;
     uint splat_id = splat_start + thread_id;
     
@@ -74,13 +78,13 @@ object void splatObjectShader(
     // Add to visible list if passes all culling tests
     if (is_visible) {
         uint index = atomic_fetch_add_explicit(&payload.visible_splat_count, 1, memory_order_relaxed);
-        if (index < 32) {
+        if (index < MESHLET_SIZE) {
             payload.splat_indices[index] = splat_id;
         }
     }
-    
+
     // Generate meshlets based on visible splat count
-    uint num_meshlets = (payload.visible_splat_count + 31) / 32; // Round up
+    uint num_meshlets = (payload.visible_splat_count + MESHLET_SIZE - 1) / MESHLET_SIZE; // Round up
     mesh_grid_properties properties;
     properties.set_threadgroups_per_grid(uint3(num_meshlets, 1, 1));
     set_mesh_grid_properties(properties);
@@ -88,7 +92,7 @@ object void splatObjectShader(
 
 // Mesh shader for generating splat quads
 [[user_annotation("metal4_mesh_shader_splats")]]
-[[max_total_threads_per_threadgroup(32)]]
+[[max_total_threads_per_threadgroup(MESHLET_SIZE)]]
 [[max_total_threadgroups_per_mesh_grid(256)]]
 mesh void splatMeshShader(
     constant SplatArgumentBuffer &argumentBuffer [[buffer(0)]],
@@ -99,15 +103,15 @@ mesh void splatMeshShader(
     uint3 thread_position_in_threadgroup [[thread_position_in_threadgroup]]
 ) {
     uint thread_id = thread_position_in_threadgroup.x;
-    
+
     // Early exit if no visible splats
     if (payload.visible_splat_count == 0) {
         output_mesh.set_primitive_count(0);
         return;
     }
-    
+
     // Calculate number of primitives to generate
-    uint primitive_count = min(payload.visible_splat_count, 32u);
+    uint primitive_count = min(payload.visible_splat_count, (uint)MESHLET_SIZE);
     output_mesh.set_primitive_count(primitive_count);
     
     if (thread_id >= primitive_count) {

@@ -15,11 +15,15 @@ using namespace metal;
 // MARK: - Configuration
 // =============================================================================
 
-constant constexpr uint SPLATS_PER_MESHLET = 32;
+// Increased from 32 to 64 for better GPU occupancy and reduced dispatch overhead.
+// Metal mesh shaders have a max of 256 vertices per mesh output, so with 4 vertices
+// per splat, the maximum is 64 splats per meshlet (256/4 = 64).
+// PlayCanvas uses 128 splats per instance but WebGL has different constraints.
+constant constexpr uint SPLATS_PER_MESHLET = 64;
 constant constexpr uint VERTICES_PER_SPLAT = 4;
 constant constexpr uint TRIANGLES_PER_SPLAT = 2;
-constant constexpr uint MAX_VERTICES = SPLATS_PER_MESHLET * VERTICES_PER_SPLAT;    // 128
-constant constexpr uint MAX_PRIMITIVES = SPLATS_PER_MESHLET * TRIANGLES_PER_SPLAT; // 64
+constant constexpr uint MAX_VERTICES = SPLATS_PER_MESHLET * VERTICES_PER_SPLAT;    // 256 (Metal limit)
+constant constexpr uint MAX_PRIMITIVES = SPLATS_PER_MESHLET * TRIANGLES_PER_SPLAT; // 128
 constant constexpr uint MAX_MESH_THREADGROUPS = 256;
 
 // =============================================================================
@@ -188,7 +192,9 @@ void splatObjectShader(
     uint simdPrefixSum = simd_prefix_exclusive_sum(isVisibleUint);
     
     // Threadgroup memory to accumulate SIMD-group results
-    threadgroup uint simdGroupCounts[4];  // Max 4 SIMD-groups for 32 threads (SIMD width = 8-32)
+    // With 64 threads and SIMD width 32, we have 2 SIMD-groups
+    // (Max 4 SIMD-groups if SIMD width is 16 on some devices)
+    threadgroup uint simdGroupCounts[4];
     threadgroup uint simdGroupOffsets[4];
     
     // First lane of each SIMD-group writes its count

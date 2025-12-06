@@ -462,6 +462,15 @@ public class SplatRenderer {
     private var sortedIndicesBufferB: MetalBuffer<Int32>?
     private var usingSortedBufferA: Bool = true  // Which buffer is currently used for rendering
 
+    // O(n) Counting Sort - faster than MPS argSort for large splat counts
+    private var countingSorter: CountingSorter?
+
+    /// When true, uses O(n) counting sort instead of O(n log n) MPS argSort.
+    /// Counting sort is faster for large splat counts (>50K) and provides
+    /// sufficient depth precision (16-bit quantization) for visual correctness.
+    /// Set to false to use the traditional MPS-based radix sort.
+    public var useCountingSort: Bool = true
+
     public init(device: MTLDevice,
                 colorFormat: MTLPixelFormat,
                 depthFormat: MTLPixelFormat,
@@ -606,9 +615,17 @@ public class SplatRenderer {
 
         // Setup mesh shaders if supported (Metal 3+, Apple Silicon)
         setupMeshShaders()
-        
+
         // Setup Metal 4.0 optimizations if available
         setupMetal4Integration()
+
+        // Initialize O(n) counting sorter for faster sorting
+        do {
+            countingSorter = try CountingSorter(device: device, library: library)
+            Self.log.info("O(n) counting sort available")
+        } catch {
+            Self.log.warning("Failed to initialize counting sorter, using MPS fallback: \(error)")
+        }
     }
     
     /// Check if mesh shaders are supported and set up the pipeline
@@ -651,9 +668,9 @@ public class SplatRenderer {
             meshPipelineDescriptor.depthAttachmentPixelFormat = depthFormat
             meshPipelineDescriptor.rasterSampleCount = sampleCount
             
-            // Meshlet configuration: 32 splats per meshlet
-            meshPipelineDescriptor.maxTotalThreadsPerObjectThreadgroup = 32
-            meshPipelineDescriptor.maxTotalThreadsPerMeshThreadgroup = 32
+            // Meshlet configuration: 64 splats per meshlet (increased from 32, limited by Metal's 256 vertex max)
+            meshPipelineDescriptor.maxTotalThreadsPerObjectThreadgroup = 64
+            meshPipelineDescriptor.maxTotalThreadsPerMeshThreadgroup = 64
             
             // Create pipeline state
             let (pipelineState, _) = try device.makeRenderPipelineState(descriptor: meshPipelineDescriptor, options: [])
@@ -1663,13 +1680,13 @@ public class SplatRenderer {
             renderEncoder.setMeshBuffer(sortedIndices.buffer, offset: 0, index: BufferIndex.sortedIndices.rawValue)
             
             // Calculate number of meshlets needed
-            // Each meshlet handles 32 splats
-            let splatsPerMeshlet: Int = 32
+            // Each meshlet handles 64 splats (increased from 32, limited by Metal's 256 vertex max)
+            let splatsPerMeshlet: Int = 64
             let meshletCount = (splatCount + splatsPerMeshlet - 1) / splatsPerMeshlet
-            
+
             // Dispatch mesh shader grid
             // Object shader threadgroups = number of meshlets
-            // Each object threadgroup has 32 threads (one per potential splat)
+            // Each object threadgroup has 64 threads (one per potential splat)
             let objectThreadsPerGrid = MTLSize(width: splatsPerMeshlet, height: 1, depth: 1)
             let objectThreadgroupsPerGrid = MTLSize(width: meshletCount, height: 1, depth: 1)
             
@@ -1947,88 +1964,141 @@ public class SplatRenderer {
 
         if useGPU {
             Task(priority: .high) {
-//                let startTime = Date()
-
-                // Acquire sort buffers from pool (reused across frames for better performance)
-                let distanceBuffer: MetalBuffer<Float>
+                // Acquire index output buffer from pool
                 let indexOutputBuffer: MetalBuffer<Int32>
-
-                do {
-                    distanceBuffer = try sortDistanceBufferPool.acquire(minimumCapacity: splatCount)
-                    distanceBuffer.count = splatCount
-                } catch {
-                    Self.log.error("Failed to acquire distance buffer from pool: \(error)")
-                    self.sorting = false
-                    self.sortJobsInFlight -= 1
-                    return
-                }
 
                 do {
                     indexOutputBuffer = try sortIndexBufferPool.acquire(minimumCapacity: splatCount)
                     indexOutputBuffer.count = splatCount
                 } catch {
                     Self.log.error("Failed to acquire index output buffer from pool: \(error)")
-                    sortDistanceBufferPool.release(distanceBuffer)
                     self.sorting = false
                     self.sortJobsInFlight -= 1
                     return
                 }
 
-                // Create command buffer for distance computation using pooled manager
-                guard let commandBuffer = commandBufferManager.makeCommandBuffer() else {
-                    Self.log.error("Failed to create compute command buffer.")
+                // === O(n) COUNTING SORT PATH ===
+                // Uses histogram-based sorting which is faster than O(n log n) radix sort
+                if self.useCountingSort, let sorter = self.countingSorter {
+                    guard let commandBuffer = commandBufferManager.makeCommandBuffer() else {
+                        Self.log.error("Failed to create compute command buffer.")
+                        sortIndexBufferPool.release(indexOutputBuffer)
+                        self.sorting = false
+                        self.sortJobsInFlight -= 1
+                        return
+                    }
+
+                    // Compute depth bounds for proper bin distribution
+                    // For large scenes, this could be cached and updated incrementally
+                    let depthBounds: (min: Float, max: Float)?
+                    if let cached = self.cachedBounds {
+                        // Use cached AABB bounds as depth range estimate
+                        // This is an approximation but avoids per-frame bounds computation
+                        let cameraPos = cameraWorldPosition
+                        let minDist = simd_distance(cameraPos, cached.min)
+                        let maxDist = simd_distance(cameraPos, cached.max)
+                        depthBounds = (min(0.1, minDist * 0.5), max(maxDist * 1.5, 100.0))
+                    } else {
+                        depthBounds = nil  // Use default range
+                    }
+
+                    do {
+                        try sorter.sort(
+                            commandBuffer: commandBuffer,
+                            splatBuffer: splatBuffer.buffer,
+                            outputBuffer: indexOutputBuffer.buffer,
+                            cameraPosition: cameraWorldPosition,
+                            cameraForward: cameraWorldForward,
+                            sortByDistance: Constants.sortByDistance,
+                            splatCount: splatCount,
+                            depthBounds: depthBounds
+                        )
+                    } catch {
+                        Self.log.error("Counting sort failed: \(error)")
+                        sortIndexBufferPool.release(indexOutputBuffer)
+                        self.sorting = false
+                        self.sortJobsInFlight -= 1
+                        return
+                    }
+
+                    commandBuffer.commit()
+                    commandBuffer.waitUntilCompleted()
+
+                } else {
+                    // === LEGACY MPS ARGSORT PATH ===
+                    // Falls back to O(n log n) MPS-based radix sort
+
+                    let distanceBuffer: MetalBuffer<Float>
+                    do {
+                        distanceBuffer = try sortDistanceBufferPool.acquire(minimumCapacity: splatCount)
+                        distanceBuffer.count = splatCount
+                    } catch {
+                        Self.log.error("Failed to acquire distance buffer from pool: \(error)")
+                        sortIndexBufferPool.release(indexOutputBuffer)
+                        self.sorting = false
+                        self.sortJobsInFlight -= 1
+                        return
+                    }
+
+                    // Create command buffer for distance computation using pooled manager
+                    guard let commandBuffer = commandBufferManager.makeCommandBuffer() else {
+                        Self.log.error("Failed to create compute command buffer.")
+                        sortDistanceBufferPool.release(distanceBuffer)
+                        sortIndexBufferPool.release(indexOutputBuffer)
+                        self.sorting = false
+                        self.sortJobsInFlight -= 1
+                        return
+                    }
+
+                    // Standard distance computation
+                    guard let computeEncoder = commandBuffer.makeComputeCommandEncoder(),
+                          let computePipelineState = computeDistancesPipelineState else {
+                        Self.log.error("Failed to create compute encoder.")
+                        sortDistanceBufferPool.release(distanceBuffer)
+                        sortIndexBufferPool.release(indexOutputBuffer)
+                        self.sorting = false
+                        self.sortJobsInFlight -= 1
+                        return
+                    }
+
+                    // Set up compute shader parameters
+                    var cameraPos = cameraWorldPosition
+                    var cameraFwd = cameraWorldForward
+                    var sortByDist = Constants.sortByDistance
+                    var count = UInt32(splatCount)
+
+                    computeEncoder.setComputePipelineState(computePipelineState)
+                    computeEncoder.setBuffer(splatBuffer.buffer, offset: 0, index: 0)
+                    computeEncoder.setBuffer(distanceBuffer.buffer, offset: 0, index: 1)
+                    computeEncoder.setBytes(&cameraPos, length: MemoryLayout<SIMD3<Float>>.size, index: 2)
+                    computeEncoder.setBytes(&cameraFwd, length: MemoryLayout<SIMD3<Float>>.size, index: 3)
+                    computeEncoder.setBytes(&sortByDist, length: MemoryLayout<Bool>.size, index: 4)
+                    computeEncoder.setBytes(&count, length: MemoryLayout<UInt32>.size, index: 5)
+
+                    let threadsPerThreadgroup = MTLSize(width: 256, height: 1, depth: 1)
+                    let threadgroups = MTLSize(width: (splatCount + 255) / 256, height: 1, depth: 1)
+
+                    computeEncoder.dispatchThreadgroups(threadgroups, threadsPerThreadgroup: threadsPerThreadgroup)
+                    computeEncoder.endEncoding()
+
+                    // === ASYNC COMPUTE OVERLAP ===
+                    // Use separate compute queue so sorting doesn't block rendering
+                    let sortQueue = self.computeCommandBufferManager?.queue ?? commandBufferManager.queue
+
+                    // Commit distance computation and wait (needed before argsort)
+                    commandBuffer.commit()
+                    commandBuffer.waitUntilCompleted()
+
+                    // Run argsort on the compute queue (may overlap with next frame's render)
+                    let argSort = MPSArgSort(dataType: .float32, descending: true)
+                    argSort(commandQueue: sortQueue,
+                            input: distanceBuffer.buffer,
+                            output: indexOutputBuffer.buffer,
+                            count: splatCount)
+
+                    // Release distance buffer (only used by MPS path)
                     sortDistanceBufferPool.release(distanceBuffer)
-                    sortIndexBufferPool.release(indexOutputBuffer)
-                    self.sorting = false
-                    self.sortJobsInFlight -= 1
-                    return
                 }
-
-                // Standard distance computation
-                guard let computeEncoder = commandBuffer.makeComputeCommandEncoder(),
-                      let computePipelineState = computeDistancesPipelineState else {
-                    Self.log.error("Failed to create compute encoder.")
-                    sortDistanceBufferPool.release(distanceBuffer)
-                    sortIndexBufferPool.release(indexOutputBuffer)
-                    self.sorting = false
-                    self.sortJobsInFlight -= 1
-                    return
-                }
-
-                // Set up compute shader parameters
-                var cameraPos = cameraWorldPosition
-                var cameraFwd = cameraWorldForward
-                var sortByDist = Constants.sortByDistance
-                var count = UInt32(splatCount)
-
-                computeEncoder.setComputePipelineState(computePipelineState)
-                computeEncoder.setBuffer(splatBuffer.buffer, offset: 0, index: 0)
-                computeEncoder.setBuffer(distanceBuffer.buffer, offset: 0, index: 1)
-                computeEncoder.setBytes(&cameraPos, length: MemoryLayout<SIMD3<Float>>.size, index: 2)
-                computeEncoder.setBytes(&cameraFwd, length: MemoryLayout<SIMD3<Float>>.size, index: 3)
-                computeEncoder.setBytes(&sortByDist, length: MemoryLayout<Bool>.size, index: 4)
-                computeEncoder.setBytes(&count, length: MemoryLayout<UInt32>.size, index: 5)
-
-                let threadsPerThreadgroup = MTLSize(width: 256, height: 1, depth: 1)
-                let threadgroups = MTLSize(width: (splatCount + 255) / 256, height: 1, depth: 1)
-
-                computeEncoder.dispatchThreadgroups(threadgroups, threadsPerThreadgroup: threadsPerThreadgroup)
-                computeEncoder.endEncoding()
-
-                // === ASYNC COMPUTE OVERLAP ===
-                // Use separate compute queue so sorting doesn't block rendering
-                let sortQueue = self.computeCommandBufferManager?.queue ?? commandBufferManager.queue
-                
-                // Commit distance computation and wait (needed before argsort)
-                commandBuffer.commit()
-                commandBuffer.waitUntilCompleted()
-
-                // Run argsort on the compute queue (may overlap with next frame's render)
-                let argSort = MPSArgSort(dataType: .float32, descending: true)
-                argSort(commandQueue: sortQueue,
-                        input: distanceBuffer.buffer,
-                        output: indexOutputBuffer.buffer,
-                        count: splatCount)
 
                 // GPU-ONLY SORTING with double-buffering for async overlap
                 // Swap buffers atomically - rendering continues with old buffer
@@ -2054,12 +2124,9 @@ public class SplatRenderer {
                 self.usingSortedBufferA = !self.usingSortedBufferA
                 
                 // Update the main sortedIndicesBuffer pointer for compatibility
-                self.sortedIndicesBuffer = self.usingSortedBufferA 
-                    ? self.sortedIndicesBufferA 
+                self.sortedIndicesBuffer = self.usingSortedBufferA
+                    ? self.sortedIndicesBufferA
                     : self.sortedIndicesBufferB
-                
-                // Release distance buffer
-                sortDistanceBufferPool.release(distanceBuffer)
 
                 let elapsed = CFAbsoluteTimeGetCurrent() - sortStartTime
                 self.lastSortDuration = elapsed

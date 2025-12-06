@@ -162,27 +162,26 @@ class MetalKitSceneRenderer: NSObject, MTKViewDelegate {
             if let fastRenderer = splat as? FastSHSplatRenderer {
                 // Apply settings from FastSHSettings object
                 fastRenderer.fastSHConfig.enabled = fastSHSettings.enabled
-                fastRenderer.fastSHConfig.updateFrequency = fastSHSettings.updateFrequency
                 fastRenderer.fastSHConfig.maxPaletteSize = fastSHSettings.maxPaletteSize
-                
+                // Note: updateFrequency is deprecated; use shDirectionEpsilon for threshold-based updates
+
                 // Analyze model and update settings
                 let splatCount = fastRenderer.splatCount
                 let uniqueShSets = fastRenderer.shCoefficients.count
                 let shDegree = fastRenderer.shDegree
-                
+
                 await MainActor.run {
                     fastSHSettings.analyzeAndConfigure(
                         splatCount: splatCount,
-                        uniqueShSets: uniqueShSets, 
+                        uniqueShSets: uniqueShSets,
                         shDegree: shDegree
                     )
                 }
-                
+
                 // Apply any updated settings back to renderer
                 fastRenderer.fastSHConfig.enabled = fastSHSettings.enabled
-                fastRenderer.fastSHConfig.updateFrequency = fastSHSettings.updateFrequency
                 fastRenderer.fastSHConfig.maxPaletteSize = fastSHSettings.maxPaletteSize
-                
+
                 print("Fast SH configured for \(url.lastPathComponent): enabled=\(fastSHSettings.enabled), palette=\(uniqueShSets), degree=\(shDegree)")
             }
             
