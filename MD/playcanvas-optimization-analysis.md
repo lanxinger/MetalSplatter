@@ -37,9 +37,9 @@ PlayCanvas has a mature, web-optimized Gaussian splatting implementation. While 
 | **Morton Order Layout** | ✅ | ✅ | High | **IMPLEMENTED** |
 | **Counting Sort** | ✅ | ❌ | Medium | Pending |
 | **Octree LOD Streaming** | ✅ | ❌ | High | Pending |
-| **Stochastic Transparency** | ✅ | ❌ | Medium | Pending |
+| **Stochastic Transparency** | ✅ | ✅ | Medium | **IMPLEMENTED** |
 | **Work Buffer Atlas** | ✅ | ❌ | Medium | Pending |
-| **SH Update Thresholds** | ✅ | Partial | Low | Pending |
+| **SH Update Thresholds** | ✅ | ✅ | Low | **IMPLEMENTED** |
 
 ---
 
@@ -221,60 +221,65 @@ func updateVisibleNodes(camera: Camera) {
 
 ---
 
-### 4. Stochastic Transparency (Dithering)
+### 4. Stochastic Transparency (Dithering) ✅ IMPLEMENTED
 
 **Priority:** Medium
 **Effort:** Low
 **Impact:** Order-independent transparency option
+**Status:** **COMPLETED** (2025-12-02)
 
 #### Description
 
 PlayCanvas offers dithered/stochastic transparency as an alternative to sorted alpha blending. This eliminates the need for depth sorting entirely for certain use cases.
 
-#### PlayCanvas Implementation
+#### MetalSplatter Implementation
 
-Location: `src/scene/gsplat/gsplat-material.js`
+**Files added/modified:**
+- `MetalSplatter/Resources/SplatProcessing.h` - Added `shadeSplatDithered()` inline function
+- `MetalSplatter/Resources/SingleStageRenderPath.metal` - Added `singleStageSplatFragmentShaderDithered` fragment shader
+- `MetalSplatter/Sources/SplatRenderer.swift` - Added `useDitheredTransparency` option, dithered pipeline state
 
-```javascript
-// Blend mode switches based on dithering
-if (ditherEnum !== DITHER_NONE) {
-    material.blendType = BLEND_NONE;
-    material.depthWrite = true;
-} else {
-    material.blendType = BLEND_PREMULTIPLIED;
-}
+**Usage:**
+
+```swift
+// Enable dithered (stochastic) transparency
+renderer.useDitheredTransparency = true
+
+// Benefits:
+// - No sorting overhead - significant performance improvement
+// - Order-independent - no popping artifacts from sort order changes
+// - Better for VR where sorting latency is problematic
+
+// Trade-offs:
+// - Produces noise/stippling pattern (best paired with TAA)
+// - May look grainy without temporal anti-aliasing
+// - Different visual aesthetic than smooth alpha blending
 ```
-
-#### Proposed MetalSplatter Implementation
-
-**Files to modify:**
-- `MetalSplatter/Resources/SingleStageRenderPath.metal`
-- `MetalSplatter/Sources/SplatRenderer.swift` - Add `useDitheredTransparency` option
 
 **Shader Implementation:**
 ```metal
-fragment half4 singleStageSplatFragmentShader_Dithered(
-    SplatVertexOut in [[stage_in]],
-    uint sampleIndex [[sample_id]]
-) {
-    float alpha = computeGaussianAlpha(in);
+// Screen-space hash for stochastic test
+float hash = fract(sin(dot(screenPos, float2(12.9898, 78.233))) * 43758.5453);
 
-    // Stochastic test using screen-space hash
-    float2 screenPos = in.position.xy;
-    float hash = fract(sin(dot(screenPos, float2(12.9898, 78.233))) * 43758.5453);
-
-    if (alpha < hash) {
-        discard_fragment();
-    }
-
-    return half4(in.color.rgb, 1.0);
+// Stochastic alpha test: discard if alpha < random threshold
+if (float(alpha) < hash) {
+    discard_fragment();
 }
+
+// Output opaque fragment (no blending needed)
+return half4(rgb, 1.0h);
 ```
+
+**Pipeline Configuration:**
+- Blending: Disabled (fragments are opaque or discarded)
+- Depth test: Less (proper occlusion since order-independent)
+- Depth write: Enabled
 
 #### Use Cases
 - Scenes with TAA (temporal anti-aliasing)
 - VR applications where sorting latency is problematic
 - Artistic/stylized rendering
+- Performance-critical scenarios where sorting overhead is prohibitive
 
 ---
 
@@ -326,33 +331,50 @@ class SplatAtlas {
 
 ---
 
-### 6. Spherical Harmonics Update Thresholds
+### 6. Spherical Harmonics Update Thresholds ✅ IMPLEMENTED
 
 **Priority:** Low
 **Effort:** Low
 **Impact:** Minor performance improvement
+**Status:** **COMPLETED** (2025-12-03)
 
 #### Description
 
 PlayCanvas only re-evaluates spherical harmonics when camera movement exceeds a threshold, reducing computation for static or slowly-moving cameras.
 
-#### PlayCanvas Implementation
+#### MetalSplatter Implementation
 
-Location: `src/scene/gsplat-unified/gsplat-manager.js`
+**Files modified:**
+- `MetalSplatter/Sources/SplatRenderer.swift` - Added threshold properties and `shouldUpdateSHForCurrentCamera()` method
+- `MetalSplatter/Sources/SplatRenderer+FastSH.swift` - Integrated threshold check into render path
+- `MetalSplatter/Resources/FastSHRenderPath.metal` - Added `skipSHEvaluation` flag to skip per-splat SH computation
 
-```javascript
-// Only update SH when camera moves significantly
-if (cameraMovement > shUpdateThreshold) {
-    evaluateSphericalHarmonics();
-}
+**Usage:**
+
+```swift
+// Configure SH update thresholds (similar to sort thresholds)
+renderer.shDirectionEpsilon = 0.001    // ~2.5° rotation threshold (default)
+renderer.minimumSHUpdateInterval = 0   // No minimum interval (default)
+
+// For lower quality but better performance during interaction:
+renderer.shDirectionEpsilon = 0.01     // ~8° rotation threshold
 ```
 
-#### Proposed MetalSplatter Implementation
+**API:**
+- `SplatRenderer.shDirectionEpsilon` - Direction change threshold for SH re-evaluation (default: 0.001, ~2.5° rotation)
+- `SplatRenderer.minimumSHUpdateInterval` - Minimum time between SH updates in seconds (default: 0)
+- `SplatRenderer.shouldUpdateSHForCurrentCamera()` - Returns true if SH needs re-evaluation
+- `SplatRenderer.didUpdateSHForCurrentCamera()` - Called after SH evaluation to update cache
 
-MetalSplatter already has similar thresholds for sorting (`sortPositionEpsilon`, `sortDirectionEpsilon`). Consider adding specific SH evaluation thresholds.
+**How it works:**
+1. When rendering with FastSH, the system checks if camera direction has changed beyond `shDirectionEpsilon`
+2. If threshold not exceeded, shader receives `skipSHEvaluation = 1` and uses cached base colors
+3. If threshold exceeded, shader performs full SH evaluation and cache is updated
 
-**Files to modify:**
-- `MetalSplatter/Sources/SplatRenderer.swift`
+#### Expected Benefits
+- Reduced GPU computation when camera is stationary or moving slowly
+- Maintains visual quality while skipping redundant SH calculations
+- Configurable trade-off between visual fidelity and performance
 
 ---
 
@@ -361,8 +383,8 @@ MetalSplatter already has similar thresholds for sorting (`sortPositionEpsilon`,
 ### Phase 1: Quick Wins (1-2 weeks)
 
 - [x] **Morton Order Layout** - ✅ COMPLETED (2025-12-02)
-- [ ] **Stochastic Transparency** - Add dithering option to fragment shader
-- [ ] **SH Update Thresholds** - Add camera movement checks
+- [x] **Stochastic Transparency** - ✅ COMPLETED (2025-12-02)
+- [x] **SH Update Thresholds** - ✅ COMPLETED (2025-12-03)
 
 ### Phase 2: Core Optimizations (2-4 weeks)
 
@@ -438,3 +460,5 @@ MetalSplatter already has similar thresholds for sorting (`sortPositionEpsilon`,
 |------|--------|
 | 2025-12-02 | Initial analysis document created |
 | 2025-12-02 | **Morton Order Layout IMPLEMENTED** - Added `MortonOrder.swift`, GPU kernel, SplatRenderer integration, and unit tests |
+| 2025-12-02 | **Stochastic Transparency IMPLEMENTED** - Added `useDitheredTransparency` option, dithered fragment shader, order-independent transparency pipeline |
+| 2025-12-03 | **SH Update Thresholds IMPLEMENTED** - Added `shDirectionEpsilon` and `minimumSHUpdateInterval` properties, `shouldUpdateSHForCurrentCamera()` method, shader skip flag for camera-movement-based SH caching |
