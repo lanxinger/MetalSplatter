@@ -281,79 +281,82 @@ void splatMeshShader(
     meshDecomposeCovariance(cov2D, axis1, axis2);
     
     float4 projectedCenter = uniforms.projectionMatrix * float4(viewPos, 1.0f);
-    
-    half2 screenSizeFloat = half2(uniforms.screenSize);
-    half2 axis1Half = half2(axis1);
-    half2 axis2Half = half2(axis2);
-    
+
+    // Pre-compute scale factor ONCE (saves 3 divisions per splat)
+    // scaleFactor = (2 * kBoundsRadius) / screenSize
+    half2 scaleFactor = (2.0h * kBoundsRadius) / half2(uniforms.screenSize);
+
+    // Pre-scale axes by the scale factor to avoid per-vertex division
+    half2 scaledAxis1 = half2(axis1) * scaleFactor;
+    half2 scaledAxis2 = half2(axis2) * scaleFactor;
+
+    // Pre-compute common vertex attributes
+    half4 splatColor = splat.color;
+    uint debugFlags = uniforms.debugFlags;
+    float projW = projectedCenter.w;
+
     uint vertexBase = threadIndex * VERTICES_PER_SPLAT;
-    
+
     // Generate 4 vertices for this splat's quad (unrolled)
+    // Each vertex now uses pre-scaled axes - just multiply, no division
+
     // Vertex 0: bottom-left (-1, -1)
     {
-        half2 relCoord = half2(-1, -1);
-        half2 axisContrib = relCoord.x * axis1Half + relCoord.y * axis2Half;
-        half2 screenDelta = axisContrib * (2.0h * kBoundsRadius) / screenSizeFloat;
-        
+        half2 screenDelta = -scaledAxis1 - scaledAxis2;  // (-1) * axis1 + (-1) * axis2
+
         MeshVertexOutput v0;
-        v0.position = float4(projectedCenter.x + float(screenDelta.x) * projectedCenter.w,
-                             projectedCenter.y + float(screenDelta.y) * projectedCenter.w,
-                             projectedCenter.z, projectedCenter.w);
-        v0.relativePosition = kBoundsRadius * relCoord;
-        v0.color = splat.color;
+        v0.position = float4(projectedCenter.x + float(screenDelta.x) * projW,
+                             projectedCenter.y + float(screenDelta.y) * projW,
+                             projectedCenter.z, projW);
+        v0.relativePosition = half2(-kBoundsRadius, -kBoundsRadius);
+        v0.color = splatColor;
         v0.lodBand = half(0);
-        v0.debugFlags = uniforms.debugFlags;
+        v0.debugFlags = debugFlags;
         outputMesh.set_vertex(vertexBase + 0, v0);
     }
-    
+
     // Vertex 1: top-left (-1, 1)
     {
-        half2 relCoord = half2(-1, 1);
-        half2 axisContrib = relCoord.x * axis1Half + relCoord.y * axis2Half;
-        half2 screenDelta = axisContrib * (2.0h * kBoundsRadius) / screenSizeFloat;
-        
+        half2 screenDelta = -scaledAxis1 + scaledAxis2;  // (-1) * axis1 + (1) * axis2
+
         MeshVertexOutput v1;
-        v1.position = float4(projectedCenter.x + float(screenDelta.x) * projectedCenter.w,
-                             projectedCenter.y + float(screenDelta.y) * projectedCenter.w,
-                             projectedCenter.z, projectedCenter.w);
-        v1.relativePosition = kBoundsRadius * relCoord;
-        v1.color = splat.color;
+        v1.position = float4(projectedCenter.x + float(screenDelta.x) * projW,
+                             projectedCenter.y + float(screenDelta.y) * projW,
+                             projectedCenter.z, projW);
+        v1.relativePosition = half2(-kBoundsRadius, kBoundsRadius);
+        v1.color = splatColor;
         v1.lodBand = half(0);
-        v1.debugFlags = uniforms.debugFlags;
+        v1.debugFlags = debugFlags;
         outputMesh.set_vertex(vertexBase + 1, v1);
     }
-    
+
     // Vertex 2: bottom-right (1, -1)
     {
-        half2 relCoord = half2(1, -1);
-        half2 axisContrib = relCoord.x * axis1Half + relCoord.y * axis2Half;
-        half2 screenDelta = axisContrib * (2.0h * kBoundsRadius) / screenSizeFloat;
-        
+        half2 screenDelta = scaledAxis1 - scaledAxis2;  // (1) * axis1 + (-1) * axis2
+
         MeshVertexOutput v2;
-        v2.position = float4(projectedCenter.x + float(screenDelta.x) * projectedCenter.w,
-                             projectedCenter.y + float(screenDelta.y) * projectedCenter.w,
-                             projectedCenter.z, projectedCenter.w);
-        v2.relativePosition = kBoundsRadius * relCoord;
-        v2.color = splat.color;
+        v2.position = float4(projectedCenter.x + float(screenDelta.x) * projW,
+                             projectedCenter.y + float(screenDelta.y) * projW,
+                             projectedCenter.z, projW);
+        v2.relativePosition = half2(kBoundsRadius, -kBoundsRadius);
+        v2.color = splatColor;
         v2.lodBand = half(0);
-        v2.debugFlags = uniforms.debugFlags;
+        v2.debugFlags = debugFlags;
         outputMesh.set_vertex(vertexBase + 2, v2);
     }
-    
+
     // Vertex 3: top-right (1, 1)
     {
-        half2 relCoord = half2(1, 1);
-        half2 axisContrib = relCoord.x * axis1Half + relCoord.y * axis2Half;
-        half2 screenDelta = axisContrib * (2.0h * kBoundsRadius) / screenSizeFloat;
-        
+        half2 screenDelta = scaledAxis1 + scaledAxis2;  // (1) * axis1 + (1) * axis2
+
         MeshVertexOutput v3;
-        v3.position = float4(projectedCenter.x + float(screenDelta.x) * projectedCenter.w,
-                             projectedCenter.y + float(screenDelta.y) * projectedCenter.w,
-                             projectedCenter.z, projectedCenter.w);
-        v3.relativePosition = kBoundsRadius * relCoord;
-        v3.color = splat.color;
+        v3.position = float4(projectedCenter.x + float(screenDelta.x) * projW,
+                             projectedCenter.y + float(screenDelta.y) * projW,
+                             projectedCenter.z, projW);
+        v3.relativePosition = half2(kBoundsRadius, kBoundsRadius);
+        v3.color = splatColor;
         v3.lodBand = half(0);
-        v3.debugFlags = uniforms.debugFlags;
+        v3.debugFlags = debugFlags;
         outputMesh.set_vertex(vertexBase + 3, v3);
     }
     

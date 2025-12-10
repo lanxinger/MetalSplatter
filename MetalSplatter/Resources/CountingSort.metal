@@ -20,8 +20,9 @@ struct CountingSortParams {
     uint binCount;        // Number of bins to use (can be less than max for small scenes)
 };
 
-// Pass 1: Compute histogram of depth values
+// Pass 1: Compute histogram of depth values AND cache bin indices
 // Each thread processes multiple splats and atomically increments histogram bins
+// The bin indices are cached to avoid recomputing depth in the scatter pass
 [[kernel]]
 void countingSortHistogram(
     device const Splat* splats [[buffer(0)]],
@@ -30,6 +31,7 @@ void countingSortHistogram(
     constant float3& cameraPosition [[buffer(3)]],
     constant float3& cameraForward [[buffer(4)]],
     constant bool& sortByDistance [[buffer(5)]],
+    device ushort* cachedBins [[buffer(6)]],  // NEW: Cache bin indices (ushort saves memory vs uint)
     uint tid [[thread_position_in_grid]],
     uint threadCount [[threads_per_grid]]
 ) {
@@ -52,6 +54,41 @@ void countingSortHistogram(
         uint bin = clamp(uint(normalizedDepth), 0u, params.binCount - 1);
 
         // For back-to-front rendering, invert the bin order
+        bin = params.binCount - 1 - bin;
+
+        // Cache the bin index for the scatter pass (avoids recomputing depth)
+        cachedBins[i] = ushort(bin);
+
+        atomic_fetch_add_explicit(&histogram[bin], 1, memory_order_relaxed);
+    }
+}
+
+// Legacy version without caching (for compatibility)
+[[kernel]]
+void countingSortHistogramNoCaching(
+    device const Splat* splats [[buffer(0)]],
+    device atomic_uint* histogram [[buffer(1)]],
+    constant CountingSortParams& params [[buffer(2)]],
+    constant float3& cameraPosition [[buffer(3)]],
+    constant float3& cameraForward [[buffer(4)]],
+    constant bool& sortByDistance [[buffer(5)]],
+    uint tid [[thread_position_in_grid]],
+    uint threadCount [[threads_per_grid]]
+) {
+    for (uint i = tid; i < params.splatCount; i += threadCount) {
+        float3 splatPos = float3(splats[i].position);
+
+        float depth;
+        if (sortByDistance) {
+            float3 delta = splatPos - cameraPosition;
+            depth = length(delta);
+        } else {
+            float3 delta = splatPos - cameraPosition;
+            depth = dot(delta, cameraForward);
+        }
+
+        float normalizedDepth = (depth - params.minDepth) * params.invRange;
+        uint bin = clamp(uint(normalizedDepth), 0u, params.binCount - 1);
         bin = params.binCount - 1 - bin;
 
         atomic_fetch_add_explicit(&histogram[bin], 1, memory_order_relaxed);
@@ -121,12 +158,32 @@ void countingSortPrefixSumParallel(
     }
 }
 
-// Pass 3: Scatter splat indices to sorted positions
-// Uses atomic increment to handle multiple splats in the same bin
+// Pass 3: Scatter splat indices to sorted positions (optimized with cached bins)
+// Uses cached bin indices from histogram pass - no depth recomputation needed
 [[kernel]]
 void countingSortScatter(
+    device const ushort* cachedBins [[buffer(0)]],  // Cached bin indices from histogram pass
+    device atomic_uint* binOffsets [[buffer(1)]],   // Current write position per bin (initialized from prefix sum)
+    device int32_t* sortedIndices [[buffer(2)]],
+    constant CountingSortParams& params [[buffer(3)]],
+    uint tid [[thread_position_in_grid]],
+    uint threadCount [[threads_per_grid]]
+) {
+    for (uint i = tid; i < params.splatCount; i += threadCount) {
+        // Use cached bin index - no depth calculation needed!
+        uint bin = uint(cachedBins[i]);
+
+        // Atomically get position and increment
+        uint pos = atomic_fetch_add_explicit(&binOffsets[bin], 1, memory_order_relaxed);
+        sortedIndices[pos] = int32_t(i);
+    }
+}
+
+// Legacy scatter without caching (recomputes depth)
+[[kernel]]
+void countingSortScatterNoCaching(
     device const Splat* splats [[buffer(0)]],
-    device atomic_uint* binOffsets [[buffer(1)]],  // Current write position per bin (initialized from prefix sum)
+    device atomic_uint* binOffsets [[buffer(1)]],
     device int32_t* sortedIndices [[buffer(2)]],
     constant CountingSortParams& params [[buffer(3)]],
     constant float3& cameraPosition [[buffer(4)]],
@@ -147,12 +204,10 @@ void countingSortScatter(
             depth = dot(delta, cameraForward);
         }
 
-        // Same binning as histogram pass
         float normalizedDepth = (depth - params.minDepth) * params.invRange;
         uint bin = clamp(uint(normalizedDepth), 0u, params.binCount - 1);
-        bin = params.binCount - 1 - bin;  // Invert for back-to-front
+        bin = params.binCount - 1 - bin;
 
-        // Atomically get position and increment
         uint pos = atomic_fetch_add_explicit(&binOffsets[bin], 1, memory_order_relaxed);
         sortedIndices[pos] = int32_t(i);
     }

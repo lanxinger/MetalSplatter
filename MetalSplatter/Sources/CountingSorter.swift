@@ -56,7 +56,9 @@ internal class CountingSorter {
     private var histogramBuffer: MTLBuffer?
     private var prefixSumBuffer: MTLBuffer?
     private var binOffsetsBuffer: MTLBuffer?
+    private var cachedBinsBuffer: MTLBuffer?  // Caches bin indices between histogram and scatter passes
     private var currentBinCount: Int = 0
+    private var currentSplatCapacity: Int = 0
 
     // Cached depth bounds (optional optimization)
     private var cachedMinDepth: Float?
@@ -90,26 +92,41 @@ internal class CountingSorter {
         initBinOffsetsPipeline = try device.makeComputePipelineState(function: initOffsetsFunction)
     }
 
-    /// Ensures buffers are allocated for the given bin count
-    private func ensureBuffers(binCount: Int) throws {
-        guard binCount != currentBinCount else { return }
+    /// Ensures buffers are allocated for the given bin count and splat capacity
+    private func ensureBuffers(binCount: Int, splatCount: Int) throws {
+        // Reallocate bin-related buffers if bin count changed
+        if binCount != currentBinCount {
+            let bufferSize = binCount * MemoryLayout<UInt32>.stride
 
-        let bufferSize = binCount * MemoryLayout<UInt32>.stride
+            guard let histogram = device.makeBuffer(length: bufferSize, options: .storageModeShared),
+                  let prefixSum = device.makeBuffer(length: bufferSize, options: .storageModeShared),
+                  let binOffsets = device.makeBuffer(length: bufferSize, options: .storageModeShared) else {
+                throw SplatRendererError.failedToCreateBuffer(length: bufferSize)
+            }
 
-        guard let histogram = device.makeBuffer(length: bufferSize, options: .storageModeShared),
-              let prefixSum = device.makeBuffer(length: bufferSize, options: .storageModeShared),
-              let binOffsets = device.makeBuffer(length: bufferSize, options: .storageModeShared) else {
-            throw SplatRendererError.failedToCreateBuffer(length: bufferSize)
+            histogram.label = "CountingSort Histogram"
+            prefixSum.label = "CountingSort PrefixSum"
+            binOffsets.label = "CountingSort BinOffsets"
+
+            histogramBuffer = histogram
+            prefixSumBuffer = prefixSum
+            binOffsetsBuffer = binOffsets
+            currentBinCount = binCount
         }
 
-        histogram.label = "CountingSort Histogram"
-        prefixSum.label = "CountingSort PrefixSum"
-        binOffsets.label = "CountingSort BinOffsets"
+        // Reallocate cached bins buffer if splat count increased
+        if splatCount > currentSplatCapacity {
+            // Use ushort (UInt16) to save memory - 2 bytes per splat
+            let cachedBinsSize = splatCount * MemoryLayout<UInt16>.stride
 
-        histogramBuffer = histogram
-        prefixSumBuffer = prefixSum
-        binOffsetsBuffer = binOffsets
-        currentBinCount = binCount
+            guard let cachedBins = device.makeBuffer(length: cachedBinsSize, options: .storageModeShared) else {
+                throw SplatRendererError.failedToCreateBuffer(length: cachedBinsSize)
+            }
+
+            cachedBins.label = "CountingSort CachedBins"
+            cachedBinsBuffer = cachedBins
+            currentSplatCapacity = splatCount
+        }
     }
 
     /// Computes depth bounds for all splats (can be cached if splats don't change)
@@ -188,11 +205,12 @@ internal class CountingSorter {
         guard splatCount > 0 else { return }
 
         let binCount = optimalBinCount(for: splatCount)
-        try ensureBuffers(binCount: binCount)
+        try ensureBuffers(binCount: binCount, splatCount: splatCount)
 
         guard let histogram = histogramBuffer,
               let prefixSum = prefixSumBuffer,
-              let binOffsets = binOffsetsBuffer else {
+              let binOffsets = binOffsetsBuffer,
+              let cachedBins = cachedBinsBuffer else {
             Self.log.error("Counting sort buffers not allocated")
             return
         }
@@ -236,7 +254,7 @@ internal class CountingSorter {
             encoder.endEncoding()
         }
 
-        // Pass 2: Build histogram
+        // Pass 2: Build histogram AND cache bin indices
         if let encoder = commandBuffer.makeComputeCommandEncoder() {
             encoder.label = "CountingSort Histogram"
             encoder.setComputePipelineState(histogramPipeline)
@@ -246,6 +264,7 @@ internal class CountingSorter {
             encoder.setBytes(&cameraPos, length: MemoryLayout<SIMD3<Float>>.size, index: 3)
             encoder.setBytes(&cameraFwd, length: MemoryLayout<SIMD3<Float>>.size, index: 4)
             encoder.setBytes(&sortByDist, length: MemoryLayout<Bool>.size, index: 5)
+            encoder.setBuffer(cachedBins, offset: 0, index: 6)  // Cache bin indices for scatter pass
 
             encoder.dispatchThreadgroups(
                 MTLSize(width: threadgroups, height: 1, depth: 1),
@@ -286,17 +305,14 @@ internal class CountingSorter {
             encoder.endEncoding()
         }
 
-        // Pass 5: Scatter indices to sorted positions
+        // Pass 5: Scatter indices to sorted positions (uses cached bin indices - no depth recomputation!)
         if let encoder = commandBuffer.makeComputeCommandEncoder() {
             encoder.label = "CountingSort Scatter"
             encoder.setComputePipelineState(scatterPipeline)
-            encoder.setBuffer(splatBuffer, offset: 0, index: 0)
+            encoder.setBuffer(cachedBins, offset: 0, index: 0)   // Use cached bin indices
             encoder.setBuffer(binOffsets, offset: 0, index: 1)
             encoder.setBuffer(outputBuffer, offset: 0, index: 2)
             encoder.setBytes(&params, length: MemoryLayout<CountingSortParams>.size, index: 3)
-            encoder.setBytes(&cameraPos, length: MemoryLayout<SIMD3<Float>>.size, index: 4)
-            encoder.setBytes(&cameraFwd, length: MemoryLayout<SIMD3<Float>>.size, index: 5)
-            encoder.setBytes(&sortByDist, length: MemoryLayout<Bool>.size, index: 6)
 
             encoder.dispatchThreadgroups(
                 MTLSize(width: threadgroups, height: 1, depth: 1),
