@@ -419,6 +419,20 @@ public class SplatRenderer {
     private var sortDirtyDueToData = true
     private var sortDataRevision: UInt64 = 0
 
+    // MARK: - Color-Only Update Path
+    // Separate tracking for geometry vs color changes to skip unnecessary work.
+    // When only colors change (e.g., SH re-evaluation), we can skip sorting entirely
+    // since sort order depends only on position.
+
+    /// Tracks whether geometry (position/covariance) has changed and needs re-sorting
+    private var geometryDirty = true
+
+    /// Tracks whether colors have changed and need GPU buffer update
+    private var colorsDirty = true
+
+    /// Revision counter for color-only updates (allows skipping sort on color changes)
+    private var colorRevision: UInt64 = 0
+
     typealias IndexType = UInt32
     
     // Buffer pools for efficient memory management
@@ -1050,10 +1064,8 @@ public class SplatRenderer {
         }
 
         splatBuffer.append(orderedPoints.map { Splat($0) })
-        sortDirtyDueToData = true
-        sortDataRevision &+= 1
-        boundsDirty = true  // Invalidate cached bounds
-        invalidatePrecomputedData()  // Invalidate TensorOps cache
+        markGeometryDirty()  // New splats affect geometry and require re-sorting
+        colorsDirty = true   // New splats also have new colors
 
         // Initialize sorted indices with identity mapping (0, 1, 2, ...)
         // This ensures rendering works before first sort completes
@@ -1085,7 +1097,98 @@ public class SplatRenderer {
         try SplatDataValidator.validatePoint(point)
         try add([ point ])
     }
-    
+
+    // MARK: - Color-Only Updates
+
+    /// Updates only the color component of splats without triggering re-sorting.
+    /// Use this when geometry (position/covariance) hasn't changed but colors need updating,
+    /// such as after SH re-evaluation or color grading adjustments.
+    ///
+    /// This is significantly faster than full splat updates because:
+    /// - Skips O(n) or O(n log n) sorting entirely
+    /// - Skips bounds recalculation
+    /// - Only updates the color portion of the GPU buffer
+    ///
+    /// - Parameter colors: Array of new colors (RGBA), must match current splat count
+    public func updateColorsOnly(_ colors: [SIMD4<Float>]) {
+        let count = splatCount
+        guard colors.count == count else {
+            Self.log.warning("Color count mismatch: \(colors.count) vs \(count) splats")
+            return
+        }
+
+        // Update colors in the splat buffer without touching geometry
+        for i in 0..<count {
+            let c = colors[i]
+            splatBuffer.values[i].color = PackedRGBHalf4(
+                r: Float16(c.x), g: Float16(c.y), b: Float16(c.z), a: Float16(c.w)
+            )
+        }
+
+        // Mark only colors as dirty, NOT geometry
+        colorsDirty = true
+        colorRevision &+= 1
+
+        // Do NOT set these - they would trigger unnecessary work:
+        // sortDirtyDueToData = true  // Skip - positions unchanged
+        // boundsDirty = true         // Skip - positions unchanged
+        // geometryDirty = true       // Skip - only colors changed
+    }
+
+    /// Updates colors for a range of splats without triggering re-sorting.
+    /// - Parameters:
+    ///   - colors: Array of new colors (RGBA)
+    ///   - range: Index range to update
+    public func updateColorsOnly(_ colors: [SIMD4<Float>], range: Range<Int>) {
+        let count = splatCount
+        guard range.lowerBound >= 0 && range.upperBound <= count else {
+            Self.log.warning("Color update range out of bounds: \(range) vs \(count) splats")
+            return
+        }
+        guard colors.count == range.count else {
+            Self.log.warning("Color count mismatch: \(colors.count) vs range \(range.count)")
+            return
+        }
+
+        for (i, colorIndex) in range.enumerated() {
+            let c = colors[i]
+            splatBuffer.values[colorIndex].color = PackedRGBHalf4(
+                r: Float16(c.x), g: Float16(c.y), b: Float16(c.z), a: Float16(c.w)
+            )
+        }
+
+        colorsDirty = true
+        colorRevision &+= 1
+    }
+
+    /// Updates a single splat's color without triggering re-sorting.
+    /// - Parameters:
+    ///   - color: New color value (RGBA)
+    ///   - index: Splat index to update
+    public func updateColorOnly(_ color: SIMD4<Float>, at index: Int) {
+        let count = splatCount
+        guard index >= 0 && index < count else {
+            Self.log.warning("Color update index out of bounds: \(index) vs \(count) splats")
+            return
+        }
+
+        splatBuffer.values[index].color = PackedRGBHalf4(
+            r: Float16(color.x), g: Float16(color.y), b: Float16(color.z), a: Float16(color.w)
+        )
+        colorsDirty = true
+        colorRevision &+= 1
+    }
+
+    /// Marks that geometry has changed and requires re-sorting and bounds update.
+    /// Called internally when positions or covariance values are modified.
+    private func markGeometryDirty() {
+        geometryDirty = true
+        sortDirtyDueToData = true
+        sortDataRevision &+= 1
+        boundsDirty = true
+        invalidatePrecomputedData()
+    }
+
     /// Get cached AABB bounds - computes on first call or when splats change
     /// Uses GPU SIMD-group parallel reduction, cached for subsequent calls
     public func getBounds() -> (min: SIMD3<Float>, max: SIMD3<Float>)? {
@@ -1549,6 +1652,7 @@ public class SplatRenderer {
                        colorLoadAction: MTLLoadAction = .clear,
                        colorStoreAction: MTLStoreAction,
                        depthTexture: MTLTexture?,
+                       depthStoreAction: MTLStoreAction = .dontCare,
                        rasterizationRateMap: MTLRasterizationRateMap?,
                        renderTargetArrayLength: Int,
                        for commandBuffer: MTLCommandBuffer) -> MTLRenderCommandEncoder {
@@ -1560,7 +1664,7 @@ public class SplatRenderer {
         if let depthTexture {
             renderPassDescriptor.depthAttachment.texture = depthTexture
             renderPassDescriptor.depthAttachment.loadAction = .clear
-            renderPassDescriptor.depthAttachment.storeAction = .store
+            renderPassDescriptor.depthAttachment.storeAction = depthStoreAction
             renderPassDescriptor.depthAttachment.clearDepth = 0.0
         }
         renderPassDescriptor.rasterizationRateMap = rasterizationRateMap
@@ -1601,6 +1705,7 @@ public class SplatRenderer {
                        colorLoadAction: MTLLoadAction = .clear,
                        colorStoreAction: MTLStoreAction,
                        depthTexture: MTLTexture?,
+                       depthStoreAction: MTLStoreAction = .dontCare,
                        rasterizationRateMap: MTLRasterizationRateMap?,
                        renderTargetArrayLength: Int,
                        to commandBuffer: MTLCommandBuffer) throws {
@@ -1660,6 +1765,7 @@ public class SplatRenderer {
                                               colorLoadAction: colorLoadAction,
                                               colorStoreAction: colorStoreAction,
                                               depthTexture: depthTexture,
+                                              depthStoreAction: depthStoreAction,
                                               rasterizationRateMap: rasterizationRateMap,
                                               renderTargetArrayLength: renderTargetArrayLength,
                                               for: commandBuffer)
@@ -1724,6 +1830,7 @@ public class SplatRenderer {
                                           colorLoadAction: colorLoadAction,
                                           colorStoreAction: colorStoreAction,
                                           depthTexture: depthTexture,
+                                          depthStoreAction: depthStoreAction,
                                           rasterizationRateMap: rasterizationRateMap,
                                           renderTargetArrayLength: renderTargetArrayLength,
                                           for: commandBuffer)
@@ -1808,7 +1915,10 @@ public class SplatRenderer {
 
             renderEncoder.pushDebugGroup("Postprocess")
             renderEncoder.setRenderPipelineState(postprocessPipelineState)
-            renderEncoder.setDepthStencilState(postprocessDepthState)
+            // Only set depth stencil state if we're actually storing depth
+            if depthStoreAction == .store {
+                renderEncoder.setDepthStencilState(postprocessDepthState)
+            }
             renderEncoder.setCullMode(.none)
             renderEncoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
             renderEncoder.popDebugGroup()

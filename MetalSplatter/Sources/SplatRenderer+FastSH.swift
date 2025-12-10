@@ -71,9 +71,13 @@ public class FastSHSplatRenderer: SplatRenderer {
 
         public init() {}
     }
-    
+
     // Fast SH specific properties
     public var fastSHConfig = FastSHConfiguration()
+
+    /// When false, SH evaluation is completely disabled and only base color is used.
+    /// This can provide significant performance gains at the cost of view-dependent lighting.
+    public var shRenderingEnabled: Bool = true
     private var shPaletteBuffer: MTLBuffer?
     private var fastSHPipelineState: MTLRenderPipelineState?
     
@@ -306,10 +310,11 @@ extension FastSHSplatRenderer {
                        colorTexture: MTLTexture,
                        colorStoreAction: MTLStoreAction,
                        depthTexture: MTLTexture?,
+                       depthStoreAction: MTLStoreAction = .dontCare,
                        rasterizationRateMap: MTLRasterizationRateMap?,
                        renderTargetArrayLength: Int,
                        to commandBuffer: MTLCommandBuffer) throws {
-        
+
         // Update camera direction for SH evaluation
         // Convert to SplatRenderer.ViewportDescriptor
         let splatViewports = viewports.map { viewport -> SplatRenderer.ViewportDescriptor in
@@ -320,19 +325,20 @@ extension FastSHSplatRenderer {
                 screenSize: viewport.screenSize
             )
         }
-        
+
         // Use fast SH pipeline if enabled and available
         if fastSHConfig.enabled,
            let pipeline = fastSHPipelineState,
            shPaletteBuffer != nil,
            shDegree > 0,
            shCoefficientsPerEntry > 0 {
-            
+
             // Render using fast SH pipeline
             try renderWithFastSH(viewports: viewports,
                                 colorTexture: colorTexture,
                                 colorStoreAction: colorStoreAction,
                                 depthTexture: depthTexture,
+                                depthStoreAction: depthStoreAction,
                                 rasterizationRateMap: rasterizationRateMap,
                                 renderTargetArrayLength: renderTargetArrayLength,
                                 commandBuffer: commandBuffer,
@@ -343,6 +349,7 @@ extension FastSHSplatRenderer {
                       colorTexture: colorTexture,
                       colorStoreAction: colorStoreAction,
                       depthTexture: depthTexture,
+                      depthStoreAction: depthStoreAction,
                       rasterizationRateMap: rasterizationRateMap,
                       renderTargetArrayLength: renderTargetArrayLength,
                       to: commandBuffer)
@@ -353,6 +360,7 @@ extension FastSHSplatRenderer {
                                  colorTexture: MTLTexture,
                                  colorStoreAction: MTLStoreAction,
                                  depthTexture: MTLTexture?,
+                                 depthStoreAction: MTLStoreAction = .dontCare,
                                  rasterizationRateMap: MTLRasterizationRateMap?,
                                  renderTargetArrayLength: Int,
                                  commandBuffer: MTLCommandBuffer,
@@ -368,7 +376,7 @@ extension FastSHSplatRenderer {
         if let depthTexture = depthTexture {
             renderPassDescriptor.depthAttachment.texture = depthTexture
             renderPassDescriptor.depthAttachment.loadAction = .clear
-            renderPassDescriptor.depthAttachment.storeAction = .store
+            renderPassDescriptor.depthAttachment.storeAction = depthStoreAction
             renderPassDescriptor.depthAttachment.clearDepth = 1.0
         }
 
@@ -395,14 +403,14 @@ extension FastSHSplatRenderer {
         }
 
         // Check if SH needs re-evaluation based on camera movement threshold
-        let shouldUpdateSH = shouldUpdateSHForCurrentCamera()
+        let shouldUpdateSH = shRenderingEnabled && shouldUpdateSHForCurrentCamera()
 
         // Set SH palette data with skip flag based on threshold
         if let paletteBuffer = shPaletteBuffer {
             renderEncoder.setVertexBuffer(paletteBuffer, offset: 0, index: 3)
             var params = shaderParameters
-            // Skip SH evaluation if camera hasn't moved enough
-            params.skipSHEvaluation = shouldUpdateSH ? 0 : 1
+            // Skip SH evaluation if disabled or camera hasn't moved enough
+            params.skipSHEvaluation = (shRenderingEnabled && shouldUpdateSH) ? 0 : 1
             renderEncoder.setVertexBytes(&params, length: MemoryLayout<FastSHShaderParameters>.stride, index: 4)
 
             // Mark SH as updated if we evaluated this frame

@@ -154,6 +154,7 @@ public class SampleBoxRenderer {
                        colorTexture: MTLTexture,
                        colorStoreAction: MTLStoreAction,
                        depthTexture: MTLTexture?,
+                       depthStoreAction: MTLStoreAction = .dontCare,
                        rasterizationRateMap: MTLRasterizationRateMap?,
                        renderTargetArrayLength: Int,
                        for commandBuffer: MTLCommandBuffer) -> MTLRenderCommandEncoder {
@@ -165,7 +166,7 @@ public class SampleBoxRenderer {
         if let depthTexture {
             renderPassDescriptor.depthAttachment.texture = depthTexture
             renderPassDescriptor.depthAttachment.loadAction = .clear
-            renderPassDescriptor.depthAttachment.storeAction = .store
+            renderPassDescriptor.depthAttachment.storeAction = depthStoreAction
             renderPassDescriptor.depthAttachment.clearDepth = 0.0
         }
         renderPassDescriptor.rasterizationRateMap = rasterizationRateMap
@@ -194,6 +195,7 @@ public class SampleBoxRenderer {
                        colorTexture: MTLTexture,
                        colorStoreAction: MTLStoreAction,
                        depthTexture: MTLTexture?,
+                       depthStoreAction: MTLStoreAction = .dontCare,
                        rasterizationRateMap: MTLRasterizationRateMap?,
                        renderTargetArrayLength: Int,
                        to commandBuffer: MTLCommandBuffer) throws {
@@ -204,6 +206,7 @@ public class SampleBoxRenderer {
                                           colorTexture: colorTexture,
                                           colorStoreAction: colorStoreAction,
                                           depthTexture: depthTexture,
+                                          depthStoreAction: depthStoreAction,
                                           rasterizationRateMap: rasterizationRateMap,
                                           renderTargetArrayLength: renderTargetArrayLength,
                                           for: commandBuffer)

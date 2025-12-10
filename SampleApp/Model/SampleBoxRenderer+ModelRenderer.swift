@@ -6,6 +6,7 @@ extension SampleBoxRenderer: ModelRenderer {
                        colorTexture: MTLTexture,
                        colorStoreAction: MTLStoreAction,
                        depthTexture: MTLTexture?,
+                       depthStoreAction: MTLStoreAction,
                        rasterizationRateMap: MTLRasterizationRateMap?,
                        renderTargetArrayLength: Int,
                        to commandBuffer: MTLCommandBuffer) throws {
@@ -19,6 +20,7 @@ extension SampleBoxRenderer: ModelRenderer {
                    colorTexture: colorTexture,
                    colorStoreAction: colorStoreAction,
                    depthTexture: depthTexture,
+                   depthStoreAction: depthStoreAction,
                    rasterizationRateMap: rasterizationRateMap,
                    renderTargetArrayLength: renderTargetArrayLength,
                    to: commandBuffer)

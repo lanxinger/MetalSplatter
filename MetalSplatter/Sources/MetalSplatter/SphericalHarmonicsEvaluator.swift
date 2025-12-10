@@ -5,9 +5,19 @@ import simd
 /// Manages fast spherical harmonics evaluation for SOGS format
 public class SphericalHarmonicsEvaluator {
     private let device: MTLDevice
+
+    /// Legacy pipeline (runtime degree parameter) - kept for compatibility
     private let computePipeline: MTLComputePipelineState
     private let directionalPipeline: MTLComputePipelineState?
-    
+
+    /// Specialized pipelines using function constants (compile-time degree)
+    /// Index corresponds to SH degree (0-3)
+    private var specializedPipelines: [MTLComputePipelineState] = []
+    private var specializedDirectionalPipelines: [MTLComputePipelineState] = []
+
+    /// Function constant index for SH_DEGREE (matches [[function_constant(0)]] in shader)
+    private static let shDegreeConstantIndex: Int = 0
+
     /// SH coefficient order (Graphdeco/gsplat layout) shared with spherical_harmonics_evaluate.metal and FastSHRenderPath.metal.
     /// Index 0 is the DC term, followed by Y bands: y, z, x, xy, yz, 2zz-xx-yy, xz, xx-yy, then band 3.
     public static let coefficientOrder: [String] = [
@@ -17,14 +27,14 @@ public class SphericalHarmonicsEvaluator {
         "L3,-3 (y*(3xx-yy))", "L3,-2 (xy*z)", "L3,-1 (y*(4zz-xx-yy))",
         "L3,0 (z*(2zz-3xx-3yy))", "L3,1 (x*(4zz-xx-yy))", "L3,2 (z*(xx-yy))", "L3,3 (x*(xx-3yy))"
     ]
-    
+
     @inline(__always)
     public static func validateLayout(degree: Int, coefficientCount: Int) {
         let expected = coefficientCountForDegree(degree)
         let matchesSPZ = degree == 3 && coefficientCount == 15 // SPZ packs 15 coeffs; treated as degree 3
         assert(coefficientCount == expected || matchesSPZ, "SH count \(coefficientCount) does not match degree \(degree); expected \(expected). Order: \(coefficientOrder)")
     }
-    
+
     /// Structure matching the Metal shader parameters
     private struct SHEvaluateParams {
         let viewDirection: SIMD3<Float>
@@ -32,29 +42,73 @@ public class SphericalHarmonicsEvaluator {
         let degree: UInt32
         let padding: UInt32 = 0  // Ensure 16-byte alignment
     }
-    
+
     public enum Mode {
         /// Evaluate SH once per frame using camera forward direction
         case fast
         /// Evaluate SH with per-pixel accuracy (more expensive)
         case accurate
     }
-    
+
     public init(device: MTLDevice, library: MTLLibrary) throws {
         self.device = device
-        
-        // Create compute pipeline for palette evaluation
+
+        // Create legacy compute pipeline for palette evaluation (runtime degree)
         guard let function = library.makeFunction(name: "evaluateSphericalHarmonicsPalette") else {
             throw SplatRendererError.failedToLoadShaderFunction(name: "evaluateSphericalHarmonicsPalette")
         }
         self.computePipeline = try device.makeComputePipelineState(function: function)
-        
-        // Create optional directional pipeline
+
+        // Create optional legacy directional pipeline
         if let directionalFunction = library.makeFunction(name: "evaluateSphericalHarmonicsDirectional") {
             self.directionalPipeline = try? device.makeComputePipelineState(function: directionalFunction)
         } else {
             self.directionalPipeline = nil
         }
+
+        // Create specialized pipelines for each SH degree (0-3)
+        // These use function constants for compile-time branch elimination
+        try createSpecializedPipelines(library: library)
+    }
+
+    /// Creates 4 specialized pipeline states (one per SH degree) using function constants
+    private func createSpecializedPipelines(library: MTLLibrary) throws {
+        for degree in 0...3 {
+            // Create function constant values for this degree
+            let constants = MTLFunctionConstantValues()
+            var degreeValue = UInt32(degree)
+            constants.setConstantValue(&degreeValue, type: .uint, index: Self.shDegreeConstantIndex)
+
+            // Create specialized palette evaluation pipeline
+            if let function = try? library.makeFunction(name: "evaluateSphericalHarmonicsPaletteSpecialized",
+                                                        constantValues: constants) {
+                let pipeline = try device.makeComputePipelineState(function: function)
+                specializedPipelines.append(pipeline)
+            }
+
+            // Create specialized directional pipeline
+            if let function = try? library.makeFunction(name: "evaluateSphericalHarmonicsDirectionalSpecialized",
+                                                        constantValues: constants) {
+                let pipeline = try device.makeComputePipelineState(function: function)
+                specializedDirectionalPipelines.append(pipeline)
+            }
+        }
+
+        if !specializedPipelines.isEmpty {
+            print("SphericalHarmonicsEvaluator: Created \(specializedPipelines.count) specialized pipelines (function constants enabled)")
+        }
+    }
+
+    /// Returns the specialized pipeline for the given degree, or nil if not available
+    private func specializedPipeline(for degree: Int) -> MTLComputePipelineState? {
+        guard degree >= 0 && degree < specializedPipelines.count else { return nil }
+        return specializedPipelines[degree]
+    }
+
+    /// Returns the specialized directional pipeline for the given degree, or nil if not available
+    private func specializedDirectionalPipeline(for degree: Int) -> MTLComputePipelineState? {
+        guard degree >= 0 && degree < specializedDirectionalPipelines.count else { return nil }
+        return specializedDirectionalPipelines[degree]
     }
     
     /// Pre-evaluate spherical harmonics for a palette of coefficients
@@ -76,21 +130,21 @@ public class SphericalHarmonicsEvaluator {
             let coeffCount = (shPalette.length / MemoryLayout<SIMD3<Float>>.stride) / max(paletteSize, 1)
             Self.validateLayout(degree: degree, coefficientCount: coeffCount)
         }
-        
+
         // Calculate buffer size for output
         let outputSize = paletteSize * MemoryLayout<SIMD4<Float>>.stride
         guard let outputBuffer = device.makeBuffer(length: outputSize, options: .storageModePrivate) else {
             return nil
         }
         outputBuffer.label = "SH Evaluated Colors"
-        
+
         // Create parameters
         var params = SHEvaluateParams(
             viewDirection: normalize(viewDirection),
             paletteSize: UInt32(paletteSize),
             degree: UInt32(degree)
         )
-        
+
         guard let paramsBuffer = device.makeBuffer(
             bytes: &params,
             length: MemoryLayout<SHEvaluateParams>.stride,
@@ -98,18 +152,28 @@ public class SphericalHarmonicsEvaluator {
         ) else {
             return nil
         }
-        
+
         // Encode compute command
         guard let computeEncoder = commandBuffer.makeComputeCommandEncoder() else {
             return nil
         }
-        
-        computeEncoder.label = "SH Palette Evaluation"
-        computeEncoder.setComputePipelineState(computePipeline)
+
+        // Use specialized pipeline if available (function constants for compile-time optimization)
+        // Falls back to legacy pipeline with runtime branching if specialized version unavailable
+        let pipeline: MTLComputePipelineState
+        if let specializedPipeline = specializedPipeline(for: degree) {
+            pipeline = specializedPipeline
+            computeEncoder.label = "SH Palette Evaluation (Specialized Degree \(degree))"
+        } else {
+            pipeline = computePipeline
+            computeEncoder.label = "SH Palette Evaluation (Legacy)"
+        }
+
+        computeEncoder.setComputePipelineState(pipeline)
         computeEncoder.setBuffer(shPalette, offset: 0, index: 0)
         computeEncoder.setBuffer(outputBuffer, offset: 0, index: 1)
         computeEncoder.setBuffer(paramsBuffer, offset: 0, index: 2)
-        
+
         // Calculate thread groups
         let threadsPerThreadgroup = MTLSize(width: 256, height: 1, depth: 1)
         let threadgroupsPerGrid = MTLSize(
@@ -117,14 +181,14 @@ public class SphericalHarmonicsEvaluator {
             height: 1,
             depth: 1
         )
-        
+
         computeEncoder.dispatchThreadgroups(
             threadgroupsPerGrid,
             threadsPerThreadgroup: threadsPerThreadgroup
         )
-        
+
         computeEncoder.endEncoding()
-        
+
         return outputBuffer
     }
     
@@ -143,8 +207,19 @@ public class SphericalHarmonicsEvaluator {
         viewDirection: SIMD3<Float>,
         commandBuffer: MTLCommandBuffer
     ) -> MTLTexture? {
-        guard let pipeline = directionalPipeline else { return nil }
-        
+        // Use specialized pipeline if available, otherwise fall back to legacy
+        let pipeline: MTLComputePipelineState
+        let isSpecialized: Bool
+        if let specializedPipeline = specializedDirectionalPipeline(for: degree) {
+            pipeline = specializedPipeline
+            isSpecialized = true
+        } else if let legacyPipeline = directionalPipeline {
+            pipeline = legacyPipeline
+            isSpecialized = false
+        } else {
+            return nil
+        }
+
         let textureDescriptor = MTLTextureDescriptor()
         textureDescriptor.textureType = .type2D
         textureDescriptor.pixelFormat = .rgba16Float
@@ -152,21 +227,21 @@ public class SphericalHarmonicsEvaluator {
         textureDescriptor.height = textureSize.height
         textureDescriptor.usage = [.shaderRead, .shaderWrite]
         textureDescriptor.storageMode = .private
-        
+
         guard let texture = device.makeTexture(descriptor: textureDescriptor) else {
             return nil
         }
         texture.label = "SH Evaluated Texture"
-        
+
         let paletteSize = textureSize.width * textureSize.height
-        
+
         // Create parameters
         var params = SHEvaluateParams(
             viewDirection: normalize(viewDirection),
             paletteSize: UInt32(paletteSize),
             degree: UInt32(degree)
         )
-        
+
         guard let paramsBuffer = device.makeBuffer(
             bytes: &params,
             length: MemoryLayout<SHEvaluateParams>.stride,
@@ -174,18 +249,20 @@ public class SphericalHarmonicsEvaluator {
         ) else {
             return nil
         }
-        
+
         // Encode compute command
         guard let computeEncoder = commandBuffer.makeComputeCommandEncoder() else {
             return nil
         }
-        
-        computeEncoder.label = "SH Texture Evaluation"
+
+        computeEncoder.label = isSpecialized
+            ? "SH Texture Evaluation (Specialized Degree \(degree))"
+            : "SH Texture Evaluation (Legacy)"
         computeEncoder.setComputePipelineState(pipeline)
         computeEncoder.setBuffer(shPalette, offset: 0, index: 0)
         computeEncoder.setTexture(texture, index: 0)
         computeEncoder.setBuffer(paramsBuffer, offset: 0, index: 2)
-        
+
         // Calculate thread groups
         let threadsPerThreadgroup = MTLSize(width: 16, height: 16, depth: 1)
         let threadgroupsPerGrid = MTLSize(
@@ -193,14 +270,14 @@ public class SphericalHarmonicsEvaluator {
             height: (textureSize.height + 15) / 16,
             depth: 1
         )
-        
+
         computeEncoder.dispatchThreadgroups(
             threadgroupsPerGrid,
             threadsPerThreadgroup: threadsPerThreadgroup
         )
-        
+
         computeEncoder.endEncoding()
-        
+
         return texture
     }
 }

@@ -229,6 +229,7 @@ class VisionSceneRenderer {
                                       colorTexture: drawable.colorTextures[0],
                                       colorStoreAction: .store,
                                       depthTexture: drawable.depthTextures[0],
+                                      depthStoreAction: .store,  // Required for visionOS reprojection
                                       rasterizationRateMap: drawable.rasterizationRateMaps.first,
                                       renderTargetArrayLength: layerRenderer.configuration.layout == .layered ? drawable.views.count : 1,
                                       to: commandBuffer)

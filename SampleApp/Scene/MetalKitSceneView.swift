@@ -361,6 +361,19 @@ struct MetalKitRendererView: ViewRepresentable {
         doubleTapGesture.numberOfTapsRequired = 2
         doubleTapGesture.delegate = coordinator
         metalKitView.addGestureRecognizer(doubleTapGesture)
+        #elseif os(macOS)
+        // Pan gesture for rotation (drag)
+        let panGesture = NSPanGestureRecognizer(target: coordinator, action: #selector(Coordinator.handlePan(_:)))
+        panGesture.delegate = coordinator
+        metalKitView.addGestureRecognizer(panGesture)
+        // Magnification gesture for zoom (pinch on trackpad)
+        let magnifyGesture = NSMagnificationGestureRecognizer(target: coordinator, action: #selector(Coordinator.handleMagnify(_:)))
+        magnifyGesture.delegate = coordinator
+        metalKitView.addGestureRecognizer(magnifyGesture)
+        // Rotation gesture for roll (two-finger rotate on trackpad)
+        let rotationGesture = NSRotationGestureRecognizer(target: coordinator, action: #selector(Coordinator.handleRotation(_:)))
+        rotationGesture.delegate = coordinator
+        metalKitView.addGestureRecognizer(rotationGesture)
         #endif
 
         Task {
@@ -513,6 +526,88 @@ struct MetalKitRendererView: ViewRepresentable {
         func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldRecognizeSimultaneouslyWith otherGestureRecognizer: UIGestureRecognizer) -> Bool {
             // Allow rotation gesture to work with pan gesture for 2-finger interactions
             // Allow pinch gesture to work with rotation gesture
+            return true
+        }
+    }
+#elseif os(macOS)
+    // MARK: - macOS Coordinator Gesture Handling
+    extension MetalKitRendererView.Coordinator: NSGestureRecognizerDelegate {
+        @MainActor @objc func handlePan(_ gesture: NSPanGestureRecognizer) {
+            guard let renderer = renderer else { return }
+            let location = gesture.location(in: gesture.view)
+
+            if gesture.state == .ended || gesture.state == .cancelled {
+                renderer.endUserInteraction()
+                lastPanLocation = nil
+                return
+            }
+
+            switch gesture.state {
+            case .began:
+                lastPanLocation = location
+            case .changed:
+                guard let lastLocation = lastPanLocation else {
+                    lastPanLocation = location
+                    return
+                }
+                let deltaX = Float(location.x - lastLocation.x)
+                let deltaY = Float(location.y - lastLocation.y)
+
+                // Horizontal drag rotates around Y axis, vertical drag rotates around X axis
+                let sensitivity: Float = 0.01
+                let currentRotation = renderer.rotation
+                let newRotation = Angle(radians: currentRotation.radians + Double(deltaX * sensitivity))
+                let currentVertical = renderer.verticalRotation
+                let newVertical = currentVertical - deltaY * sensitivity
+
+                renderer.setUserRotation(newRotation, vertical: newVertical)
+
+                lastPanLocation = location
+            default:
+                break
+            }
+        }
+
+        @MainActor @objc func handleMagnify(_ gesture: NSMagnificationGestureRecognizer) {
+            guard let renderer = renderer else { return }
+
+            if gesture.state == .ended || gesture.state == .cancelled {
+                renderer.endUserInteraction()
+                return
+            }
+
+            switch gesture.state {
+            case .began:
+                zoom = renderer.zoom
+            case .changed:
+                let newZoom = max(0.1, min(zoom * Float(1.0 + gesture.magnification), 20.0))
+                renderer.setUserZoom(newZoom)
+            default:
+                break
+            }
+        }
+
+        @MainActor @objc func handleRotation(_ gesture: NSRotationGestureRecognizer) {
+            guard let renderer = renderer else { return }
+
+            if gesture.state == .ended || gesture.state == .cancelled {
+                renderer.endUserInteraction()
+                return
+            }
+
+            switch gesture.state {
+            case .began:
+                lastRollRotation = renderer.rollRotation
+            case .changed:
+                let newRollRotation = lastRollRotation - Float(gesture.rotation)
+                renderer.setUserRollRotation(newRollRotation)
+            default:
+                break
+            }
+        }
+
+        // MARK: - NSGestureRecognizerDelegate
+        func gestureRecognizer(_ gestureRecognizer: NSGestureRecognizer, shouldRecognizeSimultaneouslyWith otherGestureRecognizer: NSGestureRecognizer) -> Bool {
             return true
         }
     }

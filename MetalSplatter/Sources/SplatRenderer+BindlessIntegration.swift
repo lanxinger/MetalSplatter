@@ -67,11 +67,12 @@ extension SplatRenderer {
         colorLoadAction: MTLLoadAction = .clear,
         colorStoreAction: MTLStoreAction,
         depthTexture: MTLTexture?,
+        depthStoreAction: MTLStoreAction = .dontCare,
         rasterizationRateMap: MTLRasterizationRateMap?,
         renderTargetArrayLength: Int,
         to commandBuffer: MTLCommandBuffer
     ) throws {
-        
+
         guard let bindless = getBindlessArchitecture() else {
             // Fallback to standard rendering
             try render(
@@ -80,6 +81,7 @@ extension SplatRenderer {
                 colorLoadAction: colorLoadAction,
                 colorStoreAction: colorStoreAction,
                 depthTexture: depthTexture,
+                depthStoreAction: depthStoreAction,
                 rasterizationRateMap: rasterizationRateMap,
                 renderTargetArrayLength: renderTargetArrayLength,
                 to: commandBuffer
@@ -107,7 +109,7 @@ extension SplatRenderer {
         if let depthTexture = depthTexture {
             renderPassDescriptor.depthAttachment.texture = depthTexture
             renderPassDescriptor.depthAttachment.loadAction = .clear
-            renderPassDescriptor.depthAttachment.storeAction = .dontCare
+            renderPassDescriptor.depthAttachment.storeAction = depthStoreAction
             renderPassDescriptor.depthAttachment.clearDepth = 0.0
         }
         

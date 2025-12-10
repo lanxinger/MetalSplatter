@@ -888,6 +888,7 @@ extension ARSplatRenderer: ARSessionDelegate {
                                      colorTexture: MTLTexture,
                                      colorStoreAction: MTLStoreAction,
                                      depthTexture: MTLTexture?,
+                                     depthStoreAction: MTLStoreAction = .dontCare,
                                      rasterizationRateMap: MTLRasterizationRateMap?,
                                      renderTargetArrayLength: Int,
                                      to commandBuffer: MTLCommandBuffer) throws {

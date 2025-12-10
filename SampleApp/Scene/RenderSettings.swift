@@ -23,6 +23,7 @@ struct Metal4Capabilities {
 /// Settings for Metal rendering features
 struct RenderSettings: View {
     @Binding var fastSHEnabled: Bool
+    @Binding var shRenderingEnabled: Bool  // SH evaluation toggle
     @Binding var metal4BindlessEnabled: Bool
     @Binding var showDebugAABB: Bool
     @Binding var batchPrecomputeEnabled: Bool  // TensorOps batch precompute
@@ -59,6 +60,17 @@ struct RenderSettings: View {
                     Text("Fast Spherical Harmonics")
                         .font(.subheadline)
                     Text("Optimized SH evaluation for better performance")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+            }
+
+            // SH Rendering Toggle - always visible
+            Toggle(isOn: $shRenderingEnabled) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("View-Dependent Lighting")
+                        .font(.subheadline)
+                    Text("Disable for ~50% faster rendering (no SH evaluation)")
                         .font(.caption)
                         .foregroundColor(.secondary)
                 }
@@ -197,6 +209,7 @@ struct EnhancedMetalKitSceneView: View {
     var modelIdentifier: ModelIdentifier?
     @State private var showSettings = false
     @State private var fastSHEnabled = true
+    @State private var shRenderingEnabled = true // SH evaluation - enabled by default
     @State private var metal4BindlessEnabled = true // Default to enabled
     @State private var showDebugAABB = false // Debug: visualize GPU-computed bounds
     @State private var batchPrecomputeEnabled = true // TensorOps batch precompute - enabled by default
@@ -211,6 +224,7 @@ struct EnhancedMetalKitSceneView: View {
             MetalKitRendererViewEnhanced(
                 modelIdentifier: modelIdentifier,
                 fastSHEnabled: $fastSHEnabled,
+                shRenderingEnabled: $shRenderingEnabled,
                 metal4BindlessEnabled: $metal4BindlessEnabled,
                 showDebugAABB: $showDebugAABB,
                 batchPrecomputeEnabled: $batchPrecomputeEnabled,
@@ -280,6 +294,7 @@ struct EnhancedMetalKitSceneView: View {
                         HStack {
                             RenderSettings(
                                 fastSHEnabled: $fastSHEnabled,
+                                shRenderingEnabled: $shRenderingEnabled,
                                 metal4BindlessEnabled: $metal4BindlessEnabled,
                                 showDebugAABB: $showDebugAABB,
                                 batchPrecomputeEnabled: $batchPrecomputeEnabled,
@@ -337,6 +352,7 @@ struct EnhancedMetalKitSceneView: View {
 struct MetalKitRendererViewEnhanced: ViewRepresentable {
     var modelIdentifier: ModelIdentifier?
     @Binding var fastSHEnabled: Bool
+    @Binding var shRenderingEnabled: Bool
     @Binding var metal4BindlessEnabled: Bool
     @Binding var showDebugAABB: Bool
     @Binding var batchPrecomputeEnabled: Bool
@@ -359,6 +375,7 @@ struct MetalKitRendererViewEnhanced: ViewRepresentable {
         
         func updateSettings() {
             renderer?.fastSHSettings.enabled = parent.fastSHEnabled
+            renderer?.setSHRendering(parent.shRenderingEnabled)
             renderer?.setMetal4Bindless(parent.metal4BindlessEnabled)
             renderer?.setDebugAABB(parent.showDebugAABB)
             renderer?.setBatchPrecompute(parent.batchPrecomputeEnabled)
@@ -402,6 +419,7 @@ struct MetalKitRendererViewEnhanced: ViewRepresentable {
         
         // Apply initial settings - all optimizations enabled by default
         renderer?.fastSHSettings.enabled = fastSHEnabled
+        renderer?.setSHRendering(shRenderingEnabled)
         renderer?.setMetal4Bindless(metal4BindlessEnabled)
         renderer?.setDebugAABB(showDebugAABB)
         renderer?.setBatchPrecompute(batchPrecomputeEnabled)

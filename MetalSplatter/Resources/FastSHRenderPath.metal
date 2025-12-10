@@ -1,9 +1,19 @@
 #include "ShaderCommon.h"
 #include "SplatProcessing.h"
 
-// Forward declaration from spherical_harmonics_evaluate.metal
+// Forward declarations from spherical_harmonics_evaluate.metal
+// Legacy version with runtime degree parameter
 float4 evaluateSH(float3 dir, device const float3* sh_coeffs, uint degree);
+// Specialized version using function constants (compile-time branching)
+float4 evaluateSHSpecialized(float3 dir, device const float3* sh_coeffs);
 // Coefficients follow the Graphdeco/gsplat ordering documented in spherical_harmonics_evaluate.metal.
+
+// Import function constants from spherical_harmonics_evaluate.metal
+// These are shared across all shaders that include this file
+extern constant uint SH_DEGREE [[function_constant(0)]];
+extern constant bool HAS_SH_BAND_1;
+extern constant bool HAS_SH_BAND_2;
+extern constant bool HAS_SH_BAND_3;
 
 struct FastSHParams {
     uint coeffsPerEntry;

@@ -92,7 +92,9 @@ class MetalKitSceneRenderer: NSObject, MTKViewDelegate {
         self.commandBufferManager = CommandBufferManager(commandQueue: queue)
         self.metalKitView = metalKitView
         metalKitView.colorPixelFormat = MTLPixelFormat.bgra8Unorm_srgb
-        metalKitView.depthStencilPixelFormat = MTLPixelFormat.depth32Float
+        // Depth buffer not needed for iOS/macOS - splats use painter's algorithm (sorted back-to-front)
+        // This saves memory bandwidth since depth isn't read after rendering
+        metalKitView.depthStencilPixelFormat = MTLPixelFormat.invalid
         metalKitView.sampleCount = 1
         metalKitView.clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 0)
     }
@@ -354,6 +356,7 @@ class MetalKitSceneRenderer: NSObject, MTKViewDelegate {
                                    colorTexture: view.multisampleColorTexture ?? drawable.texture,
                                    colorStoreAction: view.multisampleColorTexture == nil ? .store : .multisampleResolve,
                                    depthTexture: view.depthStencilTexture,
+                                   depthStoreAction: .dontCare,
                                    rasterizationRateMap: nil,
                                    renderTargetArrayLength: 0,
                                    to: commandBuffer)
@@ -502,8 +505,28 @@ class MetalKitSceneRenderer: NSObject, MTKViewDelegate {
         #endif
     }
 
+    /// Enable or disable spherical harmonics (SH) evaluation
+    /// When disabled, only base color is used - significant performance gain but no view-dependent lighting
+    func setSHRendering(_ enabled: Bool) {
+        if let fastSH = modelRenderer as? FastSHSplatRenderer {
+            fastSH.shRenderingEnabled = enabled
+            if enabled {
+                Self.log.info("SH rendering enabled - view-dependent lighting active")
+            } else {
+                Self.log.info("SH rendering disabled - using base color only (~50% faster)")
+            }
+        }
+
+        // Request redraw
+        #if os(macOS)
+        metalKitView.setNeedsDisplay(metalKitView.bounds)
+        #else
+        metalKitView.setNeedsDisplay()
+        #endif
+    }
+
     // MARK: - User Interaction API
-    #if os(iOS)
+    #if os(iOS) || os(macOS)
     
     /// Notify renderer that user interaction has started (for adaptive sort quality)
     private func notifyInteractionBegan() {
