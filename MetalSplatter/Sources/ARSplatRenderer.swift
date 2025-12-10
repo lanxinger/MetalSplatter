@@ -269,16 +269,37 @@ public class ARSplatRenderer: NSObject {
     public func add(_ points: [SplatScenePoint]) throws {
         try splatRenderer.add(points)
         print("ARSplatRenderer: Added \(splatRenderer.splatCount) splats from cached data")
-        
+
         // Reset placement state when loading new splats
         hasBeenPlaced = false
         isWaitingForARTracking = true
         lastAutoPlacementEvaluationTime = 0
-        
+
         // Reset AR session start time to give new model time to stabilize
         arSessionStartTime = CACurrentMediaTime()
-        
+
         // Auto-place splat in front of camera when first loaded (will be done in render loop)
+    }
+
+    /// Add splats with Spherical Harmonics data for optimized GPU evaluation
+    /// This provides significantly better performance than `add(_:)` when FastSH is available
+    public func loadSplatsWithSH(_ points: [SplatScenePoint]) async throws {
+        if let fastRenderer = fastSHRenderer {
+            try await fastRenderer.loadSplatsWithSH(points)
+            print("ARSplatRenderer: Loaded \(splatRenderer.splatCount) splats with FastSH optimization")
+        } else {
+            // Fall back to standard add if FastSH is not available
+            try splatRenderer.add(points)
+            print("ARSplatRenderer: Added \(splatRenderer.splatCount) splats (FastSH not available)")
+        }
+
+        // Reset placement state when loading new splats
+        hasBeenPlaced = false
+        isWaitingForARTracking = true
+        lastAutoPlacementEvaluationTime = 0
+
+        // Reset AR session start time to give new model time to stabilize
+        arSessionStartTime = CACurrentMediaTime()
     }
     
     /// Set the source file information for format-specific transformations
