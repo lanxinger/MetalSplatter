@@ -93,20 +93,20 @@ struct ARMetal4Resources {
 [[user_annotation("ar_adaptive_quality")]]
 #endif
 kernel void ar_adaptive_rendering_kernel(
-    constant ARMetal4Resources& resources [[buffer(0)]],
+    constant float& tracking_confidence [[buffer(0)]],
     device uint* render_mode [[buffer(1)]],
-    uint2 gid [[thread_position_in_grid]]
+    uint gid [[thread_position_in_grid]]
 ) {
+    if (gid != 0) return; // Only one thread needs to run
+
     // GPU decides rendering quality based on AR tracking state
-    float tracking_confidence = resources.tracking_confidence[0];
-    
     uint mode = 0; // Default: basic rendering
     if (tracking_confidence > 0.8) {
         mode = 2; // High quality: full splat density
     } else if (tracking_confidence > 0.5) {
         mode = 1; // Medium quality: reduced density
     }
-    
+
     render_mode[0] = mode;
 }
 

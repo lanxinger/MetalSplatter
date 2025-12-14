@@ -65,11 +65,36 @@ public class ARSplatRenderer: NSObject {
 
     // Track if we've logged the rendering path (avoid spam)
     private var hasLoggedRenderPath = false
-    
+
+    // Metal 4 AR enhancement pipelines (iOS 26.0+)
+    private var adaptiveQualityPipeline: MTLComputePipelineState?
+    private var surfaceDetectionPipeline: MTLComputePipelineState?
+    private var renderModeBuffer: MTLBuffer?
+
+    // Adaptive quality state
+    private var currentRenderMode: UInt32 = 2 // Start with high quality
+
     // AR session state
     public var isARTrackingNormal: Bool {
         guard let frame = session.currentFrame else { return false }
         return frame.camera.trackingState == .normal
+    }
+
+    /// Get current tracking confidence (0.0 to 1.0)
+    public var trackingConfidence: Float {
+        guard let frame = session.currentFrame else { return 0.0 }
+        switch frame.camera.trackingState {
+        case .normal:
+            return 1.0
+        case .limited(.relocalizing), .limited(.initializing):
+            return 0.3
+        case .limited(.excessiveMotion), .limited(.insufficientFeatures):
+            return 0.5
+        case .notAvailable:
+            return 0.0
+        @unknown default:
+            return 0.5
+        }
     }
     
     // MARK: - Rendering Optimization Properties
@@ -751,34 +776,97 @@ public class ARSplatRenderer: NSObject {
             self.viewportSize = viewportSize
             arBackgroundRenderer.resize(viewportSize)
         }
-        
+
         // Update AR camera
         arCamera.update(viewportSize: viewportSize)
-        
+
         guard let commandBuffer = commandBufferManager.makeCommandBuffer() else {
             throw ARSplatRendererError.failedToCreateCommandBuffer
         }
-        
+
+        // Update adaptive quality based on AR tracking (Metal 4)
+        if #available(iOS 26.0, *) {
+            updateAdaptiveQuality(commandBuffer: commandBuffer)
+        }
+
         // Single command buffer: render AR background directly to drawable first
         arBackgroundRenderer.render(to: drawable.texture, with: commandBuffer)
-        
+
         // Render splats on top with proper blending (if we have splats loaded)
         if splatRenderer.splatCount > 0 {
             // Auto-place splat once when first loaded
             if !hasBeenPlaced {
                 autoPlaceSplatInFrontOfCamera()
             }
-            
+
             // Only render splats if they've been placed (either auto or manually)
             if hasBeenPlaced {
                 try renderSplatsToDrawable(drawable, commandBuffer: commandBuffer)
             }
         }
-        
+
         commandBuffer.present(drawable)
         commandBuffer.commit()
     }
     
+    // MARK: - Metal 4 Adaptive Quality
+
+    /// Update rendering quality based on AR tracking confidence (Metal 4 GPU-driven)
+    @available(iOS 26.0, *)
+    private func updateAdaptiveQuality(commandBuffer: MTLCommandBuffer) {
+        guard let pipeline = adaptiveQualityPipeline,
+              let modeBuffer = renderModeBuffer else { return }
+
+        // Create confidence buffer
+        var confidence = trackingConfidence
+        guard let confidenceBuffer = device.makeBuffer(bytes: &confidence, length: MemoryLayout<Float>.stride, options: .storageModeShared) else {
+            return
+        }
+
+        // Dispatch adaptive quality compute kernel
+        guard let computeEncoder = commandBuffer.makeComputeCommandEncoder() else { return }
+        computeEncoder.setComputePipelineState(pipeline)
+        computeEncoder.setBuffer(confidenceBuffer, offset: 0, index: 0)
+        computeEncoder.setBuffer(modeBuffer, offset: 0, index: 1)
+
+        let threadgroupSize = MTLSize(width: 1, height: 1, depth: 1)
+        let threadgroups = MTLSize(width: 1, height: 1, depth: 1)
+        computeEncoder.dispatchThreadgroups(threadgroups, threadsPerThreadgroup: threadgroupSize)
+        computeEncoder.endEncoding()
+
+        // Read back the render mode decision
+        commandBuffer.addCompletedHandler { [weak self] _ in
+            guard let self = self else { return }
+            let modePointer = modeBuffer.contents().bindMemory(to: UInt32.self, capacity: 1)
+            let newMode = modePointer.pointee
+
+            if newMode != self.currentRenderMode {
+                self.currentRenderMode = newMode
+                self.applyRenderMode(newMode)
+            }
+        }
+    }
+
+    /// Apply render mode to splat renderer
+    private func applyRenderMode(_ mode: UInt32) {
+        switch mode {
+        case 0: // Basic quality - reduce splat density for performance
+            splatRenderer.sortDirectionEpsilon = 0.2 // Less frequent sorting
+            logVerbose("ARSplatRenderer: 📉 Switched to BASIC quality mode (tracking poor)")
+
+        case 1: // Medium quality - balanced
+            splatRenderer.sortDirectionEpsilon = 0.1 // Moderate sorting
+            logVerbose("ARSplatRenderer: ⚖️ Switched to MEDIUM quality mode (tracking limited)")
+
+        case 2: // High quality - full detail
+            splatRenderer.sortDirectionEpsilon = 0.05 // Frequent sorting for best quality
+            logVerbose("ARSplatRenderer: 🎯 Switched to HIGH quality mode (tracking excellent)")
+
+        default:
+            break
+        }
+    }
+
     private func setupARSession() {
         session.delegate = self
     }
@@ -972,13 +1060,13 @@ extension ARSplatRenderer: ARSessionDelegate {
     @available(iOS 26.0, *)
     private func enableTensorBasedARFeatures() {
         guard isMetal4BindlessAvailable else { return }
-        
+
         // Initialize tensor-based AR enhancements
         if let tensorFunction = library.makeFunction(name: "ar_ml_surface_detection") {
             do {
-                let tensorPipeline = try device.makeComputePipelineState(function: tensorFunction)
+                surfaceDetectionPipeline = try device.makeComputePipelineState(function: tensorFunction)
                 print("ARSplatRenderer: ✅ Enabled tensor-based AR surface detection")
-                
+
                 // This would enable:
                 // - ML-based surface detection
                 // - Enhanced object recognition
@@ -996,11 +1084,15 @@ extension ARSplatRenderer: ARSessionDelegate {
             print("ARSplatRenderer: ⚠️ Adaptive AR quality function not found")
             return
         }
-        
+
         do {
-            let adaptivePipeline = try device.makeComputePipelineState(function: adaptiveFunction)
+            adaptiveQualityPipeline = try device.makeComputePipelineState(function: adaptiveFunction)
+
+            // Create buffer for render mode (shared between CPU and GPU)
+            renderModeBuffer = device.makeBuffer(length: MemoryLayout<UInt32>.stride, options: .storageModeShared)
+
             print("ARSplatRenderer: ✅ Enabled GPU-driven adaptive AR quality")
-            
+
             // This enables the GPU to automatically adjust rendering quality
             // based on AR tracking confidence and performance metrics
         } catch {
