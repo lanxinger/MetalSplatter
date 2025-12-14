@@ -45,10 +45,7 @@ struct ContentView: View {
                     MetalKitSceneView(modelIdentifier: modelIdentifier)
                         .navigationTitle(modelIdentifier.description)
                 }
-                .navigationDestination(for: ARModelIdentifier.self) { arModelIdentifier in
-                    ARContentView(model: arModelIdentifier.model)
-                        .navigationTitle("AR \(arModelIdentifier.model?.description ?? "View")")
-                }
+                // Note: ARModelIdentifier removed - it was never used. AR navigation would use ModelIdentifier directly if needed.
         }
 #endif // os(iOS)
     }

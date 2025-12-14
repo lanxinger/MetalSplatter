@@ -20,12 +20,12 @@ class ARSceneRenderer: NSObject, MTKViewDelegate {
     let device: MTLDevice
     let commandQueue: MTLCommandQueue
     private let commandBufferManager: CommandBufferManager
-    
+
     var model: ModelIdentifier?
     private var arSplatRenderer: ARSplatRenderer?
-    
-    let inFlightSemaphore = DispatchSemaphore(value: Constants.maxSimultaneousRenders)
-    
+
+    // Note: Semaphore removed - ARSplatRenderer's underlying SplatRenderer already manages concurrent frames
+
     var drawableSize: CGSize = .zero
     
     // AR Session state
@@ -171,18 +171,11 @@ class ARSceneRenderer: NSObject, MTKViewDelegate {
             return 
         }
         
-        guard let drawable = view.currentDrawable else { 
+        guard let drawable = view.currentDrawable else {
             Self.log.error("No drawable available")
-            return 
+            return
         }
-        
-        _ = inFlightSemaphore.wait(timeout: DispatchTime.distantFuture)
-        
-        let semaphore = inFlightSemaphore
-        defer {
-            semaphore.signal()
-        }
-        
+
         do {
             try arSplatRenderer.render(to: drawable, viewportSize: drawableSize)
             // Removed excessive per-frame logging

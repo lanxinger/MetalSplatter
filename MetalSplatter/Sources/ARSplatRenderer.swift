@@ -46,7 +46,7 @@ public class ARSplatRenderer: NSObject {
     private var arSessionStartTime: CFTimeInterval = 0 // Track when AR session started
     private var isWaitingForARTracking = true // Track if we're waiting for AR to stabilize
     private var lastAutoPlacementEvaluationTime: CFTimeInterval = 0
-    private let autoPlacementEvaluationInterval: CFTimeInterval = 0.15
+    private let autoPlacementEvaluationInterval: CFTimeInterval = 0.3 // Reduced polling frequency (was 0.15s)
 
     // Track the loaded file URL for coordinate calibration
     private var loadedFileURL: URL?
@@ -220,7 +220,7 @@ public class ARSplatRenderer: NSObject {
         // Note: Removed composition pipeline creation for single-pass rendering
         
         super.init()
-        
+
         // Initialize additional Metal 4 AR enhancements after super.init()
         if #available(iOS 26.0, *) {
             do {
@@ -231,7 +231,7 @@ public class ARSplatRenderer: NSObject {
                 print("ARSplatRenderer: ⚠️ Failed to initialize Metal 4 AR enhancements: \(error.localizedDescription)")
             }
         }
-        
+
         // Log device AR capabilities
         logARCapabilities()
         
@@ -903,28 +903,9 @@ extension ARSplatRenderer: ARSessionDelegate {
         // print("AR Session: Received frame update")
     }
     
-    // MARK: - Public Interface for SampleApp Integration
-    
-    public func renderAsModelRenderer(viewports: [Any], // Will be ModelRendererViewportDescriptor from SampleApp
-                                     colorTexture: MTLTexture,
-                                     colorStoreAction: MTLStoreAction,
-                                     depthTexture: MTLTexture?,
-                                     depthStoreAction: MTLStoreAction = .dontCare,
-                                     rasterizationRateMap: MTLRasterizationRateMap?,
-                                     renderTargetArrayLength: Int,
-                                     to commandBuffer: MTLCommandBuffer) throws {
-        // For AR, we ignore the provided viewports and use AR camera data
-        let viewportSize = CGSize(width: colorTexture.width, height: colorTexture.height)
-        
-        guard let drawable = colorTexture as? CAMetalDrawable else {
-            // If not a drawable, fall back to direct rendering to texture
-            try renderSplatsDirectlyToTexture(colorTexture, commandBuffer: commandBuffer)
-            return
-        }
-        
-        try render(to: drawable, viewportSize: viewportSize)
-    }
-    
+    // Note: renderAsModelRenderer removed - ARSplatRenderer is not used via the ModelRenderer protocol.
+    // AR rendering uses render(to:viewportSize:) directly from ARSceneRenderer.
+
     // MARK: - Metal 4 Configuration
     
     /// Enable or disable Metal 4 bindless rendering
@@ -1029,6 +1010,7 @@ extension ARSplatRenderer: ARSessionDelegate {
     
     /// Log Metal 4 capabilities and status
     private func logMetal4Capabilities() {
+        #if DEBUG
         print("ARSplatRenderer: === Metal 4 Capabilities ===")
         
         // Check iOS version
@@ -1072,6 +1054,7 @@ extension ARSplatRenderer: ARSessionDelegate {
         print("ARSplatRenderer: Device: \(device.name)")
         print("ARSplatRenderer: GPU Families: \(getSupportedGPUFamilies())")
         print("ARSplatRenderer: === End Metal 4 Capabilities ===")
+        #endif
     }
     
     /// Get supported GPU families as string for logging
@@ -1096,6 +1079,7 @@ extension ARSplatRenderer: ARSessionDelegate {
     
     /// Log which rendering path is actually being used at runtime
     private func logActiveRenderingPath() {
+        #if DEBUG
         print("ARSplatRenderer: === Active Rendering Path ===")
         
         // Check if Metal 4 bindless is active
@@ -1148,6 +1132,7 @@ extension ARSplatRenderer: ARSessionDelegate {
         }
         
         print("ARSplatRenderer: === End Active Rendering Path ===")
+        #endif
     }
 }
 
