@@ -29,6 +29,9 @@ struct RenderSettings: View {
     @Binding var batchPrecomputeEnabled: Bool  // TensorOps batch precompute
     @Binding var meshShaderEnabled: Bool  // Mesh shaders (Metal 3+)
     @Binding var ditheredTransparencyEnabled: Bool  // Stochastic transparency (order-independent)
+    @Binding var binnedSortingEnabled: Bool  // Camera-relative binned MPS sorting
+    @Binding var packedSplatsEnabled: Bool  // 16B packed splats
+    @Binding var chunkHistogramEnabled: Bool  // Chunk histogram bin weighting
     @State private var isMetal4Available: Bool = false
     @State private var metal4SIMDGroupEnabled: Bool = true
     @State private var metal4AtomicSortEnabled: Bool = true
@@ -97,6 +100,45 @@ struct RenderSettings: View {
                     Text("Dithered Transparency")
                         .font(.subheadline)
                     Text("Order-independent, no sorting needed (best with TAA)")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+            }
+
+            Divider()
+
+            // Binned Sorting Toggle - camera-relative precision keys
+            Toggle(isOn: $binnedSortingEnabled) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Binned Sorting (MPS)")
+                        .font(.subheadline)
+                    Text("Disables counting sort; uses camera-relative binning")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+            }
+
+            Divider()
+
+            // Packed Splats Toggle
+            Toggle(isOn: $packedSplatsEnabled) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Packed Splats (16B)")
+                        .font(.subheadline)
+                    Text("GPU unpacks position/rotation/scale/color")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+            }
+
+            Divider()
+
+            // Chunk Histogram Toggle
+            Toggle(isOn: $chunkHistogramEnabled) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Chunk Histogram Binning")
+                        .font(.subheadline)
+                    Text("Weights bins using 256-splat chunk bounds")
                         .font(.caption)
                         .foregroundColor(.secondary)
                 }
@@ -215,6 +257,9 @@ struct EnhancedMetalKitSceneView: View {
     @State private var batchPrecomputeEnabled = true // TensorOps batch precompute - enabled by default
     @State private var meshShaderEnabled = true // Mesh shaders - enabled by default for Metal 3+ devices
     @State private var ditheredTransparencyEnabled = false // Stochastic transparency - disabled by default
+    @State private var binnedSortingEnabled = false // Camera-relative binned MPS sorting
+    @State private var packedSplatsEnabled = false // 16B packed splats
+    @State private var chunkHistogramEnabled = false // Chunk histogram bin weighting
     @State private var showARUnavailableAlert = false
     @State private var navigateToAR = false
     
@@ -229,7 +274,8 @@ struct EnhancedMetalKitSceneView: View {
                 showDebugAABB: $showDebugAABB,
                 batchPrecomputeEnabled: $batchPrecomputeEnabled,
                 meshShaderEnabled: $meshShaderEnabled,
-                ditheredTransparencyEnabled: $ditheredTransparencyEnabled
+                ditheredTransparencyEnabled: $ditheredTransparencyEnabled,
+                binnedSortingEnabled: $binnedSortingEnabled
             )
             .ignoresSafeArea()
             
@@ -296,12 +342,15 @@ struct EnhancedMetalKitSceneView: View {
                                 fastSHEnabled: $fastSHEnabled,
                                 shRenderingEnabled: $shRenderingEnabled,
                                 metal4BindlessEnabled: $metal4BindlessEnabled,
-                                showDebugAABB: $showDebugAABB,
-                                batchPrecomputeEnabled: $batchPrecomputeEnabled,
-                                meshShaderEnabled: $meshShaderEnabled,
-                                ditheredTransparencyEnabled: $ditheredTransparencyEnabled,
-                                onDismiss: { showSettings = false }
-                            )
+                showDebugAABB: $showDebugAABB,
+                batchPrecomputeEnabled: $batchPrecomputeEnabled,
+                meshShaderEnabled: $meshShaderEnabled,
+                ditheredTransparencyEnabled: $ditheredTransparencyEnabled,
+                binnedSortingEnabled: $binnedSortingEnabled,
+                packedSplatsEnabled: $packedSplatsEnabled,
+                chunkHistogramEnabled: $chunkHistogramEnabled,
+                onDismiss: { showSettings = false }
+            )
                             .padding()
                             .background(Color(.systemBackground).opacity(0.9))
                             .cornerRadius(10)
@@ -358,6 +407,9 @@ struct MetalKitRendererViewEnhanced: ViewRepresentable {
     @Binding var batchPrecomputeEnabled: Bool
     @Binding var meshShaderEnabled: Bool
     @Binding var ditheredTransparencyEnabled: Bool
+    @Binding var binnedSortingEnabled: Bool
+    @Binding var packedSplatsEnabled: Bool
+    @Binding var chunkHistogramEnabled: Bool
     
     class Coordinator: NSObject, UIGestureRecognizerDelegate {
         var renderer: MetalKitSceneRenderer?
@@ -381,6 +433,9 @@ struct MetalKitRendererViewEnhanced: ViewRepresentable {
             renderer?.setBatchPrecompute(parent.batchPrecomputeEnabled)
             renderer?.setMeshShader(parent.meshShaderEnabled)
             renderer?.setDitheredTransparency(parent.ditheredTransparencyEnabled)
+            renderer?.setBinnedSorting(parent.binnedSortingEnabled)
+            renderer?.setPackedSplats(parent.packedSplatsEnabled)
+            renderer?.setChunkHistogramBinning(parent.chunkHistogramEnabled)
         }
     }
     
@@ -425,6 +480,9 @@ struct MetalKitRendererViewEnhanced: ViewRepresentable {
         renderer?.setBatchPrecompute(batchPrecomputeEnabled)
         renderer?.setMeshShader(meshShaderEnabled)
         renderer?.setDitheredTransparency(ditheredTransparencyEnabled)
+        renderer?.setBinnedSorting(binnedSortingEnabled)
+        renderer?.setPackedSplats(packedSplatsEnabled)
+        renderer?.setChunkHistogramBinning(chunkHistogramEnabled)
         
         // Add gesture recognizers (same as original)
         #if os(iOS)

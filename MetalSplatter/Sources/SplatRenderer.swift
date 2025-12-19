@@ -64,6 +64,7 @@ public class SplatRenderer {
         static let maxRenderDistance: Float = 100.0
         static let lodDistanceThresholds: [Float] = [10.0, 25.0, 50.0]
         static let lodSkipFactors: [Int] = [1, 2, 4, 8] // Skip every Nth splat based on distance
+        static let renderFlagUsePackedSplats: UInt32 = 1
     }
 
     internal static let log =
@@ -154,6 +155,8 @@ public class SplatRenderer {
         case uniforms       = 0
         case splat          = 1
         case sortedIndices  = 2  // GPU-side sorted indices for indirect rendering
+        case packedSplat    = 3
+        case packedChunk    = 4
     }
 
     // Keep in sync with Shaders.metal : Uniforms
@@ -165,6 +168,7 @@ public class SplatRenderer {
         var splatCount: UInt32
         var indexedSplatCount: UInt32
         var debugFlags: UInt32
+        var renderFlags: UInt32
         var lodThresholds: SIMD3<Float>
     }
 
@@ -441,6 +445,7 @@ public class SplatRenderer {
 
     // Sort buffer pools for GPU sorting operations (reuse across frames)
     private let sortDistanceBufferPool: MetalBufferPool<Float>
+    private let sortKeyBufferPool: MetalBufferPool<UInt32>
     private let sortIndexBufferPool: MetalBufferPool<Int32>
 
     // splatBuffer contains one entry for each gaussian splat (static, never reordered)
@@ -450,6 +455,13 @@ public class SplatRenderer {
     // Shaders use this to index into splatBuffer in the correct render order
     // This eliminates CPU readback and reordering - a major performance win
     var sortedIndicesBuffer: MetalBuffer<Int32>?
+
+    // Optional packed splat buffers (16B per splat + chunk metadata)
+    private var packedSplatBuffer: MetalBuffer<PackedSplat>?
+    private var packedChunkBuffer: MetalBuffer<PackedSplatChunk>?
+    private var packedSourcePoints: [SplatScenePoint] = []
+    private let packedSplatFallbackBuffer: MetalBuffer<PackedSplat>
+    private let packedChunkFallbackBuffer: MetalBuffer<PackedSplatChunk>
     
     // Legacy: splatBufferPrime kept for CPU fallback sorting path
     var splatBufferPrime: MetalBuffer<Splat>
@@ -478,12 +490,30 @@ public class SplatRenderer {
 
     // O(n) Counting Sort - faster than MPS argSort for large splat counts
     private var countingSorter: CountingSorter?
+    private var binnedSorter: BinnedSorter?
 
     /// When true, uses O(n) counting sort instead of O(n log n) MPS argSort.
     /// Counting sort is faster for large splat counts (>50K) and provides
     /// sufficient depth precision (16-bit quantization) for visual correctness.
     /// Set to false to use the traditional MPS-based radix sort.
     public var useCountingSort: Bool = true
+
+    /// When true, uses camera-relative binned keys for the MPS sort path.
+    /// This is only used when counting sort is disabled.
+    public var useBinnedSorting: Bool = false
+
+    /// When true, uses chunk histogram weighting for binned sorting (CPU setup).
+    public var useChunkHistogramBinning: Bool = false
+
+    /// When true, render splats from the 16B packed buffer instead of the full Splat buffer.
+    /// Packed buffers are built on demand from stored source points for A/B testing.
+    public var usePackedSplats: Bool = false {
+        didSet {
+            if usePackedSplats {
+                rebuildPackedBuffersIfPossible()
+            }
+        }
+    }
 
     public init(device: MTLDevice,
                 colorFormat: MTLPixelFormat,
@@ -549,6 +579,13 @@ public class SplatRenderer {
         )
         self.sortDistanceBufferPool = MetalBufferPool(device: device, configuration: sortDistancePoolConfig)
 
+        let sortKeyPoolConfig = MetalBufferPool<UInt32>.Configuration(
+            maxPoolSize: 4,
+            maxBufferAge: 30.0,
+            memoryPressureThreshold: 0.75
+        )
+        self.sortKeyBufferPool = MetalBufferPool(device: device, configuration: sortKeyPoolConfig)
+
         let sortIndexPoolConfig = MetalBufferPool<Int32>.Configuration(
             maxPoolSize: 4,  // Keep a few sort buffers cached
             maxBufferAge: 30.0,  // Short age since sort patterns are stable
@@ -560,6 +597,8 @@ public class SplatRenderer {
         self.splatBuffer = try splatBufferPool.acquire(minimumCapacity: 1)
         self.splatBufferPrime = try splatBufferPool.acquire(minimumCapacity: 1)
         self.indexBuffer = try indexBufferPool.acquire(minimumCapacity: 1)
+        self.packedSplatFallbackBuffer = try MetalBuffer(device: device, capacity: 1)
+        self.packedChunkFallbackBuffer = try MetalBuffer(device: device, capacity: 1)
 
         do {
             library = try device.makeDefaultLibrary(bundle: Bundle.module)
@@ -640,6 +679,14 @@ public class SplatRenderer {
         } catch {
             Self.log.warning("Failed to initialize counting sorter, using MPS fallback: \(error)")
         }
+
+        // Initialize camera-relative binned sorter (optional MPS path)
+        do {
+            binnedSorter = try BinnedSorter(device: device, library: library)
+            Self.log.info("Camera-relative binned sorter available")
+        } catch {
+            Self.log.warning("Failed to initialize binned sorter: \(error)")
+        }
     }
     
     /// Check if mesh shaders are supported and set up the pipeline
@@ -712,12 +759,18 @@ public class SplatRenderer {
         if let sortedIndices = sortedIndicesBuffer {
             sortIndexBufferPool.release(sortedIndices)
         }
+        packedSplatBuffer = nil
+        packedChunkBuffer = nil
     }
 
     public func reset() {
         // Clear current buffers and return them to pools
         splatBufferPool.release(splatBuffer)
         splatBufferPool.release(splatBufferPrime)
+
+        packedSplatBuffer = nil
+        packedChunkBuffer = nil
+        packedSourcePoints.removeAll(keepingCapacity: true)
         
         // Invalidate cached bounds
         cachedBounds = nil
@@ -1037,6 +1090,42 @@ public class SplatRenderer {
         try splatBuffer.ensureCapacity(splatBuffer.count + pointCount)
     }
 
+    private func rebuildPackedBuffers(from points: [SplatScenePoint]) throws {
+        let packed = PackedSplatBuilder.build(from: points)
+
+        if packedSplatBuffer == nil {
+            packedSplatBuffer = try MetalBuffer(device: device, capacity: max(1, packed.splats.count))
+        }
+        if let buffer = packedSplatBuffer {
+            try buffer.ensureCapacity(packed.splats.count)
+            buffer.count = packed.splats.count
+            if !packed.splats.isEmpty {
+                buffer.values.update(from: packed.splats, count: packed.splats.count)
+            }
+        }
+
+        if packedChunkBuffer == nil {
+            packedChunkBuffer = try MetalBuffer(device: device, capacity: max(1, packed.chunks.count))
+        }
+        if let buffer = packedChunkBuffer {
+            try buffer.ensureCapacity(packed.chunks.count)
+            buffer.count = packed.chunks.count
+            if !packed.chunks.isEmpty {
+                buffer.values.update(from: packed.chunks, count: packed.chunks.count)
+            }
+        }
+    }
+
+    private func rebuildPackedBuffersIfPossible() {
+        guard (usePackedSplats || packedSplatBuffer != nil),
+              !packedSourcePoints.isEmpty else { return }
+        do {
+            try rebuildPackedBuffers(from: packedSourcePoints)
+        } catch {
+            Self.log.warning("Failed to rebuild packed splat buffers: \(error)")
+        }
+    }
+
     public func add(_ points: [SplatScenePoint]) throws {
         // Validate all points before adding any
         try SplatDataValidator.validatePoints(points)
@@ -1064,6 +1153,8 @@ public class SplatRenderer {
         }
 
         splatBuffer.append(orderedPoints.map { Splat($0) })
+        packedSourcePoints.append(contentsOf: orderedPoints)
+        rebuildPackedBuffersIfPossible()
         markGeometryDirty()  // New splats affect geometry and require re-sorting
         colorsDirty = true   // New splats also have new colors
 
@@ -1125,6 +1216,15 @@ public class SplatRenderer {
             )
         }
 
+        if packedSourcePoints.count == count {
+            for i in 0..<count {
+                let c = colors[i]
+                packedSourcePoints[i].color = .linearFloat(SIMD3<Float>(c.x, c.y, c.z))
+                packedSourcePoints[i].opacity = .linearFloat(c.w)
+            }
+            rebuildPackedBuffersIfPossible()
+        }
+
         // Mark only colors as dirty, NOT geometry
         colorsDirty = true
         colorRevision &+= 1
@@ -1157,6 +1257,15 @@ public class SplatRenderer {
             )
         }
 
+        if packedSourcePoints.count == count {
+            for (i, colorIndex) in range.enumerated() {
+                let c = colors[i]
+                packedSourcePoints[colorIndex].color = .linearFloat(SIMD3<Float>(c.x, c.y, c.z))
+                packedSourcePoints[colorIndex].opacity = .linearFloat(c.w)
+            }
+            rebuildPackedBuffersIfPossible()
+        }
+
         colorsDirty = true
         colorRevision &+= 1
     }
@@ -1175,6 +1284,11 @@ public class SplatRenderer {
         splatBuffer.values[index].color = PackedRGBHalf4(
             r: Float16(color.x), g: Float16(color.y), b: Float16(color.z), a: Float16(color.w)
         )
+        if packedSourcePoints.count == count {
+            packedSourcePoints[index].color = .linearFloat(SIMD3<Float>(color.x, color.y, color.z))
+            packedSourcePoints[index].opacity = .linearFloat(color.w)
+            rebuildPackedBuffersIfPossible()
+        }
         colorsDirty = true
         colorRevision &+= 1
     }
@@ -1338,6 +1452,7 @@ public class SplatRenderer {
             splatCount: UInt32(splatCount),
             indexedSplatCount: UInt32(min(splatCount, Constants.maxIndexedSplatCount)),
             debugFlags: 0,
+            renderFlags: 0,
             lodThresholds: SIMD3<Float>(Constants.lodDistanceThresholds[0],
                                          Constants.lodDistanceThresholds[1],
                                          Constants.lodDistanceThresholds[2])
@@ -1570,6 +1685,18 @@ public class SplatRenderer {
         }
     }
 
+    private var isPackedRenderingEnabled: Bool {
+        guard !(self is FastSHSplatRenderer) else { return false }
+        return usePackedSplats && packedSplatBuffer != nil && packedChunkBuffer != nil
+    }
+
+    private func compareBits(for splatCount: Int) -> UInt32 {
+        let safeCount = max(1, splatCount)
+        let rawBits = Int(round(log2(Double(safeCount) / 4.0)))
+        let clamped = max(10, min(20, rawBits))
+        return UInt32(clamped)
+    }
+
     private func shouldResortForCurrentCamera() -> Bool {
         if sortDirtyDueToData {
             return true
@@ -1618,6 +1745,7 @@ public class SplatRenderer {
     internal func updateUniforms(forViewports viewports: [ViewportDescriptor],
                                 splatCount: UInt32,
                                 indexedSplatCount: UInt32) {
+        let renderFlags = isPackedRenderingEnabled ? Constants.renderFlagUsePackedSplats : 0
         for (i, viewport) in viewports.enumerated() where i <= maxViewCount {
             let debugFlags = debugOptions.rawValue
             let uniforms = Uniforms(projectionMatrix: viewport.projectionMatrix,
@@ -1626,6 +1754,7 @@ public class SplatRenderer {
                                     splatCount: splatCount,
                                     indexedSplatCount: indexedSplatCount,
                                     debugFlags: debugFlags,
+                                    renderFlags: renderFlags,
                                     lodThresholds: lodThresholds)
             self.uniforms.pointee.setUniforms(index: i, uniforms)
         }
@@ -1780,10 +1909,16 @@ public class SplatRenderer {
             renderEncoder.setObjectBuffer(dynamicUniformBuffers, offset: uniformBufferOffset, index: BufferIndex.uniforms.rawValue)
             renderEncoder.setObjectBuffer(splatBuffer.buffer, offset: 0, index: BufferIndex.splat.rawValue)
             renderEncoder.setObjectBuffer(sortedIndices.buffer, offset: 0, index: BufferIndex.sortedIndices.rawValue)
-            
+            let packedSplatBinding = packedSplatBuffer ?? packedSplatFallbackBuffer
+            let packedChunkBinding = packedChunkBuffer ?? packedChunkFallbackBuffer
+            renderEncoder.setObjectBuffer(packedSplatBinding.buffer, offset: 0, index: BufferIndex.packedSplat.rawValue)
+            renderEncoder.setObjectBuffer(packedChunkBinding.buffer, offset: 0, index: BufferIndex.packedChunk.rawValue)
+
             renderEncoder.setMeshBuffer(dynamicUniformBuffers, offset: uniformBufferOffset, index: BufferIndex.uniforms.rawValue)
             renderEncoder.setMeshBuffer(splatBuffer.buffer, offset: 0, index: BufferIndex.splat.rawValue)
             renderEncoder.setMeshBuffer(sortedIndices.buffer, offset: 0, index: BufferIndex.sortedIndices.rawValue)
+            renderEncoder.setMeshBuffer(packedSplatBinding.buffer, offset: 0, index: BufferIndex.packedSplat.rawValue)
+            renderEncoder.setMeshBuffer(packedChunkBinding.buffer, offset: 0, index: BufferIndex.packedChunk.rawValue)
             
             // Calculate number of meshlets needed
             // Each meshlet handles 64 splats (increased from 32, limited by Metal's 256 vertex max)
@@ -1890,6 +2025,10 @@ public class SplatRenderer {
 
         renderEncoder.setVertexBuffer(dynamicUniformBuffers, offset: uniformBufferOffset, index: BufferIndex.uniforms.rawValue)
         renderEncoder.setVertexBuffer(splatBuffer.buffer, offset: 0, index: BufferIndex.splat.rawValue)
+        let packedSplatBinding = packedSplatBuffer ?? packedSplatFallbackBuffer
+        let packedChunkBinding = packedChunkBuffer ?? packedChunkFallbackBuffer
+        renderEncoder.setVertexBuffer(packedSplatBinding.buffer, offset: 0, index: BufferIndex.packedSplat.rawValue)
+        renderEncoder.setVertexBuffer(packedChunkBinding.buffer, offset: 0, index: BufferIndex.packedChunk.rawValue)
         
         // GPU-only sorting: pass sorted indices buffer to shader
         // Note: Frustum culling stats are computed but we still use sorted indices for correct rendering
@@ -1973,13 +2112,14 @@ public class SplatRenderer {
 
         // Collect buffer pool statistics for performance monitoring
         let distancePoolStats = sortDistanceBufferPool.getStatistics()
+        let keyPoolStats = sortKeyBufferPool.getStatistics()
         let indexPoolStats = sortIndexBufferPool.getStatistics()
 
-        // Combine sort buffer pool stats (distance + index buffers)
+        // Combine sort buffer pool stats (distance + key + index buffers)
         let sortBufferStats = FrameStatistics.BufferPoolStats(
-            availableBuffers: distancePoolStats.availableBuffers + indexPoolStats.availableBuffers,
-            leasedBuffers: distancePoolStats.leasedBuffers + indexPoolStats.leasedBuffers,
-            totalMemoryMB: distancePoolStats.totalMemoryMB + indexPoolStats.totalMemoryMB
+            availableBuffers: distancePoolStats.availableBuffers + keyPoolStats.availableBuffers + indexPoolStats.availableBuffers,
+            leasedBuffers: distancePoolStats.leasedBuffers + keyPoolStats.leasedBuffers + indexPoolStats.leasedBuffers,
+            totalMemoryMB: distancePoolStats.totalMemoryMB + keyPoolStats.totalMemoryMB + indexPoolStats.totalMemoryMB
         )
 
         let stats = FrameStatistics(
@@ -2134,6 +2274,86 @@ public class SplatRenderer {
                     commandBuffer.commit()
                     commandBuffer.waitUntilCompleted()
 
+                } else if self.useBinnedSorting, let sorter = self.binnedSorter {
+                    // === CAMERA-RELATIVE BINNED MPS PATH ===
+                    // Uses binned uint keys before argSort to bias precision near the camera
+
+                    let keyBuffer: MetalBuffer<UInt32>
+                    do {
+                        keyBuffer = try sortKeyBufferPool.acquire(minimumCapacity: splatCount)
+                        keyBuffer.count = splatCount
+                    } catch {
+                        Self.log.error("Failed to acquire binned key buffer from pool: \(error)")
+                        sortIndexBufferPool.release(indexOutputBuffer)
+                        self.sorting = false
+                        self.sortJobsInFlight -= 1
+                        return
+                    }
+
+                    guard let commandBuffer = commandBufferManager.makeCommandBuffer() else {
+                        Self.log.error("Failed to create compute command buffer.")
+                        sortKeyBufferPool.release(keyBuffer)
+                        sortIndexBufferPool.release(indexOutputBuffer)
+                        self.sorting = false
+                        self.sortJobsInFlight -= 1
+                        return
+                    }
+
+                    let splatPointer = UnsafeBufferPointer(start: splatBuffer.values, count: splatCount)
+                    let bounds = sorter.computeDistanceBounds(
+                        splats: splatPointer,
+                        cameraPosition: cameraWorldPosition,
+                        cameraForward: cameraWorldForward,
+                        sortByDistance: Constants.sortByDistance
+                    )
+                    let minDist = bounds.min
+                    let range = max(bounds.max - bounds.min, 0.001)
+                    let maxDist = minDist + range
+                    let compareBits = self.compareBits(for: splatCount)
+
+                    if self.useChunkHistogramBinning {
+                        sorter.setupBinsWithChunkHistogram(
+                            minDist: minDist,
+                            maxDist: maxDist,
+                            cameraPosition: cameraWorldPosition,
+                            cameraForward: cameraWorldForward,
+                            sortByDistance: Constants.sortByDistance,
+                            compareBits: compareBits,
+                            splats: splatPointer
+                        )
+                    } else {
+                        sorter.setupBins(
+                            commandBuffer: commandBuffer,
+                            minDist: minDist,
+                            maxDist: maxDist,
+                            cameraPosition: cameraWorldPosition,
+                            sortByDistance: Constants.sortByDistance,
+                            compareBits: compareBits
+                        )
+                    }
+                    sorter.computeBinnedDistances(
+                        commandBuffer: commandBuffer,
+                        splatBuffer: splatBuffer.buffer,
+                        outputBuffer: keyBuffer.buffer,
+                        cameraPosition: cameraWorldPosition,
+                        cameraForward: cameraWorldForward,
+                        sortByDistance: Constants.sortByDistance,
+                        splatCount: splatCount,
+                        minDist: minDist,
+                        range: range
+                    )
+
+                    commandBuffer.commit()
+                    commandBuffer.waitUntilCompleted()
+
+                    let sortQueue = self.computeCommandBufferManager?.queue ?? commandBufferManager.queue
+                    let argSort = MPSArgSort(dataType: .uInt32, descending: true)
+                    argSort(commandQueue: sortQueue,
+                            input: keyBuffer.buffer,
+                            output: indexOutputBuffer.buffer,
+                            count: splatCount)
+
+                    sortKeyBufferPool.release(keyBuffer)
                 } else {
                     // === LEGACY MPS ARGSORT PATH ===
                     // Falls back to O(n log n) MPS-based radix sort

@@ -12,7 +12,11 @@ enum BufferIndex: int32_t
     BufferIndexUniforms      = 0,
     BufferIndexSplat         = 1,
     BufferIndexSortedIndices = 2,  // GPU-side sorted indices for indirect rendering
+    BufferIndexPackedSplat   = 3,
+    BufferIndexPackedChunk   = 4,
 };
+
+constant uint RenderFlagUsePackedSplats = 1u;
 
 typedef struct
 {
@@ -28,6 +32,7 @@ typedef struct
     uint splatCount;
     uint indexedSplatCount;
     uint debugFlags;
+    uint renderFlags;
     float3 lodThresholds;
 } Uniforms;
 
@@ -43,6 +48,21 @@ typedef struct
     packed_half3 covA;
     packed_half3 covB;
 } Splat;
+
+typedef struct
+{
+    uint4 data;
+} PackedSplat;
+
+typedef struct
+{
+    packed_float3 minPosition;
+    packed_float3 maxPosition;
+    packed_float3 minScale;
+    packed_float3 maxScale;
+    packed_float3 minColor;
+    packed_float3 maxColor;
+} PackedSplatChunk;
 
 typedef struct
 {

@@ -6,6 +6,8 @@ vertex FragmentIn singleStageSplatVertexShader(uint vertexID [[vertex_id]],
                                                uint instanceID [[instance_id]],
                                                ushort amplificationID [[amplification_id]],
                                                constant Splat* splatArray [[ buffer(BufferIndexSplat) ]],
+                                               constant PackedSplat* packedSplats [[ buffer(BufferIndexPackedSplat) ]],
+                                               constant PackedSplatChunk* packedChunks [[ buffer(BufferIndexPackedChunk) ]],
                                                constant UniformsArray & uniformsArray [[ buffer(BufferIndexUniforms) ]],
                                                constant int32_t* sortedIndices [[ buffer(BufferIndexSortedIndices) ]]) {
     Uniforms uniforms = uniformsArray.uniforms[min(int(amplificationID), kMaxViewCount)];
@@ -24,7 +26,15 @@ vertex FragmentIn singleStageSplatVertexShader(uint vertexID [[vertex_id]],
     // Use sorted index to access splat in depth-sorted order
     // sortedIndices maps logical draw order → actual splat index in buffer
     uint actualSplatID = uint(sortedIndices[logicalSplatID]);
-    Splat splat = splatArray[actualSplatID];
+    Splat splat;
+    bool usePacked = (uniforms.renderFlags & RenderFlagUsePackedSplats) != 0;
+    if (usePacked) {
+        PackedSplat packed = packedSplats[actualSplatID];
+        PackedSplatChunk chunk = packedChunks[actualSplatID >> 8];
+        splat = decodePackedSplat(packed, chunk);
+    } else {
+        splat = splatArray[actualSplatID];
+    }
 
     return splatVertex(splat, uniforms, vertexID % 4);
 }

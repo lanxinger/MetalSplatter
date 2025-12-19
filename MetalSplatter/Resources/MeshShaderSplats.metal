@@ -139,6 +139,8 @@ void splatObjectShader(
     uint simdGroupId [[simdgroup_index_in_threadgroup]],
     uint meshletIndex [[threadgroup_position_in_grid]],
     constant Splat* splatArray [[buffer(BufferIndexSplat)]],
+    constant PackedSplat* packedSplats [[buffer(BufferIndexPackedSplat)]],
+    constant PackedSplatChunk* packedChunks [[buffer(BufferIndexPackedChunk)]],
     constant UniformsArray& uniformsArray [[buffer(BufferIndexUniforms)]],
     constant int32_t* sortedIndices [[buffer(BufferIndexSortedIndices)]],
     object_data MeshletPayload& payload [[payload]],
@@ -159,9 +161,16 @@ void splatObjectShader(
     
     if (isValid) {
         uint actualSplatIndex = uint(sortedIndices[globalSortedIndex]);
-        Splat splat = splatArray[actualSplatIndex];
-        
-        float3 splatPos = float3(splat.position);
+        bool usePacked = (uniforms.renderFlags & RenderFlagUsePackedSplats) != 0;
+        float3 splatPos;
+        if (usePacked) {
+            PackedSplat packed = packedSplats[actualSplatIndex];
+            PackedSplatChunk chunk = packedChunks[actualSplatIndex >> 8];
+            splatPos = decodePackedPosition(packed, chunk);
+        } else {
+            Splat splat = splatArray[actualSplatIndex];
+            splatPos = float3(splat.position);
+        }
         viewPos = uniforms.viewMatrix[0].xyz * splatPos.x +
                   uniforms.viewMatrix[1].xyz * splatPos.y +
                   uniforms.viewMatrix[2].xyz * splatPos.z +
@@ -251,6 +260,8 @@ void splatMeshShader(
     SplatMeshType outputMesh,
     const object_data MeshletPayload& payload [[payload]],
     constant Splat* splatArray [[buffer(BufferIndexSplat)]],
+    constant PackedSplat* packedSplats [[buffer(BufferIndexPackedSplat)]],
+    constant PackedSplatChunk* packedChunks [[buffer(BufferIndexPackedChunk)]],
     constant UniformsArray& uniformsArray [[buffer(BufferIndexUniforms)]],
     constant int32_t* sortedIndices [[buffer(BufferIndexSortedIndices)]],
     uint threadIndex [[thread_index_in_threadgroup]]
@@ -270,7 +281,15 @@ void splatMeshShader(
     uint globalSortedIndex = payload.meshletStartIndex + localIndex;
     uint actualSplatIndex = uint(sortedIndices[globalSortedIndex]);
     
-    Splat splat = splatArray[actualSplatIndex];
+    Splat splat;
+    bool usePacked = (uniforms.renderFlags & RenderFlagUsePackedSplats) != 0;
+    if (usePacked) {
+        PackedSplat packed = packedSplats[actualSplatIndex];
+        PackedSplatChunk chunk = packedChunks[actualSplatIndex >> 8];
+        splat = decodePackedSplat(packed, chunk);
+    } else {
+        splat = splatArray[actualSplatIndex];
+    }
     float3 viewPos = payload.viewPositions[threadIndex];
     
     // Compute 2D covariance ONCE per splat (key optimization vs vertex shader)

@@ -23,6 +23,9 @@ struct MetalKitSceneView: View {
     @State private var frustumCullingEnabled = false // GPU frustum culling
     @State private var meshShaderEnabled = true // Metal 3+ mesh shader rendering - enabled by default
     @State private var ditheredTransparencyEnabled = false // Stochastic transparency - disabled by default
+    @State private var binnedSortingEnabled = false // Camera-relative binned MPS sorting
+    @State private var packedSplatsEnabled = false // 16B packed splats
+    @State private var chunkHistogramEnabled = false // Chunk histogram bin weighting
     
     var body: some View {
         ZStack {
@@ -34,7 +37,10 @@ struct MetalKitSceneView: View {
                 showDebugAABB: $showDebugAABB,
                 frustumCullingEnabled: $frustumCullingEnabled,
                 meshShaderEnabled: $meshShaderEnabled,
-                ditheredTransparencyEnabled: $ditheredTransparencyEnabled
+                ditheredTransparencyEnabled: $ditheredTransparencyEnabled,
+                binnedSortingEnabled: $binnedSortingEnabled,
+                packedSplatsEnabled: $packedSplatsEnabled,
+                chunkHistogramEnabled: $chunkHistogramEnabled
             )
             .ignoresSafeArea()
             
@@ -167,6 +173,45 @@ struct MetalKitSceneView: View {
 
                             Divider()
 
+                            // Binned Sorting Toggle (MPS)
+                            Toggle(isOn: $binnedSortingEnabled) {
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text("Binned Sorting (MPS)")
+                                        .font(.subheadline)
+                                    Text("Disables counting sort; uses camera-relative binning")
+                                        .font(.caption)
+                                        .foregroundColor(.secondary)
+                                }
+                            }
+
+                            Divider()
+
+                            // Packed Splats Toggle
+                            Toggle(isOn: $packedSplatsEnabled) {
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text("Packed Splats (16B)")
+                                        .font(.subheadline)
+                                    Text("GPU unpacks position/rotation/scale/color")
+                                        .font(.caption)
+                                        .foregroundColor(.secondary)
+                                }
+                            }
+
+                            Divider()
+
+                            // Chunk Histogram Toggle
+                            Toggle(isOn: $chunkHistogramEnabled) {
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text("Chunk Histogram Binning")
+                                        .font(.subheadline)
+                                    Text("Weights bins using 256-splat chunk bounds")
+                                        .font(.caption)
+                                        .foregroundColor(.secondary)
+                                }
+                            }
+
+                            Divider()
+
                             // Mesh Shader Toggle (Metal 3+)
                             Toggle(isOn: $meshShaderEnabled) {
                                 VStack(alignment: .leading, spacing: 2) {
@@ -277,6 +322,9 @@ struct MetalKitRendererView: ViewRepresentable {
     @Binding var frustumCullingEnabled: Bool
     @Binding var meshShaderEnabled: Bool
     @Binding var ditheredTransparencyEnabled: Bool
+    @Binding var binnedSortingEnabled: Bool
+    @Binding var packedSplatsEnabled: Bool
+    @Binding var chunkHistogramEnabled: Bool
 
     class Coordinator: NSObject {
         var renderer: MetalKitSceneRenderer?
@@ -300,6 +348,9 @@ struct MetalKitRendererView: ViewRepresentable {
             renderer?.setFrustumCulling(parent.frustumCullingEnabled)
             renderer?.setMeshShader(parent.meshShaderEnabled)
             renderer?.setDitheredTransparency(parent.ditheredTransparencyEnabled)
+            renderer?.setBinnedSorting(parent.binnedSortingEnabled)
+            renderer?.setPackedSplats(parent.packedSplatsEnabled)
+            renderer?.setChunkHistogramBinning(parent.chunkHistogramEnabled)
         }
     }
 
@@ -343,6 +394,9 @@ struct MetalKitRendererView: ViewRepresentable {
         renderer?.setFrustumCulling(frustumCullingEnabled)
         renderer?.setMeshShader(meshShaderEnabled)
         renderer?.setDitheredTransparency(ditheredTransparencyEnabled)
+        renderer?.setBinnedSorting(binnedSortingEnabled)
+        renderer?.setPackedSplats(packedSplatsEnabled)
+        renderer?.setChunkHistogramBinning(chunkHistogramEnabled)
 
         // --- Interactivity: Pan (rotation) and Pinch (zoom) ---
         #if os(iOS)

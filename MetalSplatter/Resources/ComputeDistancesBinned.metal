@@ -40,8 +40,8 @@ kernel void setupCameraRelativeBins(constant float& minDist [[buffer(0)]],
     // Determine camera bin based on sort mode
     uint cameraBin;
     if (sortByDistance) {
-        // For radial sort with inverted distances, camera (dist=0) maps to the last bin
-        cameraBin = NUM_BINS - 1;
+        // For radial sort, the camera is always the nearest point
+        cameraBin = 0;
     } else {
         // For linear sort, calculate where camera falls in the projected distance range
         float cameraOffsetFromRangeStart = 0 - minDist;
@@ -116,8 +116,6 @@ kernel void computeSplatDistancesBinned(uint index [[thread_position_in_grid]],
     if (sortByDistance) {
         float3 delta = splatPos - cameraPosition;
         dist = length(delta);
-        // Invert for radial sort (far objects rendered first)
-        dist = range - dist;
     } else {
         // Project onto forward vector for depth sorting
         float3 delta = splatPos - cameraPosition;

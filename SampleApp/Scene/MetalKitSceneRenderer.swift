@@ -505,6 +505,57 @@ class MetalKitSceneRenderer: NSObject, MTKViewDelegate {
         #endif
     }
 
+    /// Enable or disable the packed 16B splat buffer path.
+    func setPackedSplats(_ enabled: Bool) {
+        if let splat = modelRenderer as? SplatRenderer {
+            splat.usePackedSplats = enabled
+            Self.log.info("Packed splats \(enabled ? "enabled" : "disabled")")
+        }
+
+        // Request redraw
+        #if os(macOS)
+        metalKitView.setNeedsDisplay(metalKitView.bounds)
+        #else
+        metalKitView.setNeedsDisplay()
+        #endif
+    }
+
+    /// Enable or disable camera-relative binned sorting (MPS path).
+    /// When enabled, counting sort is disabled so the binned keys are used.
+    func setBinnedSorting(_ enabled: Bool) {
+        if let splat = modelRenderer as? SplatRenderer {
+            splat.useBinnedSorting = enabled
+            splat.useCountingSort = !enabled
+            if enabled {
+                Self.log.info("Binned sorting enabled - counting sort disabled")
+            } else {
+                Self.log.info("Binned sorting disabled - counting sort enabled")
+            }
+        }
+
+        // Request redraw
+        #if os(macOS)
+        metalKitView.setNeedsDisplay(metalKitView.bounds)
+        #else
+        metalKitView.setNeedsDisplay()
+        #endif
+    }
+
+    /// Enable or disable chunk histogram weighting for binned sorting.
+    func setChunkHistogramBinning(_ enabled: Bool) {
+        if let splat = modelRenderer as? SplatRenderer {
+            splat.useChunkHistogramBinning = enabled
+            Self.log.info("Chunk histogram binning \(enabled ? "enabled" : "disabled")")
+        }
+
+        // Request redraw
+        #if os(macOS)
+        metalKitView.setNeedsDisplay(metalKitView.bounds)
+        #else
+        metalKitView.setNeedsDisplay()
+        #endif
+    }
+
     /// Enable or disable spherical harmonics (SH) evaluation
     /// When disabled, only base color is used - significant performance gain but no view-dependent lighting
     func setSHRendering(_ enabled: Bool) {

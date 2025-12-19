@@ -428,6 +428,7 @@ extension FastSHSplatRenderer {
                 splatCount: UInt32(splatCount),
                 indexedSplatCount: UInt32(min(splatCount, Constants.maxIndexedSplatCount)),
                 debugFlags: debugOptions.rawValue,
+                renderFlags: 0,
                 lodThresholds: lodThresholds
             ))
         }
