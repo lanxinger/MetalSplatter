@@ -1,10 +1,14 @@
 import Foundation
 import Compression
 import simd
+import os
 
 #if canImport(Metal)
 import Metal
 #endif
+
+// Logger for SPZ scene reading (uses .debug level for hot-path logs)
+private let spzLog = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.metalsplatter.splatIO", category: "SPZSceneReader")
 
 /**
  * Reader for SPZ format Gaussian splat scenes.
@@ -21,32 +25,32 @@ public class SPZSceneReader: SplatSceneReader {
     }
     
     public convenience init(contentsOf url: URL) throws {
-        print("SPZSceneReader: Trying to load file: \(url.path)")
-        print("SPZSceneReader: File extension: \(url.pathExtension)")
+        spzLog.debug("Trying to load file: \(url.path)")
+        spzLog.debug("File extension: \(url.pathExtension)")
         
         // Make sure the file exists and is readable
         guard FileManager.default.isReadableFile(atPath: url.path) else {
-            print("SPZSceneReader: File is not readable: \(url.path)")
+            spzLog.debug(" File is not readable: \(url.path)")
             throw SplatFileFormatError.invalidData
         }
         
         do {
             let fileData = try Data(contentsOf: url)
-            print("SPZSceneReader: Successfully read data, size: \(fileData.count) bytes")
+            spzLog.debug(" Successfully read data, size: \(fileData.count) bytes")
             
             // Initialize with original data first
             self.init(data: fileData)
             
             // Special handling for iOS files from Downloads folder (they're often gzipped)
             if url.path.contains("/Containers/Shared/AppGroup/") && url.path.contains("/File Provider Storage/Downloads/") {
-                print("SPZSceneReader: Detected iOS downloads file - using specialized handling")
+                spzLog.debug(" Detected iOS downloads file - using specialized handling")
                 if processIOSDownloadFile(fileData) {
                     return
                 }
             }
             
             // First attempt - try to load it as uncompressed SPZ
-            print("SPZSceneReader: First attempt - trying to load as uncompressed SPZ")
+            spzLog.debug(" First attempt - trying to load as uncompressed SPZ")
             
             // Check for SPZ magic number
             if fileData.count >= 4 {
@@ -55,30 +59,30 @@ public class SPZSceneReader: SplatSceneReader {
                 _ = withUnsafeMutableBytes(of: &magic) { magicPtr in
                     fileData.prefix(4).copyBytes(to: magicPtr)
                 }
-                print("SPZSceneReader: No SPZ magic number found at start: 0x\(String(format: "%08X", magic))")
+                spzLog.debug(" No SPZ magic number found at start: 0x\(String(format: "%08X", magic))")
             }
             
             // Check if the file is gzipped
             if Self.isGzipped(fileData) {
-                print("SPZSceneReader: Is gzipped: true")
+                spzLog.debug(" Is gzipped: true")
                 if let decompressedData = Self.decompressGzipped(fileData) {
-                    print("SPZSceneReader: Successfully decompressed data: \(decompressedData.count) bytes")
+                    spzLog.debug(" Successfully decompressed data: \(decompressedData.count) bytes")
                     self.data = decompressedData
                 }
             }
         } catch {
-            print("SPZSceneReader: Error reading file: \(error)")
+            spzLog.debug(" Error reading file: \(error)")
             throw error
         }
     }
     
     // Special function to handle iOS downloaded files (often problematic gzipped files)
     private func processIOSDownloadFile(_ fileData: Data) -> Bool {
-        print("SPZSceneReader: Trying iOS-specific handling for downloaded file")
+        spzLog.debug(" Trying iOS-specific handling for downloaded file")
         
         // Try the GZipArchive approach (used by many iOS apps)
         if let decompressed = Self.decompressIOSGzippedFile(fileData) {
-            print("SPZSceneReader: Successfully decompressed iOS file: \(decompressed.count) bytes")
+            spzLog.debug(" Successfully decompressed iOS file: \(decompressed.count) bytes")
             self.data = decompressed
             return true
         }
@@ -96,9 +100,9 @@ public class SPZSceneReader: SplatSceneReader {
                     
                     // Check for NGSP in little endian
                     if magic == 0x5053474E {
-                        print("SPZSceneReader: Found SPZ magic number at offset \(offset)")
+                        spzLog.debug(" Found SPZ magic number at offset \(offset)")
                         let extractedData = fileData.subdata(in: offset..<fileData.count)
-                        print("SPZSceneReader: Extracted \(extractedData.count) bytes starting from magic number")
+                        spzLog.debug(" Extracted \(extractedData.count) bytes starting from magic number")
                         self.data = extractedData
                         return true
                     }
@@ -106,25 +110,25 @@ public class SPZSceneReader: SplatSceneReader {
             }
         }
         
-        print("SPZSceneReader: iOS-specific handling did not find a solution")
+        spzLog.debug(" iOS-specific handling did not find a solution")
         return false
     }
     
     public func readScene() throws -> [SplatScenePoint] {
-        print("SPZSceneReader: Attempting to deserialize data, size: \(data.count) bytes")
+        spzLog.debug("Attempting to deserialize data, size: \(self.data.count) bytes")
         
         // Try standard deserialization first
         do {
             let packedGaussians = try PackedGaussians.deserialize(data)
-            print("SPZSceneReader: Successfully deserialized \(packedGaussians.numPoints) points")
+            spzLog.debug(" Successfully deserialized \(packedGaussians.numPoints) points")
             let points = unpackGaussians(packedGaussians)
-            print("SPZSceneReader: Successfully unpacked \(points.count) points")
+            spzLog.debug(" Successfully unpacked \(points.count) points")
             return points
         } catch let deserializationError {
-            print("SPZSceneReader: Standard deserialization failed: \(deserializationError)")
+            spzLog.debug(" Standard deserialization failed: \(deserializationError)")
             
             // If the standard approach fails, try a more aggressive fallback
-            print("SPZSceneReader: Trying alternative deserialization approach")
+            spzLog.debug(" Trying alternative deserialization approach")
             
             // Check if we can find the SPZ magic number anywhere in the file
             if data.count > 20 {
@@ -140,19 +144,19 @@ public class SPZSceneReader: SplatSceneReader {
                     
                     // Check for NGSP magic (0x5053474E in little endian)
                     if magic == 0x5053474E {
-                        print("SPZSceneReader: Found SPZ magic at offset \(offset), trying to parse from there")
+                        spzLog.debug(" Found SPZ magic at offset \(offset), trying to parse from there")
                         
                         // Create a new data object starting from the magic number
                         let offsetData = data.subdata(in: offset..<data.count)
                         
                         do {
                             let packedGaussians = try PackedGaussians.deserialize(offsetData)
-                            print("SPZSceneReader: Successfully deserialized \(packedGaussians.numPoints) points from offset \(offset)")
+                            spzLog.debug(" Successfully deserialized \(packedGaussians.numPoints) points from offset \(offset)")
                             let points = unpackGaussians(packedGaussians)
-                            print("SPZSceneReader: Successfully unpacked \(points.count) points")
+                            spzLog.debug(" Successfully unpacked \(points.count) points")
                             return points
                         } catch {
-                            print("SPZSceneReader: Failed to parse from offset \(offset): \(error)")
+                            spzLog.debug(" Failed to parse from offset \(offset): \(error)")
                             // Continue searching for another magic number
                         }
                     }
@@ -160,7 +164,7 @@ public class SPZSceneReader: SplatSceneReader {
             }
             
             // If all fallbacks fail, rethrow the original error
-            print("SPZSceneReader: All deserialization approaches failed")
+            spzLog.debug(" All deserialization approaches failed")
             throw deserializationError
         }
     }
@@ -185,13 +189,13 @@ public class SPZSceneReader: SplatSceneReader {
         // Safety checks matching C++ reference implementation  
         let maxPointsToRead = 10000000  // C++ constant: constexpr int32_t maxPointsToRead = 10000000;
         if packedGaussians.numPoints > maxPointsToRead {
-            print("SPZSceneReader: Too many points: \(packedGaussians.numPoints), capping at \(maxPointsToRead)")
+            spzLog.debug(" Too many points: \(packedGaussians.numPoints), capping at \(maxPointsToRead)")
         }
         if packedGaussians.shDegree > 3 {
-            print("SPZSceneReader: Unsupported SH degree: \(packedGaussians.shDegree), SPZ spec allows 0-3")
+            spzLog.debug(" Unsupported SH degree: \(packedGaussians.shDegree), SPZ spec allows 0-3")
         }
         let safeNumPoints = min(packedGaussians.numPoints, maxPointsToRead)
-        print("SPZSceneReader: Unpacking \(safeNumPoints) points with SH degree \(packedGaussians.shDegree)")
+        spzLog.debug(" Unpacking \(safeNumPoints) points with SH degree \(packedGaussians.shDegree)")
         
         // Determine data layout based on format
         let positionStride = packedGaussians.usesFloat16 ? 6 : 9 // bytes per position
@@ -209,13 +213,13 @@ public class SPZSceneReader: SplatSceneReader {
         let expectedSHBytes = safeNumPoints * shDim * 3
         
         // Log actual vs expected data sizes
-        print("SPZSceneReader: Data size validation:")
-        print("  Positions: \(packedGaussians.positions.count)/\(expectedPositionBytes) bytes")
-        print("  Scales: \(packedGaussians.scales.count)/\(expectedScaleBytes) bytes")
-        print("  Rotations: \(packedGaussians.rotations.count)/\(expectedRotationBytes) bytes")
-        print("  Alphas: \(packedGaussians.alphas.count)/\(expectedAlphaBytes) bytes")
-        print("  Colors: \(packedGaussians.colors.count)/\(expectedColorBytes) bytes")
-        print("  SH: \(packedGaussians.sh.count)/\(expectedSHBytes) bytes")
+        spzLog.debug(" Data size validation:")
+        spzLog.debug("  Positions: \(packedGaussians.positions.count)/\(expectedPositionBytes) bytes")
+        spzLog.debug("  Scales: \(packedGaussians.scales.count)/\(expectedScaleBytes) bytes")
+        spzLog.debug("  Rotations: \(packedGaussians.rotations.count)/\(expectedRotationBytes) bytes")
+        spzLog.debug("  Alphas: \(packedGaussians.alphas.count)/\(expectedAlphaBytes) bytes")
+        spzLog.debug("  Colors: \(packedGaussians.colors.count)/\(expectedColorBytes) bytes")
+        spzLog.debug("  SH: \(packedGaussians.sh.count)/\(expectedSHBytes) bytes")
         
         // Check if we have any data at all
         guard !packedGaussians.positions.isEmpty && 
@@ -223,7 +227,7 @@ public class SPZSceneReader: SplatSceneReader {
               !packedGaussians.rotations.isEmpty && 
               !packedGaussians.colors.isEmpty && 
               !packedGaussians.alphas.isEmpty else {
-            print("SPZSceneReader: Missing essential component data")
+            spzLog.debug(" Missing essential component data")
             return results
         }
         
@@ -236,47 +240,38 @@ public class SPZSceneReader: SplatSceneReader {
         
         // Use concurrent processing for large datasets
         let useParallelProcessing = safeNumPoints > 100000
-        let processingQueue = DispatchQueue(label: "com.metalsplatter.spzprocessing", 
-                                          qos: .userInitiated, 
-                                          attributes: .concurrent)
-        
+
         // Create a container for results that will be populated concurrently
         var chunkResults = Array<[SplatScenePoint]?>(repeating: nil, count: chunks.count)
-        
-        let processingGroup = DispatchGroup()
-        
-        for (chunkIndex, chunkRange) in chunks.enumerated() {
-            if useParallelProcessing {
-                // Process each chunk on a background queue
-                processingGroup.enter()
-                processingQueue.async {
-                    chunkResults[chunkIndex] = self.processPointChunk(packedGaussians: packedGaussians,
-                                                                   range: chunkRange,
-                                                                   positionStride: positionStride,
-                                                                   rotationStride: rotationStride,
-                                                                   shDim: shDim,
-                                                                   shStride: shStride)
-                    processingGroup.leave()
-                }
-            } else {
-                // Process sequentially for smaller datasets
-                chunkResults[chunkIndex] = self.processPointChunk(packedGaussians: packedGaussians,
-                                                               range: chunkRange,
-                                                               positionStride: positionStride,
-                                                               rotationStride: rotationStride,
-                                                               shDim: shDim,
-                                                               shStride: shStride)
-                
-                // Progress reporting for sequential processing
-                if chunkRange.lowerBound > 0 && chunkRange.lowerBound % 100000 == 0 {
-                    print("SPZSceneReader: Unpacked \(chunkRange.lowerBound) points...")
+
+        if useParallelProcessing {
+            // Use withUnsafeMutableBufferPointer + concurrentPerform for thread-safe parallel writes
+            chunkResults.withUnsafeMutableBufferPointer { buffer in
+                DispatchQueue.concurrentPerform(iterations: chunks.count) { chunkIndex in
+                    let chunkRange = chunks[chunkIndex]
+                    buffer[chunkIndex] = self.processPointChunk(packedGaussians: packedGaussians,
+                                                                range: chunkRange,
+                                                                positionStride: positionStride,
+                                                                rotationStride: rotationStride,
+                                                                shDim: shDim,
+                                                                shStride: shStride)
                 }
             }
-        }
-        
-        // Wait for all parallel processing to complete
-        if useParallelProcessing {
-            processingGroup.wait()
+        } else {
+            // Process sequentially for smaller datasets
+            for (chunkIndex, chunkRange) in chunks.enumerated() {
+                chunkResults[chunkIndex] = self.processPointChunk(packedGaussians: packedGaussians,
+                                                                  range: chunkRange,
+                                                                  positionStride: positionStride,
+                                                                  rotationStride: rotationStride,
+                                                                  shDim: shDim,
+                                                                  shStride: shStride)
+
+                // Progress reporting for sequential processing
+                if chunkRange.lowerBound > 0 && chunkRange.lowerBound % 100000 == 0 {
+                    spzLog.debug(" Unpacked \(chunkRange.lowerBound) points...")
+                }
+            }
         }
         
         // Combine results from all chunks
@@ -287,7 +282,7 @@ public class SPZSceneReader: SplatSceneReader {
             }
         }
         
-        print("SPZSceneReader: Successfully unpacked \(results.count) points")
+        spzLog.debug(" Successfully unpacked \(results.count) points")
         return results
     }
     
@@ -328,19 +323,20 @@ public class SPZSceneReader: SplatSceneReader {
             
             // Extract position using proper decoding based on the format
             var position = SIMD3<Float>(0, 0, 0)
-            
+
             if packedGaussians.usesFloat16 {
-                // Decode float16 positions using the optimized converter
+                // Decode float16 positions using zero-allocation withUnsafeBytes
                 if posOffset + 5 < packedGaussians.positions.count {
-                    // Extract position data for this point (6 bytes total - 3 components × 2 bytes)
-                    let posData = Array(packedGaussians.positions[posOffset..<(posOffset+6)])
-                    // Use the optimized FloatConversion utility which uses SIMD operations
-                    let convertedVals = FloatConversion.convertFloat16PositionsToFloat32(posData, count: 1)
-                    if !convertedVals.isEmpty {
+                    packedGaussians.positions.withUnsafeBytes { buffer in
+                        let base = buffer.baseAddress!.advanced(by: posOffset)
+                        // Use loadUnaligned to safely read potentially misaligned UInt16 values
+                        let x = float16ToFloat32(base.loadUnaligned(as: UInt16.self))
+                        let y = float16ToFloat32(base.advanced(by: 2).loadUnaligned(as: UInt16.self))
+                        let z = float16ToFloat32(base.advanced(by: 4).loadUnaligned(as: UInt16.self))
                         position = SIMD3<Float>(
-                            convertedVals[0].x * coordinateConverter.flipP[0],
-                            convertedVals[0].y * coordinateConverter.flipP[1],
-                            convertedVals[0].z * coordinateConverter.flipP[2]
+                            x * coordinateConverter.flipP[0],
+                            y * coordinateConverter.flipP[1],
+                            z * coordinateConverter.flipP[2]
                         )
                     }
                 }
@@ -385,17 +381,18 @@ public class SPZSceneReader: SplatSceneReader {
                 scale = scaleBytes / 16.0 - 10.0
             }
             
-            // Extract rotation using appropriate decoding method
+            // Extract rotation using appropriate decoding method (zero-allocation)
             var rotation = simd_quatf(ix: 0, iy: 0, iz: 0, r: 1) // Default identity quaternion
             if rotOffset + (rotationStride - 1) < packedGaussians.rotations.count {
-                // Extract rotation bytes for this point
-                let rotData = Array(packedGaussians.rotations[rotOffset..<(rotOffset + rotationStride)])
-                
-                // Use appropriate unpacking function based on format
-                if packedGaussians.usesQuaternionSmallestThree {
-                    unpackQuaternionSmallestThree(&rotation, rotData, coordinateConverter)
-                } else {
-                    unpackQuaternionFirstThree(&rotation, rotData, coordinateConverter)
+                // Use withUnsafeBytes to avoid Array allocation per point
+                packedGaussians.rotations.withUnsafeBytes { buffer in
+                    let base = buffer.baseAddress!.advanced(by: rotOffset)
+                    // Use appropriate unpacking function based on format
+                    if packedGaussians.usesQuaternionSmallestThree {
+                        unpackQuaternionSmallestThreeUnsafe(&rotation, base, coordinateConverter)
+                    } else {
+                        unpackQuaternionFirstThreeUnsafe(&rotation, base, coordinateConverter)
+                    }
                 }
             }
             
@@ -472,192 +469,162 @@ public class SPZSceneReader: SplatSceneReader {
     private static func isGzipped(_ data: Data) -> Bool {
         return data.count >= 2 && data[0] == 0x1F && data[1] == 0x8B
     }
-    
-    // Create a temporary file to store the data
-    private static func createTemporaryFile(with data: Data) -> URL? {
-        let tempDir = FileManager.default.temporaryDirectory
-        let fileName = UUID().uuidString
-        let fileURL = tempDir.appendingPathComponent(fileName)
-        
-        do {
-            try data.write(to: fileURL)
-            return fileURL
-        } catch {
-            print("SPZSceneReader: Error creating temporary file: \(error)")
-            return nil
-        }
-    }
-    
-    // Run a shell command and return the output
-    private static func runCommand(launchPath: String, arguments: [String]) -> Data? {
-        #if os(macOS)
-        let task = Process()
-        let pipe = Pipe()
-        
-        task.standardOutput = pipe
-        task.standardError = pipe
-        task.arguments = arguments
-        task.launchPath = launchPath
-        
-        do {
-            try task.run()
-            let data = pipe.fileHandleForReading.readDataToEndOfFile()
-            task.waitUntilExit()
-            
-            if task.terminationStatus == 0 {
-                return data
-            } else {
-                print("SPZSceneReader: Command failed with status: \(task.terminationStatus)")
-                return nil
-            }
-        } catch {
-            print("SPZSceneReader: Error running command: \(error)")
-            return nil
-        }
-        #else
-        return nil
-        #endif
-    }
-    
+
     // Special method for iOS files that don't decompress with standard methods
     private static func decompressIOSGzippedFile(_ data: Data) -> Data? {
         guard data.count > 10 else { return nil } // Need at least the gzip header
-        
-        print("SPZSceneReader: Attempting iOS-specific gzip decompression")
-        
+
+        spzLog.debug(" Attempting iOS-specific gzip decompression")
+
+        let maxDecompressedSize = Data.maxDecompressedSize
+
         // First try to use the Compression framework directly
         do {
             var decompressed = Data()
+            var tooLarge = false
             // Skip the first 10 bytes (gzip header)
             let compressedData = data.subdata(in: 10..<data.count)
-            
-            // Initialize a decoder for zlib
-            let outputFilter = try OutputFilter(.decompress, using: .zlib) { (data: Data?) -> Void in
-                if let data = data {
-                    decompressed.append(data)
+
+            // Initialize a decoder for zlib with size limit check
+            let outputFilter = try OutputFilter(.decompress, using: .zlib) { (chunk: Data?) -> Void in
+                if let chunk = chunk, !tooLarge {
+                    decompressed.append(chunk)
+                    if decompressed.count > maxDecompressedSize {
+                        tooLarge = true
+                        decompressed.removeAll()  // Free memory
+                    }
                 }
             }
-            
+
             // Process the data
             try outputFilter.write(compressedData)
             try outputFilter.finalize()
-            
+
+            // Check if decompression was aborted due to size
+            if tooLarge {
+                spzLog.debug(" iOS-specific decompression aborted - output too large")
+                return nil
+            }
+
             // If we got something reasonable, return it
             if decompressed.count > 1000 {
-                print("SPZSceneReader: iOS-specific decompression succeeded with \(decompressed.count) bytes")
+                spzLog.debug(" iOS-specific decompression succeeded with \(decompressed.count) bytes")
                 return decompressed
             }
         } catch {
-            print("SPZSceneReader: iOS-specific decompression failed: \(error)")
+            spzLog.debug(" iOS-specific decompression failed: \(error)")
         }
-        
+
         // Second approach: try several offsets into the file
         let possibleOffsets = [0, 10, 16, 18, 20, 24, 32]
-        
+
         for offset in possibleOffsets {
             guard offset < data.count else { continue }
-            
+
             let compressedData = data.subdata(in: offset..<data.count)
             do {
                 let decompressed = try (compressedData as NSData).decompressed(using: .zlib) as Data
+                // Post-check size (limited protection - NSData already allocated)
+                guard decompressed.count <= maxDecompressedSize else {
+                    spzLog.debug(" iOS decompression at offset \(offset) exceeded size limit")
+                    continue
+                }
                 if decompressed.count > 1000 {
-                    print("SPZSceneReader: iOS decompression succeeded at offset \(offset) with \(decompressed.count) bytes")
+                    spzLog.debug(" iOS decompression succeeded at offset \(offset) with \(decompressed.count) bytes")
                     return decompressed
                 }
             } catch {
                 // Just try the next offset
             }
         }
-        
+
         return nil
     }
     
     private static func decompressGzipped(_ data: Data) -> Data? {
         // Simple check for gzip header
         guard data.count >= 2, data[0] == 0x1F, data[1] == 0x8B else {
-            print("SPZSceneReader: Not a gzip file (wrong magic bytes)")
+            spzLog.debug(" Not a gzip file (wrong magic bytes)")
             return nil
         }
-        
-        print("SPZSceneReader: Attempting to decompress gzipped data")
-        
-        // First, try using an external process if available (most reliable)
-        #if os(macOS)
-        print("SPZSceneReader: Trying external gzip command")
-        
-        // Save the data to a temporary file
-        guard let tempFile = createTemporaryFile(with: data) else {
-            print("SPZSceneReader: Failed to create temporary file")
+
+        spzLog.debug(" Attempting to decompress gzipped data")
+
+        let maxDecompressedSize = Data.maxDecompressedSize
+
+        // First try our streaming gunzipped() which has built-in size limits
+        do {
+            let decompressed = try data.gunzipped(maxOutputSize: maxDecompressedSize)
+            spzLog.debug(" Successfully decompressed with streaming gunzipped: \(decompressed.count) bytes")
+            return decompressed
+        } catch SplatFileFormatError.decompressionOutputTooLarge {
+            spzLog.debug(" Decompression aborted - output too large")
             return nil
+        } catch {
+            spzLog.debug(" Streaming gunzipped failed: \(error)")
         }
-        
-        // Try using the gzip command
-        let result = runCommand(launchPath: "/usr/bin/gunzip", 
-                               arguments: ["-c", tempFile.path])
-        
-        // Clean up the temporary file
-        try? FileManager.default.removeItem(at: tempFile)
-        
-        if let decompressed = result, !decompressed.isEmpty {
-            print("SPZSceneReader: Successfully decompressed with external gunzip command: \(decompressed.count) bytes")
-            return decompressed
-        }
-        
-        // Try using the zcat command as an alternative
-        let zcatResult = runCommand(launchPath: "/usr/bin/zcat",
-                                  arguments: [tempFile.path])
-        
-        if let decompressed = zcatResult, !decompressed.isEmpty {
-            print("SPZSceneReader: Successfully decompressed with external zcat command: \(decompressed.count) bytes")
-            return decompressed
-        }
-        #endif
-        
-        // Fall back to built-in methods if external process doesn't work
-        print("SPZSceneReader: External decompression failed or not available, trying built-in methods")
-        
-        // Try each compression algorithm
+
+        // Fall back to built-in methods with post-check size limits
+        spzLog.debug(" Trying built-in decompression methods")
+
+        // Try each compression algorithm with size check
         do {
             let decompressed = try (data as NSData).decompressed(using: .zlib) as Data
-            print("SPZSceneReader: Successfully decompressed with .zlib algorithm")
+            guard decompressed.count <= maxDecompressedSize else {
+                spzLog.debug(" .zlib decompression exceeded size limit")
+                return nil
+            }
+            spzLog.debug(" Successfully decompressed with .zlib algorithm")
             return decompressed
         } catch {
-            print("SPZSceneReader: Decompression with .zlib failed")
+            spzLog.debug(" Decompression with .zlib failed")
         }
-        
+
         do {
             let decompressed = try (data as NSData).decompressed(using: .lzfse) as Data
-            print("SPZSceneReader: Successfully decompressed with .lzfse algorithm")
+            guard decompressed.count <= maxDecompressedSize else {
+                spzLog.debug(" .lzfse decompression exceeded size limit")
+                return nil
+            }
+            spzLog.debug(" Successfully decompressed with .lzfse algorithm")
             return decompressed
         } catch {
-            print("SPZSceneReader: Decompression with .lzfse failed")
+            spzLog.debug(" Decompression with .lzfse failed")
         }
-        
+
         if #available(iOS 13.0, macOS 10.15, *) {
             do {
                 let decompressed = try (data as NSData).decompressed(using: .lz4) as Data
-                print("SPZSceneReader: Successfully decompressed with .lz4 algorithm")
+                guard decompressed.count <= maxDecompressedSize else {
+                    spzLog.debug(" .lz4 decompression exceeded size limit")
+                    return nil
+                }
+                spzLog.debug(" Successfully decompressed with .lz4 algorithm")
                 return decompressed
             } catch {
-                print("SPZSceneReader: Decompression with .lz4 failed")
+                spzLog.debug(" Decompression with .lz4 failed")
             }
         }
-        
-        // Try to implement a custom gzip decoder as a last resort
-        print("SPZSceneReader: Attempting custom gzip decoder")
+
+        // Try to decompress with gzip header skipped as a last resort
+        spzLog.debug(" Attempting gzip payload decoder")
         do {
             // Skip the gzip header (10 bytes) and try to decompress the payload
             if data.count > 10 {
                 let payloadData = data.subdata(in: 10..<data.count)
                 let decompressed = try (payloadData as NSData).decompressed(using: .zlib) as Data
-                print("SPZSceneReader: Successfully decompressed gzip payload: \(decompressed.count) bytes")
+                guard decompressed.count <= maxDecompressedSize else {
+                    spzLog.debug(" Gzip payload decompression exceeded size limit")
+                    return nil
+                }
+                spzLog.debug(" Successfully decompressed gzip payload: \(decompressed.count) bytes")
                 return decompressed
             }
         } catch {
-            print("SPZSceneReader: Custom gzip decoder failed: \(error)")
+            spzLog.debug(" Gzip payload decoder failed: \(error)")
         }
-        
-        print("SPZSceneReader: All decompression attempts failed")
+
+        spzLog.debug(" All decompression attempts failed")
         return nil
     }
 }

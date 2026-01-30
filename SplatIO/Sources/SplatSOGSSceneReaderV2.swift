@@ -31,6 +31,7 @@ public class SplatSOGSSceneReaderV2: SplatSceneReader {
         case invalidTextureData
         case unsupportedVersion(Int)
         case zipDecodingFailed(String)
+        case fileTooLarge(String)
     }
     
     private let sourceURL: URL
@@ -649,26 +650,57 @@ private class SOGSZipArchive {
         }
     }
     
+    /// Maximum extracted file size (512 MB) - prevents zip bombs
+    private static let maxExtractedFileSize: Int = 512 * 1024 * 1024
+
     func extractFile(_ filename: String) throws -> Data {
         return try archiveQueue.sync(execute: { () throws -> Data in
             guard let entry = entriesByName[filename] else {
                 print("SOGSZipArchive: File not found: \(filename)")
                 throw SplatSOGSSceneReaderV2.SOGSV2Error.missingFile(filename)
             }
-            
+
+            // Pre-validate size from ZIP directory (trusted for non-malicious files)
+            let uncompressedSize = entry.uncompressedSize
+            if uncompressedSize > Self.maxExtractedFileSize {
+                print("SOGSZipArchive: File \(filename) too large: \(uncompressedSize) bytes")
+                throw SplatSOGSSceneReaderV2.SOGSV2Error.fileTooLarge(filename)
+            }
+
             print("SOGSZipArchive: Extracting \(filename)...")
             var extractedData = Data()
-            let estimatedSize = entry.uncompressedSize ?? entry.compressedSize ?? 0
-            if estimatedSize > 0 {
-                extractedData.reserveCapacity(Int(min(estimatedSize, UInt64(Int.max))))
+
+            // Reserve with capped size
+            let estimatedSize = entry.uncompressedSize
+            let reserveSize = min(Int(min(estimatedSize, UInt64(Int.max))), Self.maxExtractedFileSize)
+            if reserveSize > 0 {
+                extractedData.reserveCapacity(reserveSize)
             }
-            
+
+            // Streaming flag for defense-in-depth (consumer callback is non-throwing)
+            var tooLarge = false
+
             do {
                 _ = try archive.extract(entry, consumer: { chunk in
-                    extractedData.append(chunk)
+                    if !tooLarge {
+                        extractedData.append(chunk)
+                        if extractedData.count > Self.maxExtractedFileSize {
+                            tooLarge = true
+                            extractedData.removeAll()  // Free memory
+                        }
+                    }
                 })
+
+                // Check if extraction was aborted due to size
+                if tooLarge {
+                    print("SOGSZipArchive: Extraction of \(filename) aborted - output too large")
+                    throw SplatSOGSSceneReaderV2.SOGSV2Error.fileTooLarge(filename)
+                }
+
                 print("SOGSZipArchive: Extracted \(extractedData.count) bytes")
                 return extractedData
+            } catch let error as SplatSOGSSceneReaderV2.SOGSV2Error {
+                throw error  // Re-throw our own errors
             } catch {
                 print("SOGSZipArchive: Failed to extract \(filename): \(error)")
                 throw SplatSOGSSceneReaderV2.SOGSV2Error.zipDecodingFailed("Failed to extract \(filename): \(error.localizedDescription)")

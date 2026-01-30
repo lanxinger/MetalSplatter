@@ -51,7 +51,7 @@ public class Metal4BindlessArchitecture {
     private var argumentEncoder: MTLArgumentEncoder?
     private var argumentBuffers: [MTLBuffer] = []  // Double-buffered
     private var currentBufferIndex: Int = 0
-    private var resourceTable: MTLBuffer?
+    private var resourceTables: [MTLBuffer] = []  // Double-buffered resource tables
 
     // Resource tracking with type-specific slot management
     private var resourceRegistry: ResourceRegistry
@@ -168,22 +168,26 @@ public class Metal4BindlessArchitecture {
     }
 
     private func setupResourceTable() throws {
-        // Create large resource table for bindless access
+        // Create double-buffered resource tables for thread-safe GPU/CPU access
         let tableSize = configuration.resourceTableSize * MemoryLayout<UInt64>.stride
-        guard let table = device.makeBuffer(length: tableSize, options: [.storageModeShared]) else {
-            throw BindlessError.resourceTableCreationFailed
+
+        for i in 0..<2 {
+            guard let table = device.makeBuffer(length: tableSize, options: [.storageModeShared]) else {
+                throw BindlessError.resourceTableCreationFailed
+            }
+
+            table.label = "Metal4 Bindless Resource Table \(i)"
+
+            // Initialize table with null handles
+            let contents = table.contents().bindMemory(to: UInt64.self, capacity: configuration.resourceTableSize)
+            for j in 0..<configuration.resourceTableSize {
+                contents[j] = ResourceHandle.null.value
+            }
+
+            resourceTables.append(table)
         }
 
-        self.resourceTable = table
-        table.label = "Metal4 Bindless Resource Table"
-
-        // Initialize table with null handles
-        let contents = table.contents().bindMemory(to: UInt64.self, capacity: configuration.resourceTableSize)
-        for i in 0..<configuration.resourceTableSize {
-            contents[i] = ResourceHandle.null.value
-        }
-
-        Self.log.info("Created resource table with \(self.configuration.resourceTableSize) entries")
+        Self.log.info("Created double-buffered resource tables with \(self.configuration.resourceTableSize) entries each")
     }
 
     private func setupResidencyTracking() {
@@ -313,40 +317,29 @@ public class Metal4BindlessArchitecture {
     }
 
     private func processPendingResources() {
+        // Read all shared state under lock
         resourceLock.lock()
         let resourcesToProcess = Array(pendingResources.prefix(16))
         pendingResources.removeFirst(min(16, pendingResources.count))
+        let currentIndex = currentBufferIndex
+        let writeBufferIndex = 1 - currentIndex
         resourceLock.unlock()
 
         guard !resourcesToProcess.isEmpty else { return }
 
         Self.log.debug("Processing \(resourcesToProcess.count) pending resources in background")
 
-        // Get the back buffer for writing (not currently being read by GPU)
-        let writeBufferIndex = 1 - currentBufferIndex
-
+        // Populate to both buffers for immediate visibility
         for handle in resourcesToProcess {
             if let entry = resourceRegistry.getEntry(for: handle) {
                 switch entry.resource {
                 case .buffer(let buffer):
+                    // Populate to write (back) buffer
                     populateToBuffer(at: writeBufferIndex, handle: handle, buffer: buffer, argumentIndex: entry.argumentIndex)
-                case .texture(let texture):
-                    populateToBuffer(at: writeBufferIndex, handle: handle, texture: texture, argumentIndex: entry.argumentIndex)
-                }
-            }
-        }
-
-        // Also update the current buffer for immediate visibility
-        resourceLock.lock()
-        let currentIndex = currentBufferIndex
-        resourceLock.unlock()
-
-        for handle in resourcesToProcess {
-            if let entry = resourceRegistry.getEntry(for: handle) {
-                switch entry.resource {
-                case .buffer(let buffer):
+                    // Also populate to current (front) buffer for immediate visibility
                     populateToBuffer(at: currentIndex, handle: handle, buffer: buffer, argumentIndex: entry.argumentIndex)
                 case .texture(let texture):
+                    populateToBuffer(at: writeBufferIndex, handle: handle, texture: texture, argumentIndex: entry.argumentIndex)
                     populateToBuffer(at: currentIndex, handle: handle, texture: texture, argumentIndex: entry.argumentIndex)
                 }
             }
@@ -358,15 +351,16 @@ public class Metal4BindlessArchitecture {
     /// Populate resource to a specific buffer (thread-safe via buffer index isolation)
     private func populateToBuffer(at bufferIndex: Int, handle: ResourceHandle, buffer: MTLBuffer, argumentIndex: Int) {
         guard let encoder = argumentEncoder,
-              bufferIndex < argumentBuffers.count else { return }
+              bufferIndex < argumentBuffers.count,
+              bufferIndex < resourceTables.count else { return }
 
         let argBuffer = argumentBuffers[bufferIndex]
 
         encoder.setArgumentBuffer(argBuffer, offset: 0)
         encoder.setBuffer(buffer, offset: 0, index: argumentIndex)
 
-        // Update resource table (single shared table)
-        updateResourceTable(handle: handle)
+        // Update the matching resource table (double-buffered)
+        updateResourceTable(handle: handle, tableIndex: bufferIndex)
 
         // Track residency
         residencyController?.trackResource(buffer, handle: handle)
@@ -374,14 +368,15 @@ public class Metal4BindlessArchitecture {
 
     private func populateToBuffer(at bufferIndex: Int, handle: ResourceHandle, texture: MTLTexture, argumentIndex: Int) {
         guard let encoder = argumentEncoder,
-              bufferIndex < argumentBuffers.count else { return }
+              bufferIndex < argumentBuffers.count,
+              bufferIndex < resourceTables.count else { return }
 
         let argBuffer = argumentBuffers[bufferIndex]
 
         encoder.setArgumentBuffer(argBuffer, offset: 0)
         encoder.setTexture(texture, index: argumentIndex)
 
-        updateResourceTable(handle: handle)
+        updateResourceTable(handle: handle, tableIndex: bufferIndex)
         residencyController?.trackResource(texture, handle: handle)
     }
 
@@ -389,30 +384,32 @@ public class Metal4BindlessArchitecture {
     private func populateResourceUnsafe(_ handle: ResourceHandle, buffer: MTLBuffer, argumentIndex: Int) {
         guard let encoder = argumentEncoder else { return }
 
-        // Populate both buffers
-        for argBuffer in argumentBuffers {
+        // Populate both argument buffers and both resource tables
+        for (i, argBuffer) in argumentBuffers.enumerated() {
             encoder.setArgumentBuffer(argBuffer, offset: 0)
             encoder.setBuffer(buffer, offset: 0, index: argumentIndex)
+            updateResourceTable(handle: handle, tableIndex: i)
         }
 
-        updateResourceTable(handle: handle)
         residencyController?.trackResource(buffer, handle: handle)
     }
 
     private func populateResourceUnsafe(_ handle: ResourceHandle, texture: MTLTexture, argumentIndex: Int) {
         guard let encoder = argumentEncoder else { return }
 
-        for argBuffer in argumentBuffers {
+        // Populate both argument buffers and both resource tables
+        for (i, argBuffer) in argumentBuffers.enumerated() {
             encoder.setArgumentBuffer(argBuffer, offset: 0)
             encoder.setTexture(texture, index: argumentIndex)
+            updateResourceTable(handle: handle, tableIndex: i)
         }
 
-        updateResourceTable(handle: handle)
         residencyController?.trackResource(texture, handle: handle)
     }
 
-    private func updateResourceTable(handle: ResourceHandle) {
-        guard let table = resourceTable else { return }
+    private func updateResourceTable(handle: ResourceHandle, tableIndex: Int) {
+        guard tableIndex < resourceTables.count else { return }
+        let table = resourceTables[tableIndex]
 
         let index = Int(handle.index)
         guard index < self.configuration.resourceTableSize else {
@@ -435,15 +432,16 @@ public class Metal4BindlessArchitecture {
         resourceLock.unlock()
 
         guard bufferIndex < argumentBuffers.count,
-              let table = resourceTable else { return }
+              bufferIndex < resourceTables.count else { return }
 
         let argBuffer = argumentBuffers[bufferIndex]
+        let table = resourceTables[bufferIndex]
 
         // Bind argument buffer once for entire render pass
         renderEncoder.setVertexBuffer(argBuffer, offset: 0, index: 30) // Reserved index for bindless
         renderEncoder.setFragmentBuffer(argBuffer, offset: 0, index: 30)
 
-        // Bind resource table
+        // Bind matching resource table (double-buffered)
         renderEncoder.setVertexBuffer(table, offset: 0, index: 31) // Reserved index for table
         renderEncoder.setFragmentBuffer(table, offset: 0, index: 31)
 
@@ -470,9 +468,10 @@ public class Metal4BindlessArchitecture {
         resourceLock.unlock()
 
         guard bufferIndex < argumentBuffers.count,
-              let table = resourceTable else { return }
+              bufferIndex < resourceTables.count else { return }
 
         let argBuffer = argumentBuffers[bufferIndex]
+        let table = resourceTables[bufferIndex]
 
         computeEncoder.setBuffer(argBuffer, offset: 0, index: 30)
         computeEncoder.setBuffer(table, offset: 0, index: 31)
@@ -517,7 +516,7 @@ public class Metal4BindlessArchitecture {
             registeredResources: resourceRegistry.count,
             pendingResources: pending,
             argumentBufferSize: argumentBuffers.first?.length ?? 0,
-            resourceTableSize: resourceTable?.length ?? 0,
+            resourceTableSize: resourceTables.first?.length ?? 0,
             metrics: bindlessMetrics,
             residencyInfo: residencyController?.getInfo() ?? ResidencyInfo()
         )

@@ -13,10 +13,12 @@ public enum SplatFileFormatError: Error {
     case writeError
     case compressionError
     case decompressionError
+    case decompressionOutputTooLarge
+    case fileTooLarge(String)
     case invalidData
     case invalidFormat(String)
     case custom(String)
-    
+
     // Legacy aliases for compatibility
     static let compressionFailed = compressionError
     static let decompressionFailed = decompressionError

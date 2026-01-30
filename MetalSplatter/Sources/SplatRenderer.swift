@@ -569,6 +569,36 @@ public class SplatRenderer: @unchecked Sendable {
         return sortedIndicesBuffer
     }
 
+    /// Thread-safe check if currently sorting
+    private var isSorting: Bool {
+        os_unfair_lock_lock(&sortStateLock)
+        defer { os_unfair_lock_unlock(&sortStateLock) }
+        return sorting
+    }
+
+    // Deferred buffer release - wait for GPU to finish before releasing
+    private var pendingReleaseBuffers: [MetalBuffer<Int32>] = []
+    private var pendingReleaseLock = os_unfair_lock()
+
+    /// Queue a buffer for deferred release (call when swapping sorted indices)
+    private func deferredBufferRelease(_ buffer: MetalBuffer<Int32>) {
+        os_unfair_lock_lock(&pendingReleaseLock)
+        pendingReleaseBuffers.append(buffer)
+        os_unfair_lock_unlock(&pendingReleaseLock)
+    }
+
+    /// Release buffers that are no longer in use by GPU (call at frame start)
+    private func releasePendingBuffers() {
+        os_unfair_lock_lock(&pendingReleaseLock)
+        let toRelease = pendingReleaseBuffers
+        pendingReleaseBuffers.removeAll()
+        os_unfair_lock_unlock(&pendingReleaseLock)
+
+        for buffer in toRelease {
+            sortIndexBufferPool.release(buffer)
+        }
+    }
+
     /// Thread-safe buffer swap for double-buffered sorting
     /// Returns the old buffer that was replaced (if any) for release back to pool
     private func swapSortedIndicesBuffer(newBuffer: MetalBuffer<Int32>) -> MetalBuffer<Int32>? {
@@ -1193,19 +1223,19 @@ public class SplatRenderer: @unchecked Sendable {
     private func initializeIdentitySortedIndices() throws {
         let count = splatBuffer.count
         guard count > 0 else { return }
-        
-        // Release previous buffer if it exists
-        if let previous = sortedIndicesBuffer {
-            sortIndexBufferPool.release(previous)
-        }
-        
+
         // Acquire new buffer and fill with identity indices
         let identityBuffer = try sortIndexBufferPool.acquire(minimumCapacity: count)
         identityBuffer.count = count
         for i in 0..<count {
             identityBuffer.values[i] = Int32(i)
         }
-        sortedIndicesBuffer = identityBuffer
+
+        // Use thread-safe swap to exchange buffers
+        if let oldBuffer = swapSortedIndicesBuffer(newBuffer: identityBuffer) {
+            // Defer release until GPU is done with old buffer
+            deferredBufferRelease(oldBuffer)
+        }
     }
 
     public func add(_ point: SplatScenePoint) throws {
@@ -1857,7 +1887,10 @@ public class SplatRenderer: @unchecked Sendable {
         cameraWorldPosition = cameraPositionsTemp.mean ?? .zero
         cameraWorldForward = cameraForwardsTemp.mean?.normalized ?? .init(x: 0, y: 0, z: -1)
 
-        if !sorting && shouldResortForCurrentCamera() {
+        // Release any buffers that were pending from previous frames
+        releasePendingBuffers()
+
+        if !isSorting && shouldResortForCurrentCamera() {
             resort()
         }
     }
@@ -2543,7 +2576,6 @@ public class SplatRenderer: @unchecked Sendable {
             }
         } else {
             Task(priority: .high) {
-//                let cpuStart = Date()
                 if orderAndDepthTempSort.count != splatCount {
                     orderAndDepthTempSort = Array(
                         repeating: SplatIndexAndDepth(index: .max, depth: 0),
@@ -2551,17 +2583,22 @@ public class SplatRenderer: @unchecked Sendable {
                     )
                 }
 
-                if Constants.sortByDistance {
-                    for i in 0 ..< splatCount {
-                        orderAndDepthTempSort[i].index = UInt32(i)
-                        let splatPos = splatBuffer.values[i].position.simd
-                        orderAndDepthTempSort[i].depth = (splatPos - cameraWorldPosition).lengthSquared
-                    }
-                } else {
-                    for i in 0 ..< splatCount {
-                        orderAndDepthTempSort[i].index = UInt32(i)
-                        let splatPos = splatBuffer.values[i].position.simd
-                        orderAndDepthTempSort[i].depth = dot(splatPos, cameraWorldForward)
+                // Copy positions under lock to ensure pointer validity during sort
+                // This avoids holding the lock during the slow sort operation
+                splatBuffer.withLockedValues { values, count in
+                    let actualCount = min(count, splatCount)
+                    if Constants.sortByDistance {
+                        for i in 0..<actualCount {
+                            orderAndDepthTempSort[i].index = UInt32(i)
+                            let splatPos = values[i].position.simd
+                            orderAndDepthTempSort[i].depth = (splatPos - cameraWorldPosition).lengthSquared
+                        }
+                    } else {
+                        for i in 0..<actualCount {
+                            orderAndDepthTempSort[i].index = UInt32(i)
+                            let splatPos = values[i].position.simd
+                            orderAndDepthTempSort[i].depth = dot(splatPos, cameraWorldForward)
+                        }
                     }
                 }
 
@@ -2570,18 +2607,17 @@ public class SplatRenderer: @unchecked Sendable {
                 // CPU fallback: populate sortedIndicesBuffer instead of reordering splats
                 // This maintains consistency with GPU path - splat data stays static
                 do {
-                    // Release previous sorted indices buffer if it exists
-                    if let previousSortedIndices = self.sortedIndicesBuffer {
-                        sortIndexBufferPool.release(previousSortedIndices)
-                    }
-                    
                     // Acquire new buffer and fill with sorted indices
                     let cpuSortedIndices = try sortIndexBufferPool.acquire(minimumCapacity: splatCount)
                     cpuSortedIndices.count = splatCount
                     for newIndex in 0..<orderAndDepthTempSort.count {
                         cpuSortedIndices.values[newIndex] = Int32(orderAndDepthTempSort[newIndex].index)
                     }
-                    self.sortedIndicesBuffer = cpuSortedIndices
+
+                    // Use thread-safe swap (deferred release handles old buffer)
+                    if let oldBuffer = self.swapSortedIndicesBuffer(newBuffer: cpuSortedIndices) {
+                        self.deferredBufferRelease(oldBuffer)
+                    }
                 } catch {
                     Self.log.error("Failed to create sorted indices buffer: \(error)")
                 }

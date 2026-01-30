@@ -243,10 +243,17 @@ public class MetalBuffer<T>: @unchecked Sendable {
     /// Returns the index of the value
     @discardableResult
     public func append(_ otherBuffer: MetalBuffer<T>, fromIndex: Int) -> Int {
-        // Read from other buffer first (uses its own lock)
-        let otherValues = otherBuffer.values
-        let elementToCopy = (otherValues + fromIndex).pointee
+        // Guard against self-append deadlock
+        precondition(otherBuffer !== self, "Cannot append buffer to itself")
 
+        // Copy element under source lock to ensure pointer validity during read
+        let elementToCopy = otherBuffer.withLockedValues { values, count in
+            precondition(fromIndex >= 0 && fromIndex < count,
+                         "Index \(fromIndex) out of bounds [0..<\(count)]")
+            return (values + fromIndex).pointee
+        }
+
+        // Now lock self and append
         os_unfair_lock_lock(&lock)
         defer { os_unfair_lock_unlock(&lock) }
 

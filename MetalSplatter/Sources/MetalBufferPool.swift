@@ -6,6 +6,9 @@ import os
 import UIKit
 #endif
 
+// Queue-specific key for reentrancy detection (must be outside generic class)
+private let metalBufferPoolQueueKey = DispatchSpecificKey<Bool>()
+
 /**
  * A thread-safe pool of Metal buffers for efficient reuse and reduced allocation overhead.
  * Manages type-safe buffers with automatic memory pressure handling.
@@ -92,10 +95,10 @@ public class MetalBufferPool<T> {
     }
     
     // MARK: - Properties
-    
+
     private let device: MTLDevice
     private let configuration: Configuration
-    private let queue = DispatchQueue(label: "com.metalsplatter.buffer-pool", attributes: .concurrent)
+    private let queue = DispatchQueue(label: "com.metalsplatter.buffer-pool")  // Serial queue for thread safety
     private var availableBuffers: [PooledBuffer] = []
     private var leasedBuffers: Set<ObjectIdentifier> = []
     
@@ -117,12 +120,15 @@ public class MetalBufferPool<T> {
     public init(device: MTLDevice, configuration: Configuration = .default) {
         self.device = device
         self.configuration = configuration
-        
+
+        // Set queue-specific key for reentrancy detection
+        queue.setSpecific(key: metalBufferPoolQueueKey, value: true)
+
         // Initialize Metal 4.0 optimizations
         if configuration.enableMetal4Optimizations {
             setupMetal4Optimizations()
         }
-        
+
         if configuration.enableMemoryPressureMonitoring {
             setupMemoryPressureMonitoring()
         }
@@ -153,44 +159,53 @@ public class MetalBufferPool<T> {
     }
     
     // MARK: - Pool Management
-    
+
     /// Acquires a buffer with at least the specified minimum capacity
     public func acquire(minimumCapacity: Int) throws -> MetalBuffer<T> {
-        return try queue.sync {
-            log.debug("Acquiring buffer with minimum capacity: \(minimumCapacity)")
-            
-            // Validate capacity
-            let maxCapacity = MetalBuffer<T>.maxCapacity(for: device)
-            guard minimumCapacity <= maxCapacity else {
-                throw PoolError.invalidCapacity(requested: minimumCapacity, max: maxCapacity)
-            }
-            
-            // Try to find a suitable buffer in the pool
-            if let pooledBuffer = findSuitableBuffer(minimumCapacity: minimumCapacity) {
-                pooledBuffer.markUsed()
-                leasedBuffers.insert(ObjectIdentifier(pooledBuffer.buffer))
-                
-                // Metal 4.0: Track residency
-                if configuration.enableMetal4Optimizations {
-                    trackBufferResidency(pooledBuffer.buffer)
-                }
-                
-                log.debug("Reusing pooled buffer with capacity: \(pooledBuffer.buffer.capacity)")
-                return pooledBuffer.buffer
-            }
-            
-            // Create a new buffer if none suitable found
-            let buffer = try MetalBuffer<T>(device: device, capacity: minimumCapacity)
-            leasedBuffers.insert(ObjectIdentifier(buffer))
-            
-            // Metal 4.0: Track residency for new buffers
-            if configuration.enableMetal4Optimizations {
-                trackBufferResidency(buffer)
-            }
-            
-            log.debug("Created new buffer with capacity: \(buffer.capacity)")
-            return buffer
+        // Guard against deadlock from same-queue call
+        if DispatchQueue.getSpecific(key: metalBufferPoolQueueKey) == true {
+            // Already on queue - execute directly (safe for serial queue)
+            return try acquireImpl(minimumCapacity: minimumCapacity)
         }
+        return try queue.sync {
+            try self.acquireImpl(minimumCapacity: minimumCapacity)
+        }
+    }
+
+    private func acquireImpl(minimumCapacity: Int) throws -> MetalBuffer<T> {
+        log.debug("Acquiring buffer with minimum capacity: \(minimumCapacity)")
+
+        // Validate capacity
+        let maxCapacity = MetalBuffer<T>.maxCapacity(for: device)
+        guard minimumCapacity <= maxCapacity else {
+            throw PoolError.invalidCapacity(requested: minimumCapacity, max: maxCapacity)
+        }
+
+        // Try to find a suitable buffer in the pool
+        if let pooledBuffer = findSuitableBuffer(minimumCapacity: minimumCapacity) {
+            pooledBuffer.markUsed()
+            leasedBuffers.insert(ObjectIdentifier(pooledBuffer.buffer))
+
+            // Metal 4.0: Track residency
+            if configuration.enableMetal4Optimizations {
+                trackBufferResidency(pooledBuffer.buffer)
+            }
+
+            log.debug("Reusing pooled buffer with capacity: \(pooledBuffer.buffer.capacity)")
+            return pooledBuffer.buffer
+        }
+
+        // Create a new buffer if none suitable found
+        let buffer = try MetalBuffer<T>(device: device, capacity: minimumCapacity)
+        leasedBuffers.insert(ObjectIdentifier(buffer))
+
+        // Metal 4.0: Track residency for new buffers
+        if configuration.enableMetal4Optimizations {
+            trackBufferResidency(buffer)
+        }
+
+        log.debug("Created new buffer with capacity: \(buffer.capacity)")
+        return buffer
     }
     
     /// Returns a buffer to the pool for reuse
@@ -375,21 +390,29 @@ public class MetalBufferPool<T> {
     
     /// Returns current pool statistics
     public func getStatistics() -> PoolStatistics {
-        return queue.sync {
-            let totalMemory = availableBuffers.reduce(0) { total, pooledBuffer in
-                total + pooledBuffer.buffer.capacity * MemoryLayout<T>.stride
-            }
-            
-            let averageAge = availableBuffers.isEmpty ? 0 : 
-                availableBuffers.reduce(0) { $0 + $1.age } / Double(availableBuffers.count)
-            
-            return PoolStatistics(
-                availableBuffers: availableBuffers.count,
-                leasedBuffers: leasedBuffers.count,
-                totalMemoryMB: Float(totalMemory) / (1024 * 1024),
-                averageBufferAge: averageAge
-            )
+        // Guard against deadlock from same-queue call
+        if DispatchQueue.getSpecific(key: metalBufferPoolQueueKey) == true {
+            return getStatisticsImpl()
         }
+        return queue.sync {
+            self.getStatisticsImpl()
+        }
+    }
+
+    private func getStatisticsImpl() -> PoolStatistics {
+        let totalMemory = availableBuffers.reduce(0) { total, pooledBuffer in
+            total + pooledBuffer.buffer.capacity * MemoryLayout<T>.stride
+        }
+
+        let averageAge = availableBuffers.isEmpty ? 0 :
+            availableBuffers.reduce(0) { $0 + $1.age } / Double(availableBuffers.count)
+
+        return PoolStatistics(
+            availableBuffers: availableBuffers.count,
+            leasedBuffers: leasedBuffers.count,
+            totalMemoryMB: Float(totalMemory) / (1024 * 1024),
+            averageBufferAge: averageAge
+        )
     }
     
     // MARK: - Metal 4.0 Optimizations

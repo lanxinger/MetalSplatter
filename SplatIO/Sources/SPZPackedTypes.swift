@@ -1,8 +1,12 @@
 import Foundation
 import simd
+import os
 #if canImport(Metal)
 import Metal
 #endif
+
+// Logger for SPZ packed types parsing (uses .debug level for hot-path logs)
+private let spzTypesLog = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.metalsplatter.splatIO", category: "SPZPackedTypes")
 
 /**
  * Represents the header structure for SPZ format files
@@ -273,18 +277,18 @@ struct PackedGaussians {
         
         // Verify index is in bounds for all arrays
         guard index >= 0 && index < numPoints else {
-            print("PackedGaussians.at: Index \(index) out of bounds (numPoints: \(numPoints))")
+            spzTypesLog.debug("at: Index \(index) out of bounds (numPoints: \(numPoints))")
             return result
         }
         
         // Additional safety checks for array bounds
         if start3 + 2 >= colors.count || start3 + 2 >= scales.count || 
            start3 + 2 >= rotations.count || index >= alphas.count {
-            print("PackedGaussians.at: Array bounds issue for index \(index)")
-            print("  Colors: \(colors.count), needed: \(start3 + 3)")
-            print("  Scales: \(scales.count), needed: \(start3 + 3)")
-            print("  Rotations: \(rotations.count), needed: \(start3 + 3)")
-            print("  Alphas: \(alphas.count), needed: \(index + 1)")
+            spzTypesLog.debug("at: Array bounds issue for index \(index)")
+            spzTypesLog.debug("  Colors: \(colors.count), needed: \(start3 + 3)")
+            spzTypesLog.debug("  Scales: \(scales.count), needed: \(start3 + 3)")
+            spzTypesLog.debug("  Rotations: \(rotations.count), needed: \(start3 + 3)")
+            spzTypesLog.debug("  Alphas: \(alphas.count), needed: \(index + 1)")
             // Return empty result rather than crashing
             return result
         }
@@ -327,7 +331,7 @@ struct PackedGaussians {
         if shStart + (shDim * 3) > sh.count {
             // If we don't have all SH data, use what we have
             let availableDims = (sh.count - shStart) / 3
-            print("PackedGaussians.at: SH data truncated. Using \(availableDims) of \(shDim) dimensions for point \(index)")
+            spzTypesLog.debug("at: SH data truncated. Using \(availableDims) of \(shDim) dimensions for point \(index)")
             
             // Copy what SH data we have
             for j in 0..<min(availableDims, shDim) {
@@ -402,19 +406,19 @@ struct PackedGaussians {
         
         func debugPrint(_ message: String) {
             if debug {
-                print("PackedGaussians.deserialize: \(message)")
+                spzTypesLog.debug("deserialize: \(message)")
             }
         }
         
         debugPrint("Data size: \(data.count) bytes")
         if data.count >= 32 {
             let hexString = data.prefix(32).map { String(format: "%02X", $0) }.joined(separator: " ")
-            print("PackedGaussians.deserialize: First bytes: \(hexString)")
+            spzTypesLog.debug("deserialize: First bytes: \(hexString)")
             
             // Check if this is a gzipped file
             if data.count >= 2 && data[0] == 0x1F && data[1] == 0x8B {
-                print("PackedGaussians.deserialize: This is a gzipped file. Decompression should have been handled earlier.")
-                print("PackedGaussians.deserialize: Trying to skip gzip header and find the SPZ magic number...")
+                spzTypesLog.debug("deserialize: This is a gzipped file. Decompression should have been handled earlier.")
+                spzTypesLog.debug("deserialize: Trying to skip gzip header and find the SPZ magic number...")
                 
                 // Try to find the SPZ magic number (NGSP = 0x5053474E) in the first 2KB
                 if data.count > 20 {
@@ -430,7 +434,7 @@ struct PackedGaussians {
                         
                         // Check for NGSP magic (0x5053474E in little endian)
                         if magic == 0x5053474E {
-                            print("PackedGaussians.deserialize: Found SPZ magic at offset \(offset), trying to parse from there")
+                            spzTypesLog.debug("deserialize: Found SPZ magic at offset \(offset), trying to parse from there")
                             
                             // Create a new data object starting from the magic number
                             return try deserialize(data.subdata(in: offset..<data.count))
@@ -444,17 +448,17 @@ struct PackedGaussians {
         let header: PackedGaussiansHeader
         do {
             header = try PackedGaussiansHeader(data: data)
-            print("PackedGaussians.deserialize: Header parsed successfully")
-            print("PackedGaussians.deserialize: Magic: 0x\(String(format: "%08X", header.magic))")
-            print("PackedGaussians.deserialize: Version: \(header.version)")
-            print("PackedGaussians.deserialize: NumPoints: \(header.numPoints)")
-            print("PackedGaussians.deserialize: SH Degree: \(header.shDegree)")
-            print("PackedGaussians.deserialize: Fractional Bits: \(header.fractionalBits)")
-            print("PackedGaussians.deserialize: Flags: 0x\(String(format: "%02X", header.flags))")
+            spzTypesLog.debug("deserialize: Header parsed successfully")
+            spzTypesLog.debug("deserialize: Magic: 0x\(String(format: "%08X", header.magic))")
+            spzTypesLog.debug("deserialize: Version: \(header.version)")
+            spzTypesLog.debug("deserialize: NumPoints: \(header.numPoints)")
+            spzTypesLog.debug("deserialize: SH Degree: \(header.shDegree)")
+            spzTypesLog.debug("deserialize: Fractional Bits: \(header.fractionalBits)")
+            spzTypesLog.debug("deserialize: Flags: 0x\(String(format: "%02X", header.flags))")
             
             // Check for correct magic number, but be lenient if it's a known variant
             if header.magic != PackedGaussiansHeader.magic {
-                print("PackedGaussians.deserialize: Unexpected magic number: 0x\(String(format: "%08X", header.magic)) vs expected: 0x\(String(format: "%08X", PackedGaussiansHeader.magic))")
+                spzTypesLog.debug("deserialize: Unexpected magic number: 0x\(String(format: "%08X", header.magic)) vs expected: 0x\(String(format: "%08X", PackedGaussiansHeader.magic))")
                 
                 // Check for known variants and alternate encodings
                 let possibleMagics: [UInt32] = [
@@ -465,7 +469,7 @@ struct PackedGaussians {
                 ]
                 
                 if possibleMagics.contains(header.magic) {
-                    print("PackedGaussians.deserialize: Found an acceptable alternative magic number: 0x\(String(format: "%08X", header.magic))")
+                    spzTypesLog.debug("deserialize: Found an acceptable alternative magic number: 0x\(String(format: "%08X", header.magic))")
                     // Continue processing with this variant
                 } else {
                     // The magic number is completely wrong, so throw an error
@@ -473,23 +477,23 @@ struct PackedGaussians {
                 }
             }
         } catch {
-            print("PackedGaussians.deserialize: Error parsing header: \(error)")
+            spzTypesLog.debug("deserialize: Error parsing header: \(error)")
             throw error
         }
         
         // Extract header fields with C++ reference validation
         let numPoints = Int(header.numPoints)
-        print("PackedGaussians.deserialize: Number of points: \(numPoints)")
+        spzTypesLog.debug("deserialize: Number of points: \(numPoints)")
         // C++ check: maxPointsToRead = 10000000
         if numPoints <= 0 || numPoints > 10000000 {
-            print("PackedGaussians.deserialize: Invalid point count: \(numPoints), must be 1-10M")
+            spzTypesLog.debug("deserialize: Invalid point count: \(numPoints), must be 1-10M")
             throw SplatFileFormatError.invalidData
         }
         
         let shDegree = Int(header.shDegree)
-        print("PackedGaussians.deserialize: SH degree: \(shDegree)")
+        spzTypesLog.debug("deserialize: SH degree: \(shDegree)")
         if shDegree < 0 || shDegree > 3 { // SPZ spec: SH degree must be between 0 and 3 (inclusive)
-            print("PackedGaussians.deserialize: Invalid SH degree: \(shDegree). SPZ spec requires degree 0-3.")
+            spzTypesLog.debug("deserialize: Invalid SH degree: \(shDegree). SPZ spec requires degree 0-3.")
             throw SplatFileFormatError.invalidData
         }
         
@@ -497,8 +501,8 @@ struct PackedGaussians {
         // C++ reference: version 1 uses float16, version 2+ uses fixed-point with flags
         let usesFloat16 = (header.version == 1) || (header.flags & PackedGaussiansHeader.FlagUsesFloat16) != 0
         let usesQuaternionSmallestThree = header.version >= 3
-        print("PackedGaussians.deserialize: Uses Float16: \(usesFloat16) (version: \(header.version), flags: 0x\(String(format: "%02X", header.flags)))")
-        print("PackedGaussians.deserialize: Uses Smallest-Three Quaternions: \(usesQuaternionSmallestThree)")
+        spzTypesLog.debug("deserialize: Uses Float16: \(usesFloat16) (version: \(header.version), flags: 0x\(String(format: "%02X", header.flags)))")
+        spzTypesLog.debug("deserialize: Uses Smallest-Three Quaternions: \(usesQuaternionSmallestThree)")
         
         // Calculate component sizes
         let positionBytes = usesFloat16 ? (numPoints * 3 * 2) : (numPoints * 3 * 3)
@@ -509,12 +513,12 @@ struct PackedGaussians {
         let shBytes = numPoints * shDim * 3
         
         // Print component sizes for debugging
-        print("PackedGaussians.deserialize: Position bytes: \(positionBytes)")
-        print("PackedGaussians.deserialize: Color bytes: \(colorBytes)")
-        print("PackedGaussians.deserialize: Scale bytes: \(scaleBytes)")
-        print("PackedGaussians.deserialize: Rotation bytes: \(rotationBytes)")
-        print("PackedGaussians.deserialize: Alpha bytes: \(alphaBytes)")
-        print("PackedGaussians.deserialize: SH bytes: \(shBytes)")
+        spzTypesLog.debug("deserialize: Position bytes: \(positionBytes)")
+        spzTypesLog.debug("deserialize: Color bytes: \(colorBytes)")
+        spzTypesLog.debug("deserialize: Scale bytes: \(scaleBytes)")
+        spzTypesLog.debug("deserialize: Rotation bytes: \(rotationBytes)")
+        spzTypesLog.debug("deserialize: Alpha bytes: \(alphaBytes)")
+        spzTypesLog.debug("deserialize: SH bytes: \(shBytes)")
         
         // Calculate offsets
         var offset = PackedGaussiansHeader.size
@@ -538,17 +542,17 @@ struct PackedGaussians {
         
         let expectedSize = offset
         
-        print("PackedGaussians.deserialize: Expected size: \(expectedSize), Actual data size: \(data.count)")
+        spzTypesLog.debug("deserialize: Expected size: \(expectedSize), Actual data size: \(data.count)")
         
         // Be more lenient with the size check - as long as we have the header, try to extract what we can
         if data.count < PackedGaussiansHeader.size {
-            print("PackedGaussians.deserialize: Data too small to contain header")
+            spzTypesLog.debug("deserialize: Data too small to contain header")
             throw SplatFileFormatError.invalidData
         }
         
         // For troubleshooting, dump the first bytes as possible magic values
         if data.count >= 16 {
-            print("PackedGaussians.deserialize: Possible magic values:")
+            spzTypesLog.debug("deserialize: Possible magic values:")
             for i in 0...12 {
                 if i + 4 <= data.count {
                     let magicBytes = data[i..<(i+4)]
@@ -557,14 +561,14 @@ struct PackedGaussians {
                     _ = withUnsafeMutableBytes(of: &magic) { magicPtr in
                         magicBytes.copyBytes(to: magicPtr)
                     }
-                    print("  Offset \(i): 0x\(String(format: "%08X", magic)) (\(String(bytes: magicBytes, encoding: .ascii) ?? "non-ASCII"))")
+                    spzTypesLog.debug("  Offset \(i): 0x\(String(format: "%08X", magic)) (\(String(bytes: magicBytes, encoding: .ascii) ?? "non-ASCII"))")
                 }
             }
         }
         
         // Issue a warning but continue if there's not enough data for all points
         if data.count < expectedSize {
-            print("PackedGaussians.deserialize: Warning - Data size mismatch. Expected \(expectedSize) bytes, got \(data.count)")
+            spzTypesLog.debug("deserialize: Warning - Data size mismatch. Expected \(expectedSize) bytes, got \(data.count)")
             // We'll proceed anyway and just take what we can get
         }
         
@@ -584,13 +588,13 @@ struct PackedGaussians {
         let safeRotationBytes = rotationOffset < data.count ? min(rotationBytes, data.count - rotationOffset) : 0
         let safeSHBytes = shOffset < data.count ? min(shBytes, data.count - shOffset) : 0
         
-        print("PackedGaussians.deserialize: Safe data sizes after truncation check:")
-        print("  Positions: \(safePositionBytes)/\(positionBytes) bytes")
-        print("  Colors: \(safeColorBytes)/\(colorBytes) bytes")
-        print("  Scales: \(safeScaleBytes)/\(scaleBytes) bytes")
-        print("  Rotations: \(safeRotationBytes)/\(rotationBytes) bytes")
-        print("  Alphas: \(safeAlphaBytes)/\(alphaBytes) bytes")
-        print("  SH: \(safeSHBytes)/\(shBytes) bytes")
+        spzTypesLog.debug("deserialize: Safe data sizes after truncation check:")
+        spzTypesLog.debug("  Positions: \(safePositionBytes)/\(positionBytes) bytes")
+        spzTypesLog.debug("  Colors: \(safeColorBytes)/\(colorBytes) bytes")
+        spzTypesLog.debug("  Scales: \(safeScaleBytes)/\(scaleBytes) bytes")
+        spzTypesLog.debug("  Rotations: \(safeRotationBytes)/\(rotationBytes) bytes")
+        spzTypesLog.debug("  Alphas: \(safeAlphaBytes)/\(alphaBytes) bytes")
+        spzTypesLog.debug("  SH: \(safeSHBytes)/\(shBytes) bytes")
         
         // Only read the data we actually have, with bounds checking
         do {
@@ -598,45 +602,45 @@ struct PackedGaussians {
                 result.positions = Array(data[positionOffset..<(positionOffset + safePositionBytes)])
             } else {
                 result.positions = []
-                print("PackedGaussians.deserialize: Warning - Cannot read position data safely")
+                spzTypesLog.debug("deserialize: Warning - Cannot read position data safely")
             }
             
             if safeAlphaBytes > 0 && alphaOffset + safeAlphaBytes <= data.count {
                 result.alphas = Array(data[alphaOffset..<(alphaOffset + safeAlphaBytes)])
             } else {
                 result.alphas = []
-                print("PackedGaussians.deserialize: Warning - Cannot read alpha data safely")
+                spzTypesLog.debug("deserialize: Warning - Cannot read alpha data safely")
             }
             
             if safeColorBytes > 0 && colorOffset + safeColorBytes <= data.count {
                 result.colors = Array(data[colorOffset..<(colorOffset + safeColorBytes)])
             } else {
                 result.colors = []
-                print("PackedGaussians.deserialize: Warning - Cannot read color data safely")
+                spzTypesLog.debug("deserialize: Warning - Cannot read color data safely")
             }
             
             if safeScaleBytes > 0 && scaleOffset + safeScaleBytes <= data.count {
                 result.scales = Array(data[scaleOffset..<(scaleOffset + safeScaleBytes)])
             } else {
                 result.scales = []
-                print("PackedGaussians.deserialize: Warning - Cannot read scale data safely")
+                spzTypesLog.debug("deserialize: Warning - Cannot read scale data safely")
             }
             
             if safeRotationBytes > 0 && rotationOffset + safeRotationBytes <= data.count {
                 result.rotations = Array(data[rotationOffset..<(rotationOffset + safeRotationBytes)])
             } else {
                 result.rotations = []
-                print("PackedGaussians.deserialize: Warning - Cannot read rotation data safely")
+                spzTypesLog.debug("deserialize: Warning - Cannot read rotation data safely")
             }
             
             if safeSHBytes > 0 && shOffset + safeSHBytes <= data.count {
                 result.sh = Array(data[shOffset..<(shOffset + safeSHBytes)])
             } else {
                 result.sh = []
-                print("PackedGaussians.deserialize: Warning - Cannot read SH data safely")
+                spzTypesLog.debug("deserialize: Warning - Cannot read SH data safely")
             }
         } catch {
-            print("PackedGaussians.deserialize: Error extracting data: \(error)")
+            spzTypesLog.debug("deserialize: Error extracting data: \(error)")
             throw SplatFileFormatError.invalidData
         }
         
@@ -657,7 +661,9 @@ struct PackedGaussians {
             constraints.append(safeScaleBytes / 3)
         }
         if safeRotationBytes > 0 {
-            constraints.append(safeRotationBytes / 3)
+            // Rotation bytes per point: 4 for smallest-three encoding, 3 for first-three
+            let rotationBytesPerPoint = usesQuaternionSmallestThree ? 4 : 3
+            constraints.append(safeRotationBytes / rotationBytesPerPoint)
         }
         if safeSHBytes > 0 && shDim > 0 {
             constraints.append(safeSHBytes / (shDim * 3))
@@ -665,11 +671,11 @@ struct PackedGaussians {
         
         let actualPointCount = constraints.min() ?? 0
         
-        print("PackedGaussians.deserialize: Adjusted point count from \(numPoints) to \(actualPointCount)")
+        spzTypesLog.debug("deserialize: Adjusted point count from \(numPoints) to \(actualPointCount)")
         
         // Ensure we have a valid point count
         if actualPointCount <= 0 {
-            print("PackedGaussians.deserialize: Error - Cannot determine valid point count")
+            spzTypesLog.debug("deserialize: Error - Cannot determine valid point count")
             throw SplatFileFormatError.invalidData
         }
         
@@ -785,7 +791,7 @@ func shDimForDegree(_ degree: Int) -> Int {
     case 2: return 8
     case 3: return 15
     default:
-        print("Warning: Unsupported SH degree: \(degree)")
+        spzTypesLog.warning("Unsupported SH degree: \(degree)")
         return 0
     }
 }
@@ -800,55 +806,78 @@ func shDegreeForDim(_ dim: Int) -> Int {
 
 // MARK: - Quaternion Unpacking Functions
 
-/// Unpacks quaternion using first-three encoding from 3 bytes  
+/// Unpacks quaternion using first-three encoding from 3 bytes
 func unpackQuaternionFirstThree(_ result: inout simd_quatf, _ rotation: [UInt8], _ c: CoordinateConverter) {
     guard rotation.count >= 3 else { return }
-    
+
     let xyz = SIMD3<Float>(
         Float(rotation[0]),
         Float(rotation[1]),
         Float(rotation[2])
     ) / 127.5 - SIMD3<Float>(1, 1, 1)
-    
+
     // Apply coordinate flips
     let flippedXyz = SIMD3<Float>(
         xyz.x * c.flipQ.x,
         xyz.y * c.flipQ.y,
         xyz.z * c.flipQ.z
     )
-    
+
     // Compute the real component - we know the quaternion is normalized and w is non-negative
     let w = sqrt(max(0.0, 1.0 - simd_length_squared(flippedXyz)))
-    
+
+    result = simd_quatf(ix: flippedXyz.x, iy: flippedXyz.y, iz: flippedXyz.z, r: w)
+}
+
+/// Zero-allocation version using UnsafeRawPointer (for hot paths)
+func unpackQuaternionFirstThreeUnsafe(_ result: inout simd_quatf, _ base: UnsafeRawPointer, _ c: CoordinateConverter) {
+    let bytes = base.assumingMemoryBound(to: UInt8.self)
+
+    let xyz = SIMD3<Float>(
+        Float(bytes[0]),
+        Float(bytes[1]),
+        Float(bytes[2])
+    ) / 127.5 - SIMD3<Float>(1, 1, 1)
+
+    // Apply coordinate flips
+    let flippedXyz = SIMD3<Float>(
+        xyz.x * c.flipQ.x,
+        xyz.y * c.flipQ.y,
+        xyz.z * c.flipQ.z
+    )
+
+    // Compute the real component - we know the quaternion is normalized and w is non-negative
+    let w = sqrt(max(0.0, 1.0 - simd_length_squared(flippedXyz)))
+
     result = simd_quatf(ix: flippedXyz.x, iy: flippedXyz.y, iz: flippedXyz.z, r: w)
 }
 
 /// Unpacks quaternion using smallest-three encoding from 4 bytes
 func unpackQuaternionSmallestThree(_ result: inout simd_quatf, _ rotation: [UInt8], _ c: CoordinateConverter) {
     guard rotation.count >= 4 else { return }
-    
+
     // Extract the largest component index (2 bits)
     let largestIdx = Int(rotation[3] >> 6)
-    
+
     // Extract 10-bit signed values for the three smallest components
     var components = [Float](repeating: 0, count: 4)
-    
+
     // First component: bits 0-9 from bytes 0-1
     var val1 = Int16(rotation[0]) | (Int16(rotation[1] & 0x03) << 8)
     if val1 >= 512 { val1 -= 1024 } // Sign extension
-    
-    // Second component: bits 2-11 from bytes 1-2  
+
+    // Second component: bits 2-11 from bytes 1-2
     var val2 = Int16((rotation[1] >> 2) | ((rotation[2] & 0x0F) << 6))
     if val2 >= 512 { val2 -= 1024 } // Sign extension
-    
+
     // Third component: bits 4-13 from bytes 2-3
     var val3 = Int16((rotation[2] >> 4) | ((rotation[3] & 0x3F) << 4))
     if val3 >= 512 { val3 -= 1024 } // Sign extension
-    
+
     // Convert to normalized float values
     let vals = [Float(val1), Float(val2), Float(val3)]
     let sqrt1_2: Float = sqrt(0.5)
-    
+
     // Place the three smallest components
     var compIdx = 0
     for i in 0..<4 {
@@ -858,12 +887,63 @@ func unpackQuaternionSmallestThree(_ result: inout simd_quatf, _ rotation: [UInt
             compIdx += 1
         }
     }
-    
+
     // Compute the largest component using quaternion normalization
-    let sumSquares = components[0] * components[0] + components[1] * components[1] + 
+    let sumSquares = components[0] * components[0] + components[1] * components[1] +
                     components[2] * components[2] + components[3] * components[3]
     components[largestIdx] = sqrt(max(0.0, 1.0 - sumSquares))
-    
+
+    result = simd_quatf(ix: components[0], iy: components[1], iz: components[2], r: components[3])
+}
+
+/// Zero-allocation version using UnsafeRawPointer (for hot paths)
+func unpackQuaternionSmallestThreeUnsafe(_ result: inout simd_quatf, _ base: UnsafeRawPointer, _ c: CoordinateConverter) {
+    let bytes = base.assumingMemoryBound(to: UInt8.self)
+
+    // Extract the largest component index (2 bits)
+    let largestIdx = Int(bytes[3] >> 6)
+
+    // Extract 10-bit signed values for the three smallest components
+    // Using SIMD4 for fixed-size storage (stack allocation)
+    var components = SIMD4<Float>(0, 0, 0, 0)
+
+    // First component: bits 0-9 from bytes 0-1
+    var val1 = Int16(bytes[0]) | (Int16(bytes[1] & 0x03) << 8)
+    if val1 >= 512 { val1 -= 1024 } // Sign extension
+
+    // Second component: bits 2-11 from bytes 1-2
+    var val2 = Int16((bytes[1] >> 2) | ((bytes[2] & 0x0F) << 6))
+    if val2 >= 512 { val2 -= 1024 } // Sign extension
+
+    // Third component: bits 4-13 from bytes 2-3
+    var val3 = Int16((bytes[2] >> 4) | ((bytes[3] & 0x3F) << 4))
+    if val3 >= 512 { val3 -= 1024 } // Sign extension
+
+    // Convert to normalized float values
+    let sqrt1_2: Float = sqrt(0.5)
+    let scale = sqrt1_2 / Float((1 << 9) - 1)
+    let vals = (Float(val1) * scale, Float(val2) * scale, Float(val3) * scale)
+
+    // Place the three smallest components (using conditional assignment to avoid array)
+    var compIdx = 0
+    for i in 0..<4 {
+        if i != largestIdx {
+            let normalizedVal: Float
+            switch compIdx {
+            case 0: normalizedVal = vals.0
+            case 1: normalizedVal = vals.1
+            default: normalizedVal = vals.2
+            }
+            components[i] = normalizedVal * c.flipQ[i]
+            compIdx += 1
+        }
+    }
+
+    // Compute the largest component using quaternion normalization
+    let sumSquares = components[0] * components[0] + components[1] * components[1] +
+                    components[2] * components[2] + components[3] * components[3]
+    components[largestIdx] = sqrt(max(0.0, 1.0 - sumSquares))
+
     result = simd_quatf(ix: components[0], iy: components[1], iz: components[2], r: components[3])
 }
 
