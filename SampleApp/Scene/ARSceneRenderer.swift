@@ -73,8 +73,9 @@ class ARSceneRenderer: NSObject, MTKViewDelegate {
             let colorPixelFormat = metalKitView.colorPixelFormat
             let depthStencilPixelFormat = metalKitView.depthStencilPixelFormat
             let sampleCount = metalKitView.sampleCount
-            
-            // Create AR splat renderer entirely in nonisolated context  
+            let maxSimultaneousRenders = Constants.maxSimultaneousRenders
+
+            // Create AR splat renderer entirely in nonisolated context
             let points = cachedModel.points // Explicit copy for isolation
             let renderer = try await Task {
                 let arRenderer = try ARSplatRenderer(
@@ -83,7 +84,7 @@ class ARSceneRenderer: NSObject, MTKViewDelegate {
                     depthFormat: depthStencilPixelFormat,
                     sampleCount: sampleCount,
                     maxViewCount: 1,
-                    maxSimultaneousRenders: Constants.maxSimultaneousRenders
+                    maxSimultaneousRenders: maxSimultaneousRenders
                 )
                 try arRenderer.add(points)
                 arRenderer.setSourceFormat(url: url)  // Set format for coordinate transformation
@@ -101,7 +102,8 @@ class ARSceneRenderer: NSObject, MTKViewDelegate {
             let colorPixelFormat = metalKitView.colorPixelFormat
             let depthStencilPixelFormat = metalKitView.depthStencilPixelFormat
             let sampleCount = metalKitView.sampleCount
-            
+            let maxSimultaneousRenders = Constants.maxSimultaneousRenders
+
             let renderer = try await Task.detached {
                 return try ARSplatRenderer(
                     device: deviceRef,
@@ -109,7 +111,7 @@ class ARSceneRenderer: NSObject, MTKViewDelegate {
                     depthFormat: depthStencilPixelFormat,
                     sampleCount: sampleCount,
                     maxViewCount: 1,
-                    maxSimultaneousRenders: Constants.maxSimultaneousRenders
+                    maxSimultaneousRenders: maxSimultaneousRenders
                 )
             }.value
             
