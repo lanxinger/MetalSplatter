@@ -493,6 +493,17 @@ public class SplatRenderer: @unchecked Sendable {
     /// Set to false to use the traditional MPS-based radix sort.
     public var useCountingSort: Bool = true
 
+    /// When true, allocates more sorting precision to splats near the camera.
+    /// This uses camera-relative bin weighting (PlayCanvas-style) where:
+    /// - Camera bin gets 40x precision
+    /// - Adjacent bins get 20x precision
+    /// - Nearby bins get 8x precision
+    /// - Medium distance gets 3x precision
+    /// - Far bins get 1x precision
+    /// This improves visual quality for close objects while saving precision budget on distant ones.
+    /// Only effective when useCountingSort is true.
+    public var useCameraRelativeBinning: Bool = true
+
     // MARK: - Thread-safe sort state accessors
 
     private func incrementSortJobsInFlight() {
@@ -2380,7 +2391,8 @@ public class SplatRenderer: @unchecked Sendable {
                             cameraForward: cameraWorldForward,
                             sortByDistance: Constants.sortByDistance,
                             splatCount: splatCount,
-                            depthBounds: depthBounds
+                            depthBounds: depthBounds,
+                            useCameraRelativeBinning: self.useCameraRelativeBinning
                         )
                     } catch {
                         Self.log.error("Counting sort failed: \(error)")

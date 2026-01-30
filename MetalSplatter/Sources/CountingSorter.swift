@@ -13,6 +13,11 @@ import os
 /// This is significantly faster than radix sort for large splat counts
 /// because it's O(n) vs O(n log n), and depth quantization to 16 bits
 /// is sufficient for visual correctness.
+///
+/// Camera-relative binning (optional):
+/// - Allocates more precision to near-camera bins where visual quality matters most
+/// - Weight tiers: camera=40x, adjacent=20x, nearby=8x, medium=3x, far=1x
+/// - Inspired by PlayCanvas gsplat-sort-bin-weights approach
 internal class CountingSorter {
 
     private static let log = Logger(subsystem: Bundle.main.bundleIdentifier ?? "MetalSplatter",
@@ -24,6 +29,19 @@ internal class CountingSorter {
 
     // Minimum bin count for small scenes (saves memory)
     static let minBinCount: Int = 4096
+
+    // Camera-relative binning constants
+    private static let numDistanceBins: Int = 32
+
+    // Weight tiers for camera-relative precision (from PlayCanvas)
+    // Distance from camera bin -> weight multiplier
+    private static let weightTiers: [(maxDistance: Int, weight: Float)] = [
+        (0, 40.0),              // Camera bin (40x precision)
+        (2, 20.0),              // Adjacent bins
+        (5, 8.0),               // Nearby bins
+        (10, 3.0),              // Medium distance
+        (Int.max, 1.0)          // Far bins
+    ]
 
     // Parameters structure matching Metal shader
     struct CountingSortParams {
@@ -43,10 +61,38 @@ internal class CountingSorter {
         }
     }
 
+    // Camera-relative bin parameters matching Metal shader
+    struct CameraRelativeBinParams {
+        var binBase: (UInt32, UInt32, UInt32, UInt32, UInt32, UInt32, UInt32, UInt32,
+                      UInt32, UInt32, UInt32, UInt32, UInt32, UInt32, UInt32, UInt32,
+                      UInt32, UInt32, UInt32, UInt32, UInt32, UInt32, UInt32, UInt32,
+                      UInt32, UInt32, UInt32, UInt32, UInt32, UInt32, UInt32, UInt32, UInt32) // 33 elements
+        var binDivider: (UInt32, UInt32, UInt32, UInt32, UInt32, UInt32, UInt32, UInt32,
+                         UInt32, UInt32, UInt32, UInt32, UInt32, UInt32, UInt32, UInt32,
+                         UInt32, UInt32, UInt32, UInt32, UInt32, UInt32, UInt32, UInt32,
+                         UInt32, UInt32, UInt32, UInt32, UInt32, UInt32, UInt32, UInt32, UInt32) // 33 elements
+        var cameraBin: UInt32
+        var invRange: Float
+        var minDepth: Float
+        var totalBuckets: UInt32
+
+        init() {
+            binBase = (0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                       0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
+            binDivider = (0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                          0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
+            cameraBin = 0
+            invRange = 1.0
+            minDepth = 0.0
+            totalBuckets = 65536
+        }
+    }
+
     private let device: MTLDevice
 
     // Pipeline states
     private let histogramPipeline: MTLComputePipelineState
+    private let histogramWeightedPipeline: MTLComputePipelineState
     private let prefixSumPipeline: MTLComputePipelineState
     private let scatterPipeline: MTLComputePipelineState
     private let resetHistogramPipeline: MTLComputePipelineState
@@ -71,6 +117,9 @@ internal class CountingSorter {
         guard let histogramFunction = library.makeFunction(name: "countingSortHistogram") else {
             throw SplatRendererError.failedToLoadShaderFunction(name: "countingSortHistogram")
         }
+        guard let histogramWeightedFunction = library.makeFunction(name: "countingSortHistogramWeighted") else {
+            throw SplatRendererError.failedToLoadShaderFunction(name: "countingSortHistogramWeighted")
+        }
         guard let prefixSumFunction = library.makeFunction(name: "countingSortPrefixSum") else {
             throw SplatRendererError.failedToLoadShaderFunction(name: "countingSortPrefixSum")
         }
@@ -86,10 +135,85 @@ internal class CountingSorter {
 
         // Create pipeline states
         histogramPipeline = try device.makeComputePipelineState(function: histogramFunction)
+        histogramWeightedPipeline = try device.makeComputePipelineState(function: histogramWeightedFunction)
         prefixSumPipeline = try device.makeComputePipelineState(function: prefixSumFunction)
         scatterPipeline = try device.makeComputePipelineState(function: scatterFunction)
         resetHistogramPipeline = try device.makeComputePipelineState(function: resetFunction)
         initBinOffsetsPipeline = try device.makeComputePipelineState(function: initOffsetsFunction)
+    }
+
+    /// Computes camera-relative bin parameters for weighted sorting
+    /// This allocates more precision to bins near the camera where visual quality matters most
+    private func computeCameraRelativeBinParams(
+        minDepth: Float,
+        maxDepth: Float,
+        cameraPosition: SIMD3<Float>,
+        sortByDistance: Bool,
+        binCount: Int
+    ) -> CameraRelativeBinParams {
+        var params = CameraRelativeBinParams()
+        let range = max(maxDepth - minDepth, 0.001)
+
+        // Determine which distance bin contains the camera
+        let cameraBin: Int
+        if sortByDistance {
+            // For radial sort, camera (dist=0) maps to bin 0
+            cameraBin = 0
+        } else {
+            // For linear sort, camera is at depth 0 relative to itself
+            let cameraOffsetFromRangeStart = 0 - minDepth
+            let cameraBinFloat = (cameraOffsetFromRangeStart / range) * Float(Self.numDistanceBins)
+            cameraBin = max(0, min(Self.numDistanceBins - 1, Int(cameraBinFloat)))
+        }
+
+        // Calculate weight by distance from camera bin
+        var weights = [Float](repeating: 1.0, count: Self.numDistanceBins)
+        for i in 0..<Self.numDistanceBins {
+            let distFromCamera = abs(i - cameraBin)
+            for tier in Self.weightTiers {
+                if distFromCamera <= tier.maxDistance {
+                    weights[i] = tier.weight
+                    break
+                }
+            }
+        }
+
+        // Normalize weights and compute bin bases/dividers
+        let totalWeight = weights.reduce(0, +)
+        var accumulated: UInt32 = 0
+
+        // Use withUnsafeMutablePointer to set tuple elements
+        withUnsafeMutablePointer(to: &params.binBase) { basePtr in
+            let base = UnsafeMutableRawPointer(basePtr).assumingMemoryBound(to: UInt32.self)
+            withUnsafeMutablePointer(to: &params.binDivider) { dividerPtr in
+                let divider = UnsafeMutableRawPointer(dividerPtr).assumingMemoryBound(to: UInt32.self)
+
+                for i in 0..<Self.numDistanceBins {
+                    let buckets = max(1, UInt32((weights[i] / totalWeight) * Float(binCount)))
+                    divider[i] = buckets
+                    base[i] = accumulated
+                    accumulated += buckets
+                }
+
+                // Adjust last bin to fit exactly
+                if accumulated > UInt32(binCount) {
+                    let excess = accumulated - UInt32(binCount)
+                    let lastIdx = Self.numDistanceBins - 1
+                    divider[lastIdx] = max(1, divider[lastIdx] - excess)
+                }
+
+                // Safety entry
+                base[Self.numDistanceBins] = base[Self.numDistanceBins - 1] + divider[Self.numDistanceBins - 1]
+                divider[Self.numDistanceBins] = 0
+            }
+        }
+
+        params.cameraBin = UInt32(cameraBin)
+        params.invRange = Float(Self.numDistanceBins) / range
+        params.minDepth = minDepth
+        params.totalBuckets = UInt32(binCount)
+
+        return params
     }
 
     /// Ensures buffers are allocated for the given bin count and splat capacity
@@ -192,6 +316,7 @@ internal class CountingSorter {
     ///   - sortByDistance: True for radial distance, false for projected distance
     ///   - splatCount: Number of splats to sort
     ///   - depthBounds: Optional pre-computed depth bounds (min, max)
+    ///   - useCameraRelativeBinning: When true, allocates more precision to near-camera splats
     internal func sort(
         commandBuffer: MTLCommandBuffer,
         splatBuffer: MTLBuffer,
@@ -200,7 +325,8 @@ internal class CountingSorter {
         cameraForward: SIMD3<Float>,
         sortByDistance: Bool,
         splatCount: Int,
-        depthBounds: (min: Float, max: Float)? = nil
+        depthBounds: (min: Float, max: Float)? = nil,
+        useCameraRelativeBinning: Bool = false
     ) throws {
         guard splatCount > 0 else { return }
 
@@ -256,15 +382,39 @@ internal class CountingSorter {
 
         // Pass 2: Build histogram AND cache bin indices
         if let encoder = commandBuffer.makeComputeCommandEncoder() {
-            encoder.label = "CountingSort Histogram"
-            encoder.setComputePipelineState(histogramPipeline)
-            encoder.setBuffer(splatBuffer, offset: 0, index: 0)
-            encoder.setBuffer(histogram, offset: 0, index: 1)
-            encoder.setBytes(&params, length: MemoryLayout<CountingSortParams>.size, index: 2)
-            encoder.setBytes(&cameraPos, length: MemoryLayout<SIMD3<Float>>.size, index: 3)
-            encoder.setBytes(&cameraFwd, length: MemoryLayout<SIMD3<Float>>.size, index: 4)
-            encoder.setBytes(&sortByDist, length: MemoryLayout<Bool>.size, index: 5)
-            encoder.setBuffer(cachedBins, offset: 0, index: 6)  // Cache bin indices for scatter pass
+            if useCameraRelativeBinning {
+                // Use camera-relative weighted binning for better near-camera precision
+                encoder.label = "CountingSort Histogram (Weighted)"
+                encoder.setComputePipelineState(histogramWeightedPipeline)
+
+                var binParams = computeCameraRelativeBinParams(
+                    minDepth: bounds.min,
+                    maxDepth: bounds.max,
+                    cameraPosition: cameraPosition,
+                    sortByDistance: sortByDistance,
+                    binCount: binCount
+                )
+
+                encoder.setBuffer(splatBuffer, offset: 0, index: 0)
+                encoder.setBuffer(histogram, offset: 0, index: 1)
+                encoder.setBytes(&params, length: MemoryLayout<CountingSortParams>.size, index: 2)
+                encoder.setBytes(&cameraPos, length: MemoryLayout<SIMD3<Float>>.size, index: 3)
+                encoder.setBytes(&cameraFwd, length: MemoryLayout<SIMD3<Float>>.size, index: 4)
+                encoder.setBytes(&sortByDist, length: MemoryLayout<Bool>.size, index: 5)
+                encoder.setBuffer(cachedBins, offset: 0, index: 6)
+                encoder.setBytes(&binParams, length: MemoryLayout<CameraRelativeBinParams>.size, index: 7)
+            } else {
+                // Standard uniform binning
+                encoder.label = "CountingSort Histogram"
+                encoder.setComputePipelineState(histogramPipeline)
+                encoder.setBuffer(splatBuffer, offset: 0, index: 0)
+                encoder.setBuffer(histogram, offset: 0, index: 1)
+                encoder.setBytes(&params, length: MemoryLayout<CountingSortParams>.size, index: 2)
+                encoder.setBytes(&cameraPos, length: MemoryLayout<SIMD3<Float>>.size, index: 3)
+                encoder.setBytes(&cameraFwd, length: MemoryLayout<SIMD3<Float>>.size, index: 4)
+                encoder.setBytes(&sortByDist, length: MemoryLayout<Bool>.size, index: 5)
+                encoder.setBuffer(cachedBins, offset: 0, index: 6)
+            }
 
             encoder.dispatchThreadgroups(
                 MTLSize(width: threadgroups, height: 1, depth: 1),

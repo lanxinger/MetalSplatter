@@ -10,6 +10,11 @@
 // - Bin count is passed via CountingSortParams.binCount (typically 4K-64K)
 // - 16 bits provides good depth precision while keeping histogram small
 // - Threadgroup size is 256 threads for optimal GPU occupancy
+//
+// Camera-relative binning (optional):
+// - Allocates more precision to near-camera bins where visual quality matters most
+// - Weight tiers: camera=40x, adjacent=20x, nearby=8x, medium=3x, far=1x
+// - Inspired by PlayCanvas gsplat-sort-bin-weights approach
 
 // Parameters structure passed from CPU
 struct CountingSortParams {
@@ -18,6 +23,19 @@ struct CountingSortParams {
     float invRange;       // binCount / (maxDepth - minDepth)
     uint splatCount;
     uint binCount;        // Number of bins to use (can be less than max for small scenes)
+};
+
+// Camera-relative bin weighting parameters
+// Allocates more sort precision to splats near the camera
+constant uint NUM_DISTANCE_BINS = 32;
+
+struct CameraRelativeBinParams {
+    uint binBase[NUM_DISTANCE_BINS + 1];     // Starting index for each distance bin
+    uint binDivider[NUM_DISTANCE_BINS + 1];  // Precision allocation per distance bin
+    uint cameraBin;                           // Which distance bin contains the camera
+    float invRange;                           // NUM_DISTANCE_BINS / (maxDepth - minDepth)
+    float minDepth;
+    uint totalBuckets;                        // Total number of sort buckets
 };
 
 // Pass 1: Compute histogram of depth values AND cache bin indices
@@ -57,6 +75,53 @@ void countingSortHistogram(
         bin = params.binCount - 1 - bin;
 
         // Cache the bin index for the scatter pass (avoids recomputing depth)
+        cachedBins[i] = ushort(bin);
+
+        atomic_fetch_add_explicit(&histogram[bin], 1, memory_order_relaxed);
+    }
+}
+
+// Camera-relative weighted histogram kernel
+// Uses PlayCanvas-style bin weighting for better near-camera precision
+[[kernel]]
+void countingSortHistogramWeighted(
+    device const Splat* splats [[buffer(0)]],
+    device atomic_uint* histogram [[buffer(1)]],
+    constant CountingSortParams& params [[buffer(2)]],
+    constant float3& cameraPosition [[buffer(3)]],
+    constant float3& cameraForward [[buffer(4)]],
+    constant bool& sortByDistance [[buffer(5)]],
+    device ushort* cachedBins [[buffer(6)]],
+    constant CameraRelativeBinParams& binParams [[buffer(7)]],
+    uint tid [[thread_position_in_grid]],
+    uint threadCount [[threads_per_grid]]
+) {
+    for (uint i = tid; i < params.splatCount; i += threadCount) {
+        float3 splatPos = float3(splats[i].position);
+
+        float depth;
+        if (sortByDistance) {
+            float3 delta = splatPos - cameraPosition;
+            depth = length(delta);
+        } else {
+            float3 delta = splatPos - cameraPosition;
+            depth = dot(delta, cameraForward);
+        }
+
+        // Map depth to distance bin [0, NUM_DISTANCE_BINS-1]
+        float normalizedDist = (depth - binParams.minDepth) * binParams.invRange;
+        uint distBin = clamp(uint(normalizedDist), 0u, NUM_DISTANCE_BINS - 1);
+        float binFraction = normalizedDist - float(distBin);
+
+        // Apply camera-relative precision weighting
+        // Bins near camera get more precision (more sub-buckets)
+        uint sortKey = binParams.binBase[distBin] + uint(float(binParams.binDivider[distBin]) * binFraction);
+        sortKey = min(sortKey, binParams.totalBuckets - 1);
+
+        // For back-to-front rendering, invert the sort key order
+        uint bin = binParams.totalBuckets - 1 - sortKey;
+
+        // Cache the bin index for the scatter pass
         cachedBins[i] = ushort(bin);
 
         atomic_fetch_add_explicit(&histogram[bin], 1, memory_order_relaxed);
