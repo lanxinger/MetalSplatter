@@ -142,6 +142,57 @@ public enum MortonOrder {
 
 extension MortonOrder {
 
+    /// Computes bounds in parallel using chunked reduction.
+    /// Significantly faster than sequential for large datasets.
+    /// - Parameter points: Array of splat scene points
+    /// - Returns: Tuple of (minimum bounds, maximum bounds)
+    public static func computeBoundsParallel(_ points: [SplatScenePoint]) -> (min: SIMD3<Float>, max: SIMD3<Float>) {
+        guard !points.isEmpty else {
+            return (SIMD3<Float>.zero, SIMD3<Float>.zero)
+        }
+
+        // For small arrays, sequential is faster due to dispatch overhead
+        if points.count < 10_000 {
+            return computeBounds(points)
+        }
+
+        // Use chunks to reduce synchronization overhead
+        let numCores = ProcessInfo.processInfo.activeProcessorCount
+        let chunkSize = max(1024, (points.count + numCores - 1) / numCores)
+        let numChunks = (points.count + chunkSize - 1) / chunkSize
+
+        // Each thread computes local bounds for its chunk
+        var localMins = [SIMD3<Float>](repeating: SIMD3<Float>(repeating: .infinity), count: numChunks)
+        var localMaxs = [SIMD3<Float>](repeating: SIMD3<Float>(repeating: -.infinity), count: numChunks)
+
+        DispatchQueue.concurrentPerform(iterations: numChunks) { chunkIdx in
+            let start = chunkIdx * chunkSize
+            let end = min(start + chunkSize, points.count)
+
+            var localMin = SIMD3<Float>(repeating: .infinity)
+            var localMax = SIMD3<Float>(repeating: -.infinity)
+
+            for i in start..<end {
+                let pos = points[i].position
+                localMin = simd_min(localMin, pos)
+                localMax = simd_max(localMax, pos)
+            }
+
+            localMins[chunkIdx] = localMin
+            localMaxs[chunkIdx] = localMax
+        }
+
+        // Reduce chunk results
+        var minBounds = SIMD3<Float>(repeating: .infinity)
+        var maxBounds = SIMD3<Float>(repeating: -.infinity)
+        for i in 0..<numChunks {
+            minBounds = simd_min(minBounds, localMins[i])
+            maxBounds = simd_max(maxBounds, localMaxs[i])
+        }
+
+        return (minBounds, maxBounds)
+    }
+
     /// Computes Morton codes in parallel using multiple threads.
     /// Recommended for large datasets (>100K points).
     /// - Parameters:
@@ -154,7 +205,7 @@ extension MortonOrder {
     ) -> [UInt32] {
         guard !points.isEmpty else { return [] }
 
-        let (minBounds, maxBounds) = bounds ?? computeBounds(points)
+        let (minBounds, maxBounds) = bounds ?? computeBoundsParallel(points)
         let size = maxBounds - minBounds
 
         let invSize = SIMD3<Float>(
@@ -165,22 +216,176 @@ extension MortonOrder {
 
         var codes = [UInt32](repeating: 0, count: points.count)
 
-        // Use concurrent dispatch for parallel computation
-        DispatchQueue.concurrentPerform(iterations: points.count) { i in
-            let pos = points[i].position
-            let normalized = (pos - minBounds) * invSize
+        // Use chunked parallel for better cache locality
+        let numCores = ProcessInfo.processInfo.activeProcessorCount
+        let chunkSize = max(1024, (points.count + numCores - 1) / numCores)
+        let numChunks = (points.count + chunkSize - 1) / chunkSize
 
-            let qx = UInt32(min(max(normalized.x * 1023, 0), 1023))
-            let qy = UInt32(min(max(normalized.y * 1023, 0), 1023))
-            let qz = UInt32(min(max(normalized.z * 1023, 0), 1023))
+        DispatchQueue.concurrentPerform(iterations: numChunks) { chunkIdx in
+            let start = chunkIdx * chunkSize
+            let end = min(start + chunkSize, points.count)
 
-            codes[i] = encode(qx, qy, qz)
+            for i in start..<end {
+                let pos = points[i].position
+                let normalized = (pos - minBounds) * invSize
+
+                let qx = UInt32(min(max(normalized.x * 1023, 0), 1023))
+                let qy = UInt32(min(max(normalized.y * 1023, 0), 1023))
+                let qz = UInt32(min(max(normalized.z * 1023, 0), 1023))
+
+                codes[i] = encode(qx, qy, qz)
+            }
         }
 
         return codes
     }
 
-    /// Reorders splat points by Morton code using parallel computation.
+    // MARK: - Radix Sort
+
+    /// Performs an O(n) radix sort on indices by their associated Morton codes.
+    /// Uses 4 passes of 8 bits each (LSD radix sort) for stability.
+    /// This is significantly faster than comparison-based sort for large arrays.
+    /// - Parameters:
+    ///   - codes: Morton codes to sort by
+    ///   - count: Number of elements
+    /// - Returns: Array of indices sorted by their Morton codes
+    private static func radixSortIndices(_ codes: [UInt32], count: Int) -> [Int] {
+        guard count > 1 else { return count == 1 ? [0] : [] }
+
+        // For small arrays, standard sort is faster due to radix sort overhead
+        if count < 1000 {
+            var indices = Array(0..<count)
+            indices.sort { codes[$0] < codes[$1] }
+            return indices
+        }
+
+        // Initialize indices
+        var indices = [Int](0..<count)
+        var tempIndices = [Int](repeating: 0, count: count)
+
+        // LSD radix sort: 4 passes of 8 bits each
+        for pass in 0..<4 {
+            let shift = pass * 8
+
+            // Count occurrences of each byte value (histogram)
+            var histogram = [Int](repeating: 0, count: 256)
+            for i in 0..<count {
+                let byte = Int((codes[indices[i]] >> shift) & 0xFF)
+                histogram[byte] += 1
+            }
+
+            // Convert histogram to cumulative offsets (prefix sum)
+            var offset = 0
+            for i in 0..<256 {
+                let count = histogram[i]
+                histogram[i] = offset
+                offset += count
+            }
+
+            // Scatter elements to their sorted positions
+            for i in 0..<count {
+                let idx = indices[i]
+                let byte = Int((codes[idx] >> shift) & 0xFF)
+                tempIndices[histogram[byte]] = idx
+                histogram[byte] += 1
+            }
+
+            // Swap buffers
+            swap(&indices, &tempIndices)
+        }
+
+        return indices
+    }
+
+    /// Performs parallel radix sort on indices by their associated Morton codes.
+    /// Uses parallel histogram building and parallel scatter for maximum performance.
+    /// - Parameters:
+    ///   - codes: Morton codes to sort by
+    ///   - count: Number of elements
+    /// - Returns: Array of indices sorted by their Morton codes
+    private static func radixSortIndicesParallel(_ codes: [UInt32], count: Int) -> [Int] {
+        guard count > 1 else { return count == 1 ? [0] : [] }
+
+        // For smaller arrays, use sequential radix sort
+        if count < 50_000 {
+            return radixSortIndices(codes, count: count)
+        }
+
+        let numCores = ProcessInfo.processInfo.activeProcessorCount
+        let numChunks = min(numCores, max(1, count / 10_000))
+        let chunkSize = (count + numChunks - 1) / numChunks
+
+        var indices = [Int](0..<count)
+        var tempIndices = [Int](repeating: 0, count: count)
+
+        // LSD radix sort: 4 passes of 8 bits each
+        for pass in 0..<4 {
+            let shift = pass * 8
+
+            // Parallel histogram building - each chunk builds its own histogram
+            var chunkHistograms = [[Int]](repeating: [Int](repeating: 0, count: 256), count: numChunks)
+
+            DispatchQueue.concurrentPerform(iterations: numChunks) { chunkIdx in
+                let start = chunkIdx * chunkSize
+                let end = min(start + chunkSize, count)
+                var localHistogram = [Int](repeating: 0, count: 256)
+
+                for i in start..<end {
+                    let byte = Int((codes[indices[i]] >> shift) & 0xFF)
+                    localHistogram[byte] += 1
+                }
+
+                chunkHistograms[chunkIdx] = localHistogram
+            }
+
+            // Compute global histogram and per-chunk offsets
+            var globalHistogram = [Int](repeating: 0, count: 256)
+            for i in 0..<256 {
+                for chunkIdx in 0..<numChunks {
+                    globalHistogram[i] += chunkHistograms[chunkIdx][i]
+                }
+            }
+
+            // Convert global histogram to cumulative offsets
+            var globalOffsets = [Int](repeating: 0, count: 256)
+            var offset = 0
+            for i in 0..<256 {
+                globalOffsets[i] = offset
+                offset += globalHistogram[i]
+            }
+
+            // Compute per-chunk starting offsets for each bucket
+            var chunkOffsets = [[Int]](repeating: [Int](repeating: 0, count: 256), count: numChunks)
+            for i in 0..<256 {
+                var bucketOffset = globalOffsets[i]
+                for chunkIdx in 0..<numChunks {
+                    chunkOffsets[chunkIdx][i] = bucketOffset
+                    bucketOffset += chunkHistograms[chunkIdx][i]
+                }
+            }
+
+            // Parallel scatter - each chunk writes to its pre-computed offsets
+            DispatchQueue.concurrentPerform(iterations: numChunks) { chunkIdx in
+                let start = chunkIdx * chunkSize
+                let end = min(start + chunkSize, count)
+                var localOffsets = chunkOffsets[chunkIdx]
+
+                for i in start..<end {
+                    let idx = indices[i]
+                    let byte = Int((codes[idx] >> shift) & 0xFF)
+                    tempIndices[localOffsets[byte]] = idx
+                    localOffsets[byte] += 1
+                }
+            }
+
+            // Swap buffers
+            swap(&indices, &tempIndices)
+        }
+
+        return indices
+    }
+
+    /// Reorders splat points by Morton code using parallel computation and O(n) radix sort.
     /// Recommended for large datasets (>100K points).
     /// - Parameter points: Array of splat scene points to reorder
     /// - Returns: New array with points reordered by Morton code
@@ -189,14 +394,23 @@ extension MortonOrder {
 
         let codes = computeMortonCodesParallel(points)
 
-        // Create index array and sort by Morton code
-        var indices = Array(0..<points.count)
-        indices.sort { codes[$0] < codes[$1] }
+        // Use O(n) radix sort instead of O(n log n) comparison sort
+        let indices = radixSortIndicesParallel(codes, count: points.count)
 
-        // Parallel reordering
-        var reordered = [SplatScenePoint](repeating: points[0], count: points.count)
-        DispatchQueue.concurrentPerform(iterations: points.count) { i in
-            reordered[i] = points[indices[i]]
+        // Parallel reordering with chunked access for better cache performance
+        let numCores = ProcessInfo.processInfo.activeProcessorCount
+        let chunkSize = max(1024, (points.count + numCores - 1) / numCores)
+        let numChunks = (points.count + chunkSize - 1) / chunkSize
+
+        var reordered = [SplatScenePoint](unsafeUninitializedCapacity: points.count) { buffer, initializedCount in
+            DispatchQueue.concurrentPerform(iterations: numChunks) { chunkIdx in
+                let start = chunkIdx * chunkSize
+                let end = min(start + chunkSize, points.count)
+                for i in start..<end {
+                    buffer[i] = points[indices[i]]
+                }
+            }
+            initializedCount = points.count
         }
 
         return reordered
@@ -335,14 +549,26 @@ extension MortonOrder {
 
         // Use parallel Morton code computation for initial pass
         let codes = computeMortonCodesParallel(points)
-        var indices = Array(0..<points.count)
-        indices.sort { codes[$0] < codes[$1] }
 
-        // Parallel reordering for initial result
-        var result = [SplatScenePoint](repeating: points[0], count: points.count)
-        DispatchQueue.concurrentPerform(iterations: points.count) { i in
-            result[i] = points[indices[i]]
+        // Use O(n) radix sort instead of O(n log n) comparison sort
+        let indices = radixSortIndicesParallel(codes, count: points.count)
+
+        // Parallel reordering with optimized memory allocation
+        let numCores = ProcessInfo.processInfo.activeProcessorCount
+        let chunkSize = max(1024, (points.count + numCores - 1) / numCores)
+        let numChunks = (points.count + chunkSize - 1) / chunkSize
+
+        var result = [SplatScenePoint](unsafeUninitializedCapacity: points.count) { buffer, initializedCount in
+            DispatchQueue.concurrentPerform(iterations: numChunks) { chunkIdx in
+                let start = chunkIdx * chunkSize
+                let end = min(start + chunkSize, points.count)
+                for i in start..<end {
+                    buffer[i] = points[indices[i]]
+                }
+            }
+            initializedCount = points.count
         }
+
         let sortedCodes = indices.map { codes[$0] }
 
         // Find buckets that need refinement
@@ -359,13 +585,23 @@ extension MortonOrder {
             start = end
         }
 
-        // Refine large buckets (could parallelize this too for very large datasets)
-        for (bucketStart, bucketEnd) in bucketsToRefine {
-            let bucket = Array(result[bucketStart..<bucketEnd])
-            // Use non-parallel for recursive calls since buckets are smaller
-            let refined = reorderRecursive(bucket, bucketThreshold: bucketThreshold)
-            for i in 0..<refined.count {
-                result[bucketStart + i] = refined[i]
+        // Refine large buckets in parallel for very large datasets
+        if bucketsToRefine.count > 1 && points.count > 500_000 {
+            DispatchQueue.concurrentPerform(iterations: bucketsToRefine.count) { bucketIdx in
+                let (bucketStart, bucketEnd) = bucketsToRefine[bucketIdx]
+                let bucket = Array(result[bucketStart..<bucketEnd])
+                let refined = reorderRecursive(bucket, bucketThreshold: bucketThreshold)
+                for i in 0..<refined.count {
+                    result[bucketStart + i] = refined[i]
+                }
+            }
+        } else {
+            for (bucketStart, bucketEnd) in bucketsToRefine {
+                let bucket = Array(result[bucketStart..<bucketEnd])
+                let refined = reorderRecursive(bucket, bucketThreshold: bucketThreshold)
+                for i in 0..<refined.count {
+                    result[bucketStart + i] = refined[i]
+                }
             }
         }
 
