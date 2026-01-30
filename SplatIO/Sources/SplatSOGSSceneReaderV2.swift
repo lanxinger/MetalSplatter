@@ -5,12 +5,16 @@ import Compression
 import Dispatch
 import ZIPFoundation
 
-/// Thread-safe counter for use in concurrent code
+/// Thread-safe counter for use in concurrent code.
+///
+/// Thread Safety:
+/// - All operations are protected by an internal NSLock.
+/// - Marked as `@unchecked Sendable` because thread safety is enforced via NSLock.
 private final class LockedCounter: @unchecked Sendable {
     private var value: Int = 0
     private let lock = NSLock()
 
-    /// Adds to the counter and returns the new value
+    /// Adds to the counter and returns the new value (thread-safe)
     func add(_ amount: Int) -> Int {
         lock.lock()
         defer { lock.unlock() }

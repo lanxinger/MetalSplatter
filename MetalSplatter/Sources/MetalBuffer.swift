@@ -6,6 +6,16 @@ fileprivate let log =
     Logger(subsystem: Bundle.module.bundleIdentifier!,
            category: "MetalBuffer")
 
+/// Thread-safe Metal buffer wrapper for GPU data storage.
+///
+/// Thread Safety:
+/// - All mutations to `count`, `capacity`, `buffer`, and `values` are protected by an internal lock.
+/// - Reading `count` and `capacity` is thread-safe.
+/// - **Important**: The `buffer` and `values` properties return references that can become invalid
+///   if another thread calls `setCapacity`. For safe access during potential resize operations,
+///   use `withLockedValues(_:)` or `withLockedBuffer(_:)` which hold the lock during the closure.
+/// - Direct access to `buffer` and `values` for GPU operations should be coordinated externally
+///   (e.g., via command buffer completion handlers) to avoid data races with GPU execution.
 public class MetalBuffer<T>: @unchecked Sendable {
     public enum Error: LocalizedError {
         case capacityGreatedThanMaxCapacity(requested: Int, max: Int)
@@ -23,10 +33,76 @@ public class MetalBuffer<T>: @unchecked Sendable {
 
     public let device: MTLDevice
 
-    public private(set) var capacity: Int = 0
-    public var count: Int = 0
-    public var buffer: MTLBuffer
-    public var values: UnsafeMutablePointer<T>
+    // Lock protecting all mutable state
+    private var lock = os_unfair_lock()
+
+    private var _capacity: Int = 0
+    private var _count: Int = 0
+    private var _buffer: MTLBuffer
+    private var _values: UnsafeMutablePointer<T>
+
+    /// Current capacity of the buffer (thread-safe read)
+    public var capacity: Int {
+        os_unfair_lock_lock(&lock)
+        defer { os_unfair_lock_unlock(&lock) }
+        return _capacity
+    }
+
+    /// Current number of elements in the buffer (thread-safe read/write)
+    public var count: Int {
+        get {
+            os_unfair_lock_lock(&lock)
+            defer { os_unfair_lock_unlock(&lock) }
+            return _count
+        }
+        set {
+            os_unfair_lock_lock(&lock)
+            _count = newValue
+            os_unfair_lock_unlock(&lock)
+        }
+    }
+
+    /// The underlying Metal buffer.
+    /// Note: Direct access should be coordinated with GPU execution via command buffer synchronization.
+    public var buffer: MTLBuffer {
+        os_unfair_lock_lock(&lock)
+        defer { os_unfair_lock_unlock(&lock) }
+        return _buffer
+    }
+
+    /// Pointer to the buffer contents.
+    /// Warning: This pointer can become invalid if `setCapacity` is called concurrently.
+    /// For safe access during potential resize operations, use `withLockedValues(_:)`.
+    public var values: UnsafeMutablePointer<T> {
+        os_unfair_lock_lock(&lock)
+        defer { os_unfair_lock_unlock(&lock) }
+        return _values
+    }
+
+    /// Execute a closure with locked access to the values pointer.
+    /// This guarantees the pointer remains valid for the duration of the closure,
+    /// even if another thread attempts to resize the buffer.
+    ///
+    /// - Parameter body: A closure that receives the values pointer and current count.
+    /// - Returns: The result of the closure.
+    @discardableResult
+    public func withLockedValues<R>(_ body: (UnsafeMutablePointer<T>, Int) throws -> R) rethrows -> R {
+        os_unfair_lock_lock(&lock)
+        defer { os_unfair_lock_unlock(&lock) }
+        return try body(_values, _count)
+    }
+
+    /// Execute a closure with locked access to the Metal buffer.
+    /// This guarantees the buffer reference remains valid for the duration of the closure.
+    ///
+    /// - Parameter body: A closure that receives the buffer and current count.
+    /// - Returns: The result of the closure.
+    @discardableResult
+    public func withLockedBuffer<R>(_ body: (MTLBuffer, Int) throws -> R) rethrows -> R {
+        os_unfair_lock_lock(&lock)
+        defer { os_unfair_lock_unlock(&lock) }
+        return try body(_buffer, _count)
+    }
 
     public init(device: MTLDevice, capacity: Int = 1) throws {
         let capacity = max(capacity, 1)
@@ -36,14 +112,14 @@ public class MetalBuffer<T>: @unchecked Sendable {
 
         self.device = device
 
-        self.capacity = capacity
-        self.count = 0
-        guard let buffer = device.makeBuffer(length: MemoryLayout<T>.stride * self.capacity,
+        self._capacity = capacity
+        self._count = 0
+        guard let buffer = device.makeBuffer(length: MemoryLayout<T>.stride * capacity,
                                              options: .storageModeShared) else {
             throw Error.bufferCreationFailed
         }
-        self.buffer = buffer
-        self.values = UnsafeMutableRawPointer(self.buffer.contents()).bindMemory(to: T.self, capacity: self.capacity)
+        self._buffer = buffer
+        self._values = UnsafeMutableRawPointer(buffer.contents()).bindMemory(to: T.self, capacity: capacity)
     }
 
     public static func maxCapacity(for device: MTLDevice) -> Int {
@@ -55,69 +131,128 @@ public class MetalBuffer<T>: @unchecked Sendable {
     }
 
     public func setCapacity(_ newCapacity: Int) throws {
+        os_unfair_lock_lock(&lock)
+        defer { os_unfair_lock_unlock(&lock) }
+
         let newCapacity = max(newCapacity, 1)
-        guard newCapacity != capacity else { return }
-        guard newCapacity <= self.maxCapacity else {
-            throw Error.capacityGreatedThanMaxCapacity(requested: newCapacity, max: self.maxCapacity)
+        guard newCapacity != _capacity else { return }
+        let maxCap = self.maxCapacity
+        guard newCapacity <= maxCap else {
+            throw Error.capacityGreatedThanMaxCapacity(requested: newCapacity, max: maxCap)
         }
 
         // Use exponential growth strategy to reduce frequent reallocations
-        let growthTarget = newCapacity > capacity ? max(newCapacity, capacity * 2) : newCapacity
-        let actualNewCapacity = min(growthTarget, self.maxCapacity)
-        if growthTarget > self.maxCapacity {
-            log.warning("Requested buffer growth to \(growthTarget) exceeds device limit \(self.maxCapacity); clamping to \(actualNewCapacity)")
+        let growthTarget = newCapacity > _capacity ? max(newCapacity, _capacity * 2) : newCapacity
+        let actualNewCapacity = min(growthTarget, maxCap)
+        if growthTarget > maxCap {
+            log.warning("Requested buffer growth to \(growthTarget) exceeds device limit \(maxCap); clamping to \(actualNewCapacity)")
         }
 
         log.info("Allocating a new buffer of size \(MemoryLayout<T>.stride) * \(actualNewCapacity) = \(Float(MemoryLayout<T>.stride * actualNewCapacity) / (1024.0 * 1024.0))mb")
-        
-        // Use private storage mode for better performance if not accessed by CPU
+
+        // Use shared storage mode for CPU+GPU access
         let storageMode: MTLResourceOptions = .storageModeShared
-        
+
         guard let newBuffer = device.makeBuffer(length: MemoryLayout<T>.stride * actualNewCapacity,
                                                 options: storageMode) else {
             throw Error.bufferCreationFailed
         }
         let newValues = UnsafeMutableRawPointer(newBuffer.contents()).bindMemory(to: T.self, capacity: actualNewCapacity)
-        let newCount = min(count, actualNewCapacity)
+        let newCount = min(_count, actualNewCapacity)
         if newCount > 0 {
-            memcpy(newValues, values, MemoryLayout<T>.stride * newCount)
+            memcpy(newValues, _values, MemoryLayout<T>.stride * newCount)
         }
 
-        self.capacity = actualNewCapacity
-        self.count = newCount
-        self.buffer = newBuffer
-        self.values = newValues
+        self._capacity = actualNewCapacity
+        self._count = newCount
+        self._buffer = newBuffer
+        self._values = newValues
     }
 
+    /// Ensure the buffer has at least the specified capacity (grow-only).
+    /// This is safe against concurrent capacity increases by other threads.
     public func ensureCapacity(_ minimumCapacity: Int) throws {
-        guard capacity < minimumCapacity else { return }
-        try setCapacity(minimumCapacity)
+        os_unfair_lock_lock(&lock)
+
+        // Check if we already have enough capacity (another thread may have grown it)
+        guard _capacity < minimumCapacity else {
+            os_unfair_lock_unlock(&lock)
+            return
+        }
+
+        // Perform growth while holding the lock
+        let maxCap = self.maxCapacity
+        guard minimumCapacity <= maxCap else {
+            os_unfair_lock_unlock(&lock)
+            throw Error.capacityGreatedThanMaxCapacity(requested: minimumCapacity, max: maxCap)
+        }
+
+        // Use exponential growth strategy
+        let growthTarget = max(minimumCapacity, _capacity * 2)
+        let actualNewCapacity = min(growthTarget, maxCap)
+        if growthTarget > maxCap {
+            log.warning("Requested buffer growth to \(growthTarget) exceeds device limit \(maxCap); clamping to \(actualNewCapacity)")
+        }
+
+        log.info("Allocating a new buffer of size \(MemoryLayout<T>.stride) * \(actualNewCapacity) = \(Float(MemoryLayout<T>.stride * actualNewCapacity) / (1024.0 * 1024.0))mb")
+
+        guard let newBuffer = device.makeBuffer(length: MemoryLayout<T>.stride * actualNewCapacity,
+                                                options: .storageModeShared) else {
+            os_unfair_lock_unlock(&lock)
+            throw Error.bufferCreationFailed
+        }
+        let newValues = UnsafeMutableRawPointer(newBuffer.contents()).bindMemory(to: T.self, capacity: actualNewCapacity)
+        if _count > 0 {
+            memcpy(newValues, _values, MemoryLayout<T>.stride * _count)
+        }
+
+        self._capacity = actualNewCapacity
+        self._buffer = newBuffer
+        self._values = newValues
+
+        os_unfair_lock_unlock(&lock)
     }
 
     /// Assumes capacity is available
     /// Returns the index of the value
     @discardableResult
     public func append(_ element: T) -> Int {
-        (values + count).pointee = element
-        defer { count += 1 }
-        return count
+        os_unfair_lock_lock(&lock)
+        defer { os_unfair_lock_unlock(&lock) }
+
+        let index = _count
+        (_values + _count).pointee = element
+        _count += 1
+        return index
     }
 
     /// Assumes capacity is available.
     /// Returns the index of the first values.
     @discardableResult
     public func append(_ elements: [T]) -> Int {
-        (values + count).update(from: elements, count: elements.count)
-        defer { count += elements.count }
-        return count
+        os_unfair_lock_lock(&lock)
+        defer { os_unfair_lock_unlock(&lock) }
+
+        let index = _count
+        (_values + _count).update(from: elements, count: elements.count)
+        _count += elements.count
+        return index
     }
 
     /// Assumes capacity is available
     /// Returns the index of the value
     @discardableResult
     public func append(_ otherBuffer: MetalBuffer<T>, fromIndex: Int) -> Int {
-        (values + count).pointee = (otherBuffer.values + fromIndex).pointee
-        defer { count += 1 }
-        return count
+        // Read from other buffer first (uses its own lock)
+        let otherValues = otherBuffer.values
+        let elementToCopy = (otherValues + fromIndex).pointee
+
+        os_unfair_lock_lock(&lock)
+        defer { os_unfair_lock_unlock(&lock) }
+
+        let index = _count
+        (_values + _count).pointee = elementToCopy
+        _count += 1
+        return index
     }
 }

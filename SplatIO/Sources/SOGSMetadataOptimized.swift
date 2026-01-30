@@ -377,41 +377,59 @@ extension SplatSOGSSceneReader {
 
 // MARK: - Texture Cache for Repeated Access
 
+/// Thread-safe LRU cache for SOGS compressed texture data.
+///
+/// Thread Safety:
+/// - All cache operations are protected by an internal NSLock.
+/// - The loader closure in `getCompressedData` is called outside the lock to avoid
+///   holding the lock during potentially slow I/O operations. This means concurrent
+///   requests for the same uncached URL may result in duplicate loading work (but
+///   the cache will still be consistent).
+/// - Marked as `@unchecked Sendable` because thread safety is enforced via NSLock.
 public final class SOGSTextureCache: @unchecked Sendable {
     private var cache: [URL: SOGSCompressedData] = [:]
     private let lock = NSLock()
     private let maxCacheSize = 5 // Maximum number of cached SOGS scenes
     private var accessOrder: [URL] = [] // Track LRU
-    
+
     public static let shared = SOGSTextureCache()
     
     private init() {}
     
     /// Get cached compressed data or load if not cached
     public func getCompressedData(for metaURL: URL, loader: () throws -> SOGSCompressedData) throws -> SOGSCompressedData {
+        // Phase 1: Check cache (locked)
         lock.lock()
-        defer { lock.unlock() }
-        
-        // Check if already cached
         if let cached = cache[metaURL] {
             // Move to end for LRU tracking
             if let index = accessOrder.firstIndex(of: metaURL) {
                 accessOrder.remove(at: index)
             }
             accessOrder.append(metaURL)
+            lock.unlock()
             print("SOGSTextureCache: Using cached data for \(metaURL.lastPathComponent)")
             return cached
         }
-        
-        // Load new data
-        lock.unlock() // Release lock during loading
+        lock.unlock()
+
+        // Phase 2: Load new data (unlocked - allows concurrent loading)
+        // Note: If loader() throws, we simply propagate the error without touching the lock
         let compressedData = try loader()
+
+        // Phase 3: Store in cache (locked)
         lock.lock()
-        
+        defer { lock.unlock() }
+
+        // Re-check if another thread cached while we were loading
+        if let cached = cache[metaURL] {
+            print("SOGSTextureCache: Using data cached by another thread for \(metaURL.lastPathComponent)")
+            return cached
+        }
+
         // Add to cache
         cache[metaURL] = compressedData
         accessOrder.append(metaURL)
-        
+
         // Evict oldest if cache is full
         if cache.count > maxCacheSize {
             if let oldest = accessOrder.first {
@@ -420,7 +438,7 @@ public final class SOGSTextureCache: @unchecked Sendable {
                 print("SOGSTextureCache: Evicted \(oldest.lastPathComponent) from cache")
             }
         }
-        
+
         print("SOGSTextureCache: Cached data for \(metaURL.lastPathComponent)")
         return compressedData
     }

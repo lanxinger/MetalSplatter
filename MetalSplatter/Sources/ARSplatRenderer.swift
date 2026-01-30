@@ -8,6 +8,17 @@ import SplatIO
 import simd
 import UIKit
 
+/// AR-enabled Gaussian splat renderer that composites 3D splats with the camera feed.
+///
+/// Thread Safety:
+/// - This class is marked `@unchecked Sendable` but is **NOT thread-safe**.
+/// - **All property access and method calls must be performed from the main thread.**
+/// - Properties like `splatPosition`, `splatScale`, and `splatRotation` have no internal
+///   synchronization and must only be modified from the main thread.
+/// - The `render(to:viewportSize:)` method must be called from the main thread.
+/// - AR session delegate callbacks (ARSessionDelegate) are delivered on an ARKit-managed thread;
+///   these internal callbacks do not modify shared state that would conflict with main-thread operations.
+/// - If you need to update properties from a background thread, dispatch to the main queue first.
 public class ARSplatRenderer: NSObject, @unchecked Sendable {
     private let device: MTLDevice
     private let commandQueue: MTLCommandQueue

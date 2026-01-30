@@ -5,11 +5,30 @@ import os
 // MARK: - Metal 4 Bindless Resource Support for SplatRenderer
 
 extension SplatRenderer {
-    
+
     // MARK: - Private Properties
-    
+
+    /// Lock protecting access to the Metal 4 argument buffer manager.
+    private static let metal4ManagerLock = NSLock()
+
+    /// Storage for the Metal 4 argument buffer manager (protected by metal4ManagerLock).
     @available(iOS 26.0, macOS 26.0, tvOS 26.0, visionOS 26.0, *)
-    private static nonisolated(unsafe) var _metal4ArgumentBufferManager: Metal4ArgumentBufferManager?
+    private static nonisolated(unsafe) var _metal4ArgumentBufferManagerStorage: Metal4ArgumentBufferManager?
+
+    /// Thread-safe accessor for the Metal 4 argument buffer manager.
+    @available(iOS 26.0, macOS 26.0, tvOS 26.0, visionOS 26.0, *)
+    private static var _metal4ArgumentBufferManager: Metal4ArgumentBufferManager? {
+        get {
+            metal4ManagerLock.lock()
+            defer { metal4ManagerLock.unlock() }
+            return _metal4ArgumentBufferManagerStorage
+        }
+        set {
+            metal4ManagerLock.lock()
+            _metal4ArgumentBufferManagerStorage = newValue
+            metal4ManagerLock.unlock()
+        }
+    }
     
     // MARK: - Public API
     
