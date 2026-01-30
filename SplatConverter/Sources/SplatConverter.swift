@@ -36,6 +36,9 @@ struct SplatConverter: ParsableCommand {
     @Flag(name: .shortAndLong, help: "Verbose output")
     var verbose = false
 
+    @Flag(name: .shortAndLong, help: "Reorder splats by Morton code for improved spatial locality")
+    var mortonOrder = false
+
     func run() throws {
         let reader = try AutodetectSceneReader(URL(fileURLWithPath: inputFile))
 
@@ -65,6 +68,18 @@ struct SplatConverter: ParsableCommand {
         }
 
         if let outputFile, let outputFormat {
+            var pointsToWrite = delegate.points
+
+            if mortonOrder && pointsToWrite.count > 1 {
+                let reorderDuration = ContinuousClock().measure {
+                    pointsToWrite = MortonOrder.reorderRecursive(pointsToWrite)
+                }
+                if verbose {
+                    let pointsPerSecond = Double(pointsToWrite.count) / max(reorderDuration.asSeconds, 1e-6)
+                    print("Morton reordered \(pointsToWrite.count) points in \(reorderDuration.asSeconds.formatted(.number.precision(.fractionLength(2)))) seconds (\(pointsPerSecond.formatted(.number.precision(.fractionLength(0)))) points/s)")
+                }
+            }
+
             let writeDuration = try ContinuousClock().measure {
                 let writer: (any SplatSceneWriter)
                 switch outputFormat {
@@ -72,11 +87,11 @@ struct SplatConverter: ParsableCommand {
                     writer = try DotSplatSceneWriter(toFileAtPath: outputFile, append: false)
                 case .binaryPLY:
                     let splatPLYWriter = try SplatPLYSceneWriter(toFileAtPath: outputFile, append: false)
-                    try splatPLYWriter.start(sphericalHarmonicDegree: 3, binary: true, pointCount: delegate.points.count)
+                    try splatPLYWriter.start(sphericalHarmonicDegree: 3, binary: true, pointCount: pointsToWrite.count)
                     writer = splatPLYWriter
                 case .asciiPLY:
                     let splatPLYWriter = try SplatPLYSceneWriter(toFileAtPath: outputFile, append: false)
-                    try splatPLYWriter.start(sphericalHarmonicDegree: 3, binary: false, pointCount: delegate.points.count)
+                    try splatPLYWriter.start(sphericalHarmonicDegree: 3, binary: false, pointCount: pointsToWrite.count)
                     writer = splatPLYWriter
                 }
 
@@ -84,12 +99,12 @@ struct SplatConverter: ParsableCommand {
                     try? writer.close()
                 }
 
-                try writer.write(delegate.points)
+                try writer.write(pointsToWrite)
             }
 
             if verbose {
-                let pointsPerSecond = Double(delegate.points.count) / max(writeDuration.asSeconds, 1e-6)
-                print("Wrote \(delegate.points.count) points to \(outputFile) in  \(writeDuration.asSeconds.formatted(.number.precision(.fractionLength(2)))) seconds (\(pointsPerSecond.formatted(.number.precision(.fractionLength(0)))) points/s)")
+                let pointsPerSecond = Double(pointsToWrite.count) / max(writeDuration.asSeconds, 1e-6)
+                print("Wrote \(pointsToWrite.count) points to \(outputFile) in \(writeDuration.asSeconds.formatted(.number.precision(.fractionLength(2)))) seconds (\(pointsPerSecond.formatted(.number.precision(.fractionLength(0)))) points/s)")
             }
 
         }

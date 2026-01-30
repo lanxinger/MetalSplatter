@@ -658,6 +658,104 @@ final class SplatIOTests: XCTestCase {
         XCTAssertEqual(originalPositions, mortonPositions)
     }
 
+    func testMortonRecursivePreservesPoints() {
+        // Create points that will likely have Morton code collisions
+        var points: [SplatScenePoint] = []
+        for x in 0..<10 {
+            for y in 0..<10 {
+                for z in 0..<10 {
+                    // Small variations within a tiny region cause same Morton code
+                    let pos = SIMD3<Float>(
+                        Float(x) * 0.001,
+                        Float(y) * 0.001,
+                        Float(z) * 0.001
+                    )
+                    points.append(createTestPoint(position: pos))
+                }
+            }
+        }
+
+        let reordered = MortonOrder.reorderRecursive(points)
+
+        // Should have same count
+        XCTAssertEqual(reordered.count, points.count)
+
+        // Should contain same points (just reordered)
+        let originalPositions = Set(points.map { "\($0.position.x),\($0.position.y),\($0.position.z)" })
+        let reorderedPositions = Set(reordered.map { "\($0.position.x),\($0.position.y),\($0.position.z)" })
+        XCTAssertEqual(originalPositions, reorderedPositions)
+    }
+
+    func testMortonRecursiveSmallThreshold() {
+        // Create points in a small region that will have many collisions
+        var points: [SplatScenePoint] = []
+        for i in 0..<100 {
+            let pos = SIMD3<Float>(
+                Float(i % 10) * 0.0001,
+                Float((i / 10) % 10) * 0.0001,
+                0
+            )
+            points.append(createTestPoint(position: pos))
+        }
+
+        // Use a small threshold to force recursive refinement
+        let reordered = MortonOrder.reorderRecursive(points, bucketThreshold: 10)
+
+        XCTAssertEqual(reordered.count, points.count)
+    }
+
+    func testMortonRecursiveParallel() {
+        // Create a larger dataset for parallel testing
+        var points: [SplatScenePoint] = []
+        for i in 0..<1000 {
+            let angle = Float(i) * 0.1
+            let pos = SIMD3<Float>(
+                cos(angle) * Float(i % 100),
+                sin(angle) * Float(i % 100),
+                Float(i / 100)
+            )
+            points.append(createTestPoint(position: pos))
+        }
+
+        let sequential = MortonOrder.reorderRecursive(points)
+        let parallel = MortonOrder.reorderRecursiveParallel(points)
+
+        // Both should produce same result
+        XCTAssertEqual(sequential.count, parallel.count)
+        for i in 0..<sequential.count {
+            XCTAssertEqual(sequential[i].position.x, parallel[i].position.x, accuracy: 0.0001)
+            XCTAssertEqual(sequential[i].position.y, parallel[i].position.y, accuracy: 0.0001)
+            XCTAssertEqual(sequential[i].position.z, parallel[i].position.z, accuracy: 0.0001)
+        }
+    }
+
+    func testMortonRecursiveEmptyAndSingle() {
+        let empty: [SplatScenePoint] = []
+        let single = [createTestPoint(position: SIMD3<Float>(1, 2, 3))]
+
+        XCTAssertEqual(MortonOrder.reorderRecursive(empty).count, 0)
+        XCTAssertEqual(MortonOrder.reorderRecursive(single).count, 1)
+        XCTAssertEqual(MortonOrder.reorderRecursive(single)[0].position, SIMD3<Float>(1, 2, 3))
+    }
+
+    func testMortonRecursiveIdenticalPositions() {
+        // All points at the same position - should not cause infinite recursion
+        let identicalPosition = SIMD3<Float>(5, 5, 5)
+        var points: [SplatScenePoint] = []
+        for _ in 0..<500 { // More than default bucket threshold (256)
+            points.append(createTestPoint(position: identicalPosition))
+        }
+
+        // Should complete without stack overflow
+        let reordered = MortonOrder.reorderRecursive(points, bucketThreshold: 10)
+
+        XCTAssertEqual(reordered.count, points.count)
+        // All positions should still be identical
+        for point in reordered {
+            XCTAssertEqual(point.position, identicalPosition)
+        }
+    }
+
     private func createTestPoint(position: SIMD3<Float>) -> SplatScenePoint {
         SplatScenePoint(
             position: position,

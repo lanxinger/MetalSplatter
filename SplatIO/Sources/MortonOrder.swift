@@ -243,3 +243,132 @@ extension MortonOrder {
         )
     }
 }
+
+// MARK: - Recursive Bucket Refinement
+
+extension MortonOrder {
+
+    /// Default threshold for recursive bucket refinement.
+    /// Buckets larger than this will be recursively subdivided.
+    public static let defaultBucketThreshold = 256
+
+    /// Reorders splat points by Morton code with recursive bucket refinement.
+    ///
+    /// This method improves upon basic Morton ordering by recursively re-sorting
+    /// buckets of points that hash to the same Morton code. When many points fall
+    /// into the same bucket (due to 10-bit quantization limits), this provides
+    /// finer-grained spatial ordering within those dense regions.
+    ///
+    /// - Parameters:
+    ///   - points: Array of splat scene points to reorder
+    ///   - bucketThreshold: Buckets larger than this will be recursively refined (default: 256)
+    /// - Returns: New array with points reordered by Morton code with recursive refinement
+    public static func reorderRecursive(
+        _ points: [SplatScenePoint],
+        bucketThreshold: Int = defaultBucketThreshold
+    ) -> [SplatScenePoint] {
+        guard points.count > 1 else { return points }
+
+        // Check for degenerate bounds (all points at same position or zero-size bounds)
+        // This prevents infinite recursion when points can't be further subdivided
+        let bounds = computeBounds(points)
+        let size = bounds.max - bounds.min
+        if size.x == 0 && size.y == 0 && size.z == 0 {
+            return points // All points at same position, no further refinement possible
+        }
+
+        // Compute Morton codes and sort
+        let codes = computeMortonCodes(points, bounds: bounds)
+
+        // Check if all codes are identical (no refinement possible)
+        let firstCode = codes[0]
+        if codes.allSatisfy({ $0 == firstCode }) {
+            return points
+        }
+
+        var indices = Array(0..<points.count)
+        indices.sort { codes[$0] < codes[$1] }
+
+        // Create initial sorted result
+        var result = indices.map { points[$0] }
+        let sortedCodes = indices.map { codes[$0] }
+
+        // Find contiguous runs with the same Morton code and recursively refine large buckets
+        var start = 0
+        while start < sortedCodes.count {
+            // Find the end of this bucket (contiguous run with same code)
+            var end = start + 1
+            while end < sortedCodes.count && sortedCodes[end] == sortedCodes[start] {
+                end += 1
+            }
+
+            let bucketSize = end - start
+            if bucketSize > bucketThreshold {
+                // Extract bucket, recursively refine with fresh bounds, and replace
+                let bucket = Array(result[start..<end])
+                let refined = reorderRecursive(bucket, bucketThreshold: bucketThreshold)
+                for i in 0..<bucketSize {
+                    result[start + i] = refined[i]
+                }
+            }
+
+            start = end
+        }
+
+        return result
+    }
+
+    /// Reorders splat points by Morton code with recursive bucket refinement using parallel computation.
+    ///
+    /// Recommended for large datasets (>100K points). Combines parallel Morton code computation
+    /// with recursive bucket refinement for optimal performance and spatial locality.
+    ///
+    /// - Parameters:
+    ///   - points: Array of splat scene points to reorder
+    ///   - bucketThreshold: Buckets larger than this will be recursively refined (default: 256)
+    /// - Returns: New array with points reordered by Morton code with recursive refinement
+    public static func reorderRecursiveParallel(
+        _ points: [SplatScenePoint],
+        bucketThreshold: Int = defaultBucketThreshold
+    ) -> [SplatScenePoint] {
+        guard points.count > 1 else { return points }
+
+        // Use parallel Morton code computation for initial pass
+        let codes = computeMortonCodesParallel(points)
+        var indices = Array(0..<points.count)
+        indices.sort { codes[$0] < codes[$1] }
+
+        // Parallel reordering for initial result
+        var result = [SplatScenePoint](repeating: points[0], count: points.count)
+        DispatchQueue.concurrentPerform(iterations: points.count) { i in
+            result[i] = points[indices[i]]
+        }
+        let sortedCodes = indices.map { codes[$0] }
+
+        // Find buckets that need refinement
+        var bucketsToRefine: [(start: Int, end: Int)] = []
+        var start = 0
+        while start < sortedCodes.count {
+            var end = start + 1
+            while end < sortedCodes.count && sortedCodes[end] == sortedCodes[start] {
+                end += 1
+            }
+            if end - start > bucketThreshold {
+                bucketsToRefine.append((start, end))
+            }
+            start = end
+        }
+
+        // Refine large buckets (could parallelize this too for very large datasets)
+        for (bucketStart, bucketEnd) in bucketsToRefine {
+            let bucket = Array(result[bucketStart..<bucketEnd])
+            // Use non-parallel for recursive calls since buckets are smaller
+            let refined = reorderRecursive(bucket, bucketThreshold: bucketThreshold)
+            for i in 0..<refined.count {
+                result[bucketStart + i] = refined[i]
+            }
+        }
+
+        return result
+    }
+}
