@@ -98,9 +98,9 @@ internal class CountingSorter {
         if binCount != currentBinCount {
             let bufferSize = binCount * MemoryLayout<UInt32>.stride
 
-            guard let histogram = device.makeBuffer(length: bufferSize, options: .storageModeShared),
-                  let prefixSum = device.makeBuffer(length: bufferSize, options: .storageModeShared),
-                  let binOffsets = device.makeBuffer(length: bufferSize, options: .storageModeShared) else {
+            guard let histogram = device.makeBuffer(length: bufferSize, options: .storageModePrivate),
+                  let prefixSum = device.makeBuffer(length: bufferSize, options: .storageModePrivate),
+                  let binOffsets = device.makeBuffer(length: bufferSize, options: .storageModePrivate) else {
                 throw SplatRendererError.failedToCreateBuffer(length: bufferSize)
             }
 
@@ -119,7 +119,7 @@ internal class CountingSorter {
             // Use ushort (UInt16) to save memory - 2 bytes per splat
             let cachedBinsSize = splatCount * MemoryLayout<UInt16>.stride
 
-            guard let cachedBins = device.makeBuffer(length: cachedBinsSize, options: .storageModeShared) else {
+            guard let cachedBins = device.makeBuffer(length: cachedBinsSize, options: .storageModePrivate) else {
                 throw SplatRendererError.failedToCreateBuffer(length: cachedBinsSize)
             }
 

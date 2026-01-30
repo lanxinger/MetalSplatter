@@ -437,7 +437,7 @@ public class SplatRenderer {
     
     // Buffer pools for efficient memory management
     private let splatBufferPool: MetalBufferPool<Splat>
-    private let indexBufferPool: MetalBufferPool<UInt32>
+    internal let indexBufferPool: MetalBufferPool<UInt32>
 
     // Sort buffer pools for GPU sorting operations (reuse across frames)
     private let sortDistanceBufferPool: MetalBufferPool<Float>
@@ -475,6 +475,11 @@ public class SplatRenderer {
     private var sortedIndicesBufferA: MetalBuffer<Int32>?
     private var sortedIndicesBufferB: MetalBuffer<Int32>?
     private var usingSortedBufferA: Bool = true  // Which buffer is currently used for rendering
+
+    // Cached arrays to avoid per-frame allocations
+    private var cameraPositionsTemp: [SIMD3<Float>] = []
+    private var cameraForwardsTemp: [SIMD3<Float>] = []
+    private var viewMappingsTemp: [MTLVertexAmplificationViewMapping] = []
 
     // O(n) Counting Sort - faster than MPS argSort for large splat counts
     private var countingSorter: CountingSorter?
@@ -594,7 +599,7 @@ public class SplatRenderer {
             visibleCountBuffer = device.makeBuffer(length: MemoryLayout<UInt32>.stride, options: .storageModeShared)
             visibleCountBuffer?.label = "Visible Count"
             // Indirect draw arguments buffer (MTLDrawIndexedPrimitivesIndirectArguments = 5 * uint32)
-            indirectDrawArgsBuffer = device.makeBuffer(length: 5 * MemoryLayout<UInt32>.stride, options: .storageModeShared)
+            indirectDrawArgsBuffer = device.makeBuffer(length: 5 * MemoryLayout<UInt32>.stride, options: .storageModePrivate)
             indirectDrawArgsBuffer?.label = "Indirect Draw Arguments"
         } catch {
             Self.log.error("Failed to create frustum culling pipeline state: \(error)")
@@ -1391,7 +1396,7 @@ public class SplatRenderer {
         // Ensure visible indices buffer is large enough
         let requiredSize = splatCount * MemoryLayout<UInt32>.stride
         if visibleIndicesBuffer == nil || visibleIndicesBuffer!.length < requiredSize {
-            visibleIndicesBuffer = device.makeBuffer(length: requiredSize, options: .storageModeShared)
+            visibleIndicesBuffer = device.makeBuffer(length: requiredSize, options: .storageModePrivate)
             visibleIndicesBuffer?.label = "Visible Indices"
         }
         guard let indicesBuffer = visibleIndicesBuffer else { return }
@@ -1571,6 +1576,11 @@ public class SplatRenderer {
     }
 
     private func shouldResortForCurrentCamera() -> Bool {
+        // Skip sorting entirely when using dithered transparency
+        // Dithered mode is order-independent, so sort order doesn't affect visual quality
+        if useDitheredTransparency {
+            return false
+        }
         if sortDirtyDueToData {
             return true
         }
@@ -1630,8 +1640,17 @@ public class SplatRenderer {
             self.uniforms.pointee.setUniforms(index: i, uniforms)
         }
         updateSortReferenceCamera(from: viewports)
-        cameraWorldPosition = viewports.map { Self.cameraWorldPosition(forViewMatrix: $0.viewMatrix) }.mean ?? .zero
-        cameraWorldForward = viewports.map { Self.cameraWorldForward(forViewMatrix: $0.viewMatrix) }.mean?.normalized ?? .init(x: 0, y: 0, z: -1)
+        // Use cached arrays to avoid per-frame allocations
+        if cameraPositionsTemp.count != viewports.count {
+            cameraPositionsTemp = Array(repeating: .zero, count: viewports.count)
+            cameraForwardsTemp = Array(repeating: .zero, count: viewports.count)
+        }
+        for (i, viewport) in viewports.enumerated() {
+            cameraPositionsTemp[i] = Self.cameraWorldPosition(forViewMatrix: viewport.viewMatrix)
+            cameraForwardsTemp[i] = Self.cameraWorldForward(forViewMatrix: viewport.viewMatrix)
+        }
+        cameraWorldPosition = cameraPositionsTemp.mean ?? .zero
+        cameraWorldForward = cameraForwardsTemp.mean?.normalized ?? .init(x: 0, y: 0, z: -1)
 
         if !sorting && shouldResortForCurrentCamera() {
             resort()
@@ -1690,11 +1709,14 @@ public class SplatRenderer {
         renderEncoder.setViewports(viewports.map(\.viewport))
 
         if viewports.count > 1 {
-            var viewMappings = (0..<viewports.count).map {
-                MTLVertexAmplificationViewMapping(viewportArrayIndexOffset: UInt32($0),
-                                                  renderTargetArrayIndexOffset: UInt32($0))
+            // Use cached view mappings to avoid per-frame allocations
+            if viewMappingsTemp.count != viewports.count {
+                viewMappingsTemp = (0..<viewports.count).map {
+                    MTLVertexAmplificationViewMapping(viewportArrayIndexOffset: UInt32($0),
+                                                      renderTargetArrayIndexOffset: UInt32($0))
+                }
             }
-            renderEncoder.setVertexAmplificationCount(viewports.count, viewMappings: &viewMappings)
+            renderEncoder.setVertexAmplificationCount(viewports.count, viewMappings: &viewMappingsTemp)
         }
 
         return renderEncoder
@@ -1971,28 +1993,29 @@ public class SplatRenderer {
         
         onRenderComplete?(lastFrameTime)
 
-        // Collect buffer pool statistics for performance monitoring
-        let distancePoolStats = sortDistanceBufferPool.getStatistics()
-        let indexPoolStats = sortIndexBufferPool.getStatistics()
+        // Only collect stats when callback is set (avoid overhead when not needed)
+        if let frameReadyCallback = onFrameReady {
+            let distancePoolStats = sortDistanceBufferPool.getStatistics()
+            let indexPoolStats = sortIndexBufferPool.getStatistics()
 
-        // Combine sort buffer pool stats (distance + index buffers)
-        let sortBufferStats = FrameStatistics.BufferPoolStats(
-            availableBuffers: distancePoolStats.availableBuffers + indexPoolStats.availableBuffers,
-            leasedBuffers: distancePoolStats.leasedBuffers + indexPoolStats.leasedBuffers,
-            totalMemoryMB: distancePoolStats.totalMemoryMB + indexPoolStats.totalMemoryMB
-        )
+            let sortBufferStats = FrameStatistics.BufferPoolStats(
+                availableBuffers: distancePoolStats.availableBuffers + indexPoolStats.availableBuffers,
+                leasedBuffers: distancePoolStats.leasedBuffers + indexPoolStats.leasedBuffers,
+                totalMemoryMB: distancePoolStats.totalMemoryMB + indexPoolStats.totalMemoryMB
+            )
 
-        let stats = FrameStatistics(
-            ready: !sorting,
-            loadingCount: sorting ? 1 : 0,
-            sortDuration: lastSortDuration,
-            bufferUploadCount: frameBufferUploads,
-            splatCount: splatCount,
-            frameTime: lastFrameTime,
-            sortBufferPoolStats: sortBufferStats,
-            sortJobsInFlight: sortJobsInFlight
-        )
-        onFrameReady?(stats)
+            let stats = FrameStatistics(
+                ready: !sorting,
+                loadingCount: sorting ? 1 : 0,
+                sortDuration: lastSortDuration,
+                bufferUploadCount: frameBufferUploads,
+                splatCount: splatCount,
+                frameTime: lastFrameTime,
+                sortBufferPoolStats: sortBufferStats,
+                sortJobsInFlight: sortJobsInFlight
+            )
+            frameReadyCallback(stats)
+        }
     }
     
     /// Helper to draw debug AABB wireframe - used by both mesh shader and traditional paths
@@ -2039,6 +2062,63 @@ public class SplatRenderer {
             encoder.endEncoding()
         } catch {
             Self.log.error("Failed to draw debug AABB: \(error)")
+        }
+    }
+
+    /// Completes a GPU sort by swapping buffers and updating state.
+    /// Called from command buffer completion handlers to avoid blocking.
+    private func finishSort(
+        indexOutputBuffer: MetalBuffer<Int32>,
+        sortStartTime: CFAbsoluteTime,
+        cameraWorldPosition: SIMD3<Float>,
+        cameraWorldForward: SIMD3<Float>,
+        dataDirtySnapshot: UInt64,
+        useGPU: Bool
+    ) {
+        // GPU-ONLY SORTING with double-buffering for async overlap
+        // Swap buffers atomically - rendering continues with old buffer
+        // until this completes, then switches to new buffer
+
+        // Release the "other" buffer (the one NOT currently being rendered)
+        if self.usingSortedBufferA {
+            // Currently rendering with A, so B is safe to replace
+            if let oldB = self.sortedIndicesBufferB {
+                sortIndexBufferPool.release(oldB)
+            }
+            self.sortedIndicesBufferB = indexOutputBuffer
+        } else {
+            // Currently rendering with B, so A is safe to replace
+            if let oldA = self.sortedIndicesBufferA {
+                sortIndexBufferPool.release(oldA)
+            }
+            self.sortedIndicesBufferA = indexOutputBuffer
+        }
+
+        // Flip the active buffer for next render
+        // This is the "swap" - rendering will now use the newly sorted buffer
+        self.usingSortedBufferA = !self.usingSortedBufferA
+
+        // Update the main sortedIndicesBuffer pointer for compatibility
+        self.sortedIndicesBuffer = self.usingSortedBufferA
+            ? self.sortedIndicesBufferA
+            : self.sortedIndicesBufferB
+
+        let elapsed = CFAbsoluteTimeGetCurrent() - sortStartTime
+        self.lastSortDuration = elapsed
+        self.onSortComplete?(elapsed)
+        self.lastSortedCameraPosition = cameraWorldPosition
+        self.lastSortedCameraForward = cameraWorldForward
+        self.lastSortTime = CFAbsoluteTimeGetCurrent()
+        if self.sortDataRevision == dataDirtySnapshot {
+            self.sortDirtyDueToData = false
+        }
+        self.sorting = false
+        self.sortJobsInFlight -= 1
+
+        Self.log.debug("Async sort completed in \(String(format: "%.1f", elapsed * 1000))ms")
+
+        if self.shouldResortForCurrentCamera() {
+            self.resort(useGPU: useGPU)
         }
     }
 
@@ -2131,8 +2211,24 @@ public class SplatRenderer {
                         return
                     }
 
+                    // Use completion handler instead of blocking waitUntilCompleted
+                    // This allows the Task to return while GPU continues sorting
+                    commandBuffer.addCompletedHandler { [weak self] _ in
+                        guard let self = self else {
+                            self?.sortIndexBufferPool.release(indexOutputBuffer)
+                            return
+                        }
+                        self.finishSort(
+                            indexOutputBuffer: indexOutputBuffer,
+                            sortStartTime: sortStartTime,
+                            cameraWorldPosition: cameraWorldPosition,
+                            cameraWorldForward: cameraWorldForward,
+                            dataDirtySnapshot: dataDirtySnapshot,
+                            useGPU: useGPU
+                        )
+                    }
                     commandBuffer.commit()
-                    commandBuffer.waitUntilCompleted()
+                    return  // Exit Task - completion handler will finish sort
 
                 } else {
                     // === LEGACY MPS ARGSORT PATH ===
@@ -2195,65 +2291,34 @@ public class SplatRenderer {
                     // Use separate compute queue so sorting doesn't block rendering
                     let sortQueue = self.computeCommandBufferManager?.queue ?? commandBufferManager.queue
 
-                    // Commit distance computation and wait (needed before argsort)
+                    // Use completion handler to chain distance computation -> argsort -> finish
+                    commandBuffer.addCompletedHandler { [weak self] _ in
+                        guard let self = self else {
+                            return
+                        }
+
+                        // Run argsort (synchronous, but we're in a completion handler so not blocking main thread)
+                        // MPSArgSort's callAsFunction is synchronous but fast
+                        let argSort = MPSArgSort(dataType: .float32, descending: true)
+                        argSort(commandQueue: sortQueue,
+                                input: distanceBuffer.buffer,
+                                output: indexOutputBuffer.buffer,
+                                count: splatCount)
+
+                        // Release distance buffer (only used by MPS path)
+                        self.sortDistanceBufferPool.release(distanceBuffer)
+
+                        self.finishSort(
+                            indexOutputBuffer: indexOutputBuffer,
+                            sortStartTime: sortStartTime,
+                            cameraWorldPosition: cameraWorldPosition,
+                            cameraWorldForward: cameraWorldForward,
+                            dataDirtySnapshot: dataDirtySnapshot,
+                            useGPU: useGPU
+                        )
+                    }
                     commandBuffer.commit()
-                    commandBuffer.waitUntilCompleted()
-
-                    // Run argsort on the compute queue (may overlap with next frame's render)
-                    let argSort = MPSArgSort(dataType: .float32, descending: true)
-                    argSort(commandQueue: sortQueue,
-                            input: distanceBuffer.buffer,
-                            output: indexOutputBuffer.buffer,
-                            count: splatCount)
-
-                    // Release distance buffer (only used by MPS path)
-                    sortDistanceBufferPool.release(distanceBuffer)
-                }
-
-                // GPU-ONLY SORTING with double-buffering for async overlap
-                // Swap buffers atomically - rendering continues with old buffer
-                // until this completes, then switches to new buffer
-                
-                // Release the "other" buffer (the one NOT currently being rendered)
-                if self.usingSortedBufferA {
-                    // Currently rendering with A, so B is safe to replace
-                    if let oldB = self.sortedIndicesBufferB {
-                        sortIndexBufferPool.release(oldB)
-                    }
-                    self.sortedIndicesBufferB = indexOutputBuffer
-                } else {
-                    // Currently rendering with B, so A is safe to replace
-                    if let oldA = self.sortedIndicesBufferA {
-                        sortIndexBufferPool.release(oldA)
-                    }
-                    self.sortedIndicesBufferA = indexOutputBuffer
-                }
-                
-                // Flip the active buffer for next render
-                // This is the "swap" - rendering will now use the newly sorted buffer
-                self.usingSortedBufferA = !self.usingSortedBufferA
-                
-                // Update the main sortedIndicesBuffer pointer for compatibility
-                self.sortedIndicesBuffer = self.usingSortedBufferA
-                    ? self.sortedIndicesBufferA
-                    : self.sortedIndicesBufferB
-
-                let elapsed = CFAbsoluteTimeGetCurrent() - sortStartTime
-                self.lastSortDuration = elapsed
-                self.onSortComplete?(elapsed)
-                self.lastSortedCameraPosition = cameraWorldPosition
-                self.lastSortedCameraForward = cameraWorldForward
-                self.lastSortTime = CFAbsoluteTimeGetCurrent()
-                if self.sortDataRevision == dataDirtySnapshot {
-                    self.sortDirtyDueToData = false
-                }
-                self.sorting = false
-                self.sortJobsInFlight -= 1
-                
-                Self.log.debug("Async sort completed in \(String(format: "%.1f", elapsed * 1000))ms")
-                
-                if self.shouldResortForCurrentCamera() {
-                    self.resort(useGPU: useGPU)
+                    return  // Exit Task - completion handler will finish sort
                 }
             }
         } else {

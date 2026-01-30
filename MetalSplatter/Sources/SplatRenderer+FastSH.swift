@@ -436,9 +436,27 @@ extension FastSHSplatRenderer {
         let indexedCount = min(splatCount, Constants.maxIndexedSplatCount)
         let instanceCount = (splatCount + Constants.maxIndexedSplatCount - 1) / Constants.maxIndexedSplatCount
 
+        // Ensure index buffer is properly sized and filled (FastSH path may be called independently)
+        let requiredIndexCount = indexedCount * 6
+        if indexBuffer.count < requiredIndexCount {
+            if indexBuffer.capacity < requiredIndexCount {
+                indexBufferPool.release(indexBuffer)
+                indexBuffer = try indexBufferPool.acquire(minimumCapacity: requiredIndexCount)
+            }
+            indexBuffer.count = requiredIndexCount
+            for i in 0..<indexedCount {
+                indexBuffer.values[i * 6 + 0] = UInt32(i * 4 + 0)
+                indexBuffer.values[i * 6 + 1] = UInt32(i * 4 + 1)
+                indexBuffer.values[i * 6 + 2] = UInt32(i * 4 + 2)
+                indexBuffer.values[i * 6 + 3] = UInt32(i * 4 + 1)
+                indexBuffer.values[i * 6 + 4] = UInt32(i * 4 + 3)
+                indexBuffer.values[i * 6 + 5] = UInt32(i * 4 + 2)
+            }
+        }
+
         renderEncoder.drawIndexedPrimitives(
             type: .triangle,
-            indexCount: indexBuffer.count,
+            indexCount: requiredIndexCount,
             indexType: UInt32.asMTLIndexType,
             indexBuffer: indexBuffer.buffer,
             indexBufferOffset: 0,
