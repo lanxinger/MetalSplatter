@@ -169,7 +169,26 @@ public class ARSplatRenderer: NSObject, @unchecked Sendable {
     public var isFastSHAvailable: Bool {
         fastSHRenderer != nil
     }
-    
+
+    // MARK: - Interaction Mode (Adaptive Quality)
+
+    /// Whether the renderer is currently in interaction mode
+    public var isInteracting: Bool {
+        splatRenderer.isInteracting
+    }
+
+    /// Begin interaction mode - relaxes sort parameters for smoother gestures
+    /// Call when user starts touch/drag interaction
+    public func beginInteraction() {
+        splatRenderer.beginInteraction()
+    }
+
+    /// End interaction mode - restores quality sort parameters
+    /// Call when user ends touch interaction
+    public func endInteraction() {
+        splatRenderer.endInteraction()
+    }
+
     public func isWaitingForSurfaceDetection() -> Bool {
         return isWaitingForARTracking && !hasBeenPlaced && splatRenderer.splatCount > 0
     }
