@@ -17,6 +17,7 @@ public class SampleBoxRenderer {
         case bufferCreationFailed
         case badVertexDescriptor
         case depthStencilStateCreationFailed
+        case renderEncoderCreationFailed
     }
 
     public struct ViewportDescriptor {
@@ -157,7 +158,7 @@ public class SampleBoxRenderer {
                        depthStoreAction: MTLStoreAction = .dontCare,
                        rasterizationRateMap: MTLRasterizationRateMap?,
                        renderTargetArrayLength: Int,
-                       for commandBuffer: MTLCommandBuffer) -> MTLRenderCommandEncoder {
+                       for commandBuffer: MTLCommandBuffer) throws -> MTLRenderCommandEncoder {
         let renderPassDescriptor = MTLRenderPassDescriptor()
         renderPassDescriptor.colorAttachments[0].texture = colorTexture
         renderPassDescriptor.colorAttachments[0].loadAction = .clear
@@ -173,7 +174,7 @@ public class SampleBoxRenderer {
         renderPassDescriptor.renderTargetArrayLength = renderTargetArrayLength
 
         guard let renderEncoder = commandBuffer.makeRenderCommandEncoder(descriptor: renderPassDescriptor) else {
-            fatalError("Failed to create render encoder")
+            throw Error.renderEncoderCreationFailed
         }
 
         renderEncoder.label = "Primary Render Encoder"
@@ -202,14 +203,14 @@ public class SampleBoxRenderer {
         updateDynamicBufferState()
         updateUniforms(forViewports: viewports)
 
-        let renderEncoder = renderEncoder(viewports: viewports,
-                                          colorTexture: colorTexture,
-                                          colorStoreAction: colorStoreAction,
-                                          depthTexture: depthTexture,
-                                          depthStoreAction: depthStoreAction,
-                                          rasterizationRateMap: rasterizationRateMap,
-                                          renderTargetArrayLength: renderTargetArrayLength,
-                                          for: commandBuffer)
+        let renderEncoder = try renderEncoder(viewports: viewports,
+                                              colorTexture: colorTexture,
+                                              colorStoreAction: colorStoreAction,
+                                              depthTexture: depthTexture,
+                                              depthStoreAction: depthStoreAction,
+                                              rasterizationRateMap: rasterizationRateMap,
+                                              renderTargetArrayLength: renderTargetArrayLength,
+                                              for: commandBuffer)
 
         renderEncoder.pushDebugGroup("Draw Box")
 

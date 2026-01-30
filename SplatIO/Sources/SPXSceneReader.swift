@@ -168,6 +168,7 @@ public class SPXSceneReader: SplatSceneReader {
     public func read(to delegate: SplatSceneReaderDelegate) {
         guard let header = header else {
             print("SPXSceneReader: No header parsed")
+            delegate.didFailReading(withError: SPXFileFormatError.invalidHeader)
             return
         }
         

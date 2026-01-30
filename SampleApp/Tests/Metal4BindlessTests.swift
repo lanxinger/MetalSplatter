@@ -73,17 +73,20 @@ class Metal4BindlessTests: XCTestCase {
     
     func testResourceRegistration() throws {
         bindlessArchitecture = try Metal4BindlessArchitecture(device: device)
-        
+
         // Create test buffer
         let bufferSize = 1024 * MemoryLayout<Float>.stride
         guard let buffer = device.makeBuffer(length: bufferSize, options: .storageModeShared) else {
             XCTFail("Failed to create test buffer")
             return
         }
-        
+
         // Register buffer
-        let handle = bindlessArchitecture.registerBuffer(buffer, type: .splatBuffer)
-        
+        guard let handle = bindlessArchitecture.registerBuffer(buffer, type: .splatBuffer) else {
+            XCTFail("Failed to register buffer")
+            return
+        }
+
         XCTAssertNotEqual(handle.value, 0, "Resource handle should be valid")
         XCTAssertGreaterThan(handle.index, 0, "Resource index should be positive")
         
@@ -103,8 +106,9 @@ class Metal4BindlessTests: XCTestCase {
         for i in 0..<10 {
             let buffer = device.makeBuffer(length: 1024, options: .storageModeShared)!
             buffer.label = "Test Buffer \(i)"
-            let handle = bindlessArchitecture.registerBuffer(buffer, type: .uniformBuffer)
-            handles.append(handle)
+            if let handle = bindlessArchitecture.registerBuffer(buffer, type: .uniformBuffer) {
+                handles.append(handle)
+            }
         }
         
         // Wait for background population
@@ -221,8 +225,9 @@ class Metal4BindlessTests: XCTestCase {
         var handles: [ResourceHandle] = []
         for _ in 0..<5 {
             let buffer = device.makeBuffer(length: 1024 * 1024, options: .storageModeShared)!
-            let handle = bindlessArchitecture.registerBuffer(buffer, type: .splatBuffer)
-            handles.append(handle)
+            if let handle = bindlessArchitecture.registerBuffer(buffer, type: .splatBuffer) {
+                handles.append(handle)
+            }
         }
         
         // Update residency

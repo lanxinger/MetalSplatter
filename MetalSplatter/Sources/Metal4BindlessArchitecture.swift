@@ -7,14 +7,14 @@ import os
 /// Implements full bindless resource management with background population and zero per-draw binding
 @available(iOS 18.0, macOS 15.0, visionOS 2.0, *)
 public class Metal4BindlessArchitecture {
-    
+
     private static let log = Logger(
         subsystem: Bundle.module.bundleIdentifier ?? "com.metalsplatter.unknown",
         category: "Metal4BindlessArchitecture"
     )
-    
+
     // MARK: - Configuration
-    
+
     public struct Configuration {
         public let maxResources: Int
         public let maxSplatBuffers: Int
@@ -23,7 +23,7 @@ public class Metal4BindlessArchitecture {
         public let enableBackgroundPopulation: Bool
         public let enableResidencyTracking: Bool
         public let resourceTableSize: Int
-        
+
         public init(maxResources: Int = 1024,
                    maxSplatBuffers: Int = 16,
                    maxUniformBuffers: Int = 16,
@@ -40,67 +40,82 @@ public class Metal4BindlessArchitecture {
             self.resourceTableSize = resourceTableSize
         }
     }
-    
+
     // MARK: - Properties
-    
+
     private let device: MTLDevice
     private let configuration: Configuration
-    private let resourceQueue = DispatchQueue(label: "com.metalsplatter.bindless.resources", attributes: .concurrent)
     private let populationQueue = DispatchQueue(label: "com.metalsplatter.bindless.population", qos: .userInitiated)
-    
-    // Argument buffers and encoders
+
+    // Argument buffers and encoders - double-buffered for thread safety
     private var argumentEncoder: MTLArgumentEncoder?
-    private var indirectArgumentBuffer: MTLBuffer?
+    private var argumentBuffers: [MTLBuffer] = []  // Double-buffered
+    private var currentBufferIndex: Int = 0
     private var resourceTable: MTLBuffer?
-    
-    // Resource tracking
-    private var resourceRegistry = ResourceRegistry()
-    private var pendingResources = Set<ResourceHandle>()
+
+    // Resource tracking with type-specific slot management
+    private var resourceRegistry: ResourceRegistry
+    private var pendingResources: [ResourceHandle] = []
     private let resourceLock = NSLock()
-    
+
+    // Slot allocators for each resource type
+    private var splatBufferSlots: SlotAllocator
+    private var uniformBufferSlots: SlotAllocator
+    private var textureSlots: SlotAllocator
+
     // Residency management (placeholder for future Metal APIs)
     private var residencyController: ResidencyController?
-    
+
     // Performance metrics
     private var bindlessMetrics = BindlessMetrics()
 
-    // Background thread cancellation
+    // Background thread management
     private var shouldStopPopulation = false
+    private let populationSemaphore = DispatchSemaphore(value: 0)
+    private let populationLock = NSLock()
 
     // MARK: - Initialization
-    
+
     public init(device: MTLDevice, configuration: Configuration = Configuration()) throws {
         self.device = device
         self.configuration = configuration
-        
+
+        // Initialize slot allocators
+        self.splatBufferSlots = SlotAllocator(maxSlots: configuration.maxSplatBuffers)
+        self.uniformBufferSlots = SlotAllocator(maxSlots: configuration.maxUniformBuffers)
+        self.textureSlots = SlotAllocator(maxSlots: configuration.maxTextures)
+
+        // Initialize resource registry with bounds
+        self.resourceRegistry = ResourceRegistry(maxResources: configuration.resourceTableSize)
+
         guard device.supportsFamily(.apple7) else {
             throw BindlessError.unsupportedDevice("Device must support Apple GPU Family 7+")
         }
-        
+
         try setupArgumentBuffers()
         try setupResourceTable()
-        
+
         if configuration.enableResidencyTracking {
             setupResidencyTracking()
         }
-        
+
         if configuration.enableBackgroundPopulation {
             startBackgroundResourcePopulation()
         }
-        
+
         Self.log.info("✅ Metal 4 Bindless Architecture initialized")
         Self.log.info("   Max Resources: \(configuration.maxResources)")
         Self.log.info("   Background Population: \(configuration.enableBackgroundPopulation)")
         Self.log.info("   Residency Tracking: \(configuration.enableResidencyTracking)")
     }
-    
+
     // MARK: - Setup Methods
-    
+
     private func setupArgumentBuffers() throws {
         // Create comprehensive argument descriptor for all resource types
         var argumentDescriptors: [MTLArgumentDescriptor] = []
-        
-        // Splat buffers (0-15)
+
+        // Splat buffers (0 to maxSplatBuffers-1)
         for i in 0..<configuration.maxSplatBuffers {
             let descriptor = MTLArgumentDescriptor()
             descriptor.index = i
@@ -109,8 +124,8 @@ public class Metal4BindlessArchitecture {
             descriptor.arrayLength = 1
             argumentDescriptors.append(descriptor)
         }
-        
-        // Uniform buffers (16-31)
+
+        // Uniform buffers (maxSplatBuffers to maxSplatBuffers+maxUniformBuffers-1)
         for i in 0..<configuration.maxUniformBuffers {
             let descriptor = MTLArgumentDescriptor()
             descriptor.index = configuration.maxSplatBuffers + i
@@ -119,8 +134,8 @@ public class Metal4BindlessArchitecture {
             descriptor.arrayLength = 1
             argumentDescriptors.append(descriptor)
         }
-        
-        // Textures (32-63)
+
+        // Textures (maxSplatBuffers+maxUniformBuffers to end)
         for i in 0..<configuration.maxTextures {
             let descriptor = MTLArgumentDescriptor()
             descriptor.index = configuration.maxSplatBuffers + configuration.maxUniformBuffers + i
@@ -130,45 +145,47 @@ public class Metal4BindlessArchitecture {
             descriptor.arrayLength = 1
             argumentDescriptors.append(descriptor)
         }
-        
+
         // Create encoder
         guard let encoder = device.makeArgumentEncoder(arguments: argumentDescriptors) else {
             throw BindlessError.argumentEncoderCreationFailed
         }
-        
+
         self.argumentEncoder = encoder
-        
-        // Create indirect argument buffer with extra space for dynamic updates
-        let bufferSize = encoder.encodedLength * 2 // Double size for double buffering
-        guard let buffer = device.makeBuffer(length: bufferSize, options: [.storageModeShared]) else {
-            throw BindlessError.argumentBufferCreationFailed
+
+        // Create double-buffered argument buffers
+        // Each buffer holds one complete set of resource bindings
+        let bufferSize = encoder.encodedLength
+        for i in 0..<2 {
+            guard let buffer = device.makeBuffer(length: bufferSize, options: [.storageModeShared]) else {
+                throw BindlessError.argumentBufferCreationFailed
+            }
+            buffer.label = "Metal4 Bindless Argument Buffer \(i)"
+            argumentBuffers.append(buffer)
         }
-        
-        self.indirectArgumentBuffer = buffer
-        buffer.label = "Metal4 Bindless Argument Buffer"
-        
-        Self.log.info("Created argument encoder with \(argumentDescriptors.count) descriptors, buffer size: \(bufferSize) bytes")
+
+        Self.log.info("Created argument encoder with \(argumentDescriptors.count) descriptors, buffer size: \(bufferSize) bytes (double-buffered)")
     }
-    
+
     private func setupResourceTable() throws {
         // Create large resource table for bindless access
         let tableSize = configuration.resourceTableSize * MemoryLayout<UInt64>.stride
         guard let table = device.makeBuffer(length: tableSize, options: [.storageModeShared]) else {
             throw BindlessError.resourceTableCreationFailed
         }
-        
+
         self.resourceTable = table
         table.label = "Metal4 Bindless Resource Table"
-        
+
         // Initialize table with null handles
         let contents = table.contents().bindMemory(to: UInt64.self, capacity: configuration.resourceTableSize)
         for i in 0..<configuration.resourceTableSize {
             contents[i] = ResourceHandle.null.value
         }
-        
+
         Self.log.info("Created resource table with \(self.configuration.resourceTableSize) entries")
     }
-    
+
     private func setupResidencyTracking() {
         // Initialize residency controller
         // Note: In Metal 4, this would use MTLResidencySet
@@ -176,201 +193,336 @@ public class Metal4BindlessArchitecture {
         residencyController = ResidencyController(device: device)
         Self.log.info("Residency tracking enabled")
     }
-    
+
     // MARK: - Resource Registration
-    
+
     /// Register a buffer for bindless access without per-draw binding
-    public func registerBuffer(_ buffer: MTLBuffer, type: ResourceType) -> ResourceHandle {
+    /// Returns nil if resource table is full
+    public func registerBuffer(_ buffer: MTLBuffer, type: ResourceType) -> ResourceHandle? {
         resourceLock.lock()
         defer { resourceLock.unlock() }
-        
-        let handle = resourceRegistry.register(buffer, type: type)
-        
-        // Queue for background population
-        if configuration.enableBackgroundPopulation {
-            pendingResources.insert(handle)
-        } else {
-            // Immediate population
-            populateResource(handle, buffer: buffer)
+
+        // Allocate a slot based on resource type
+        let slotAllocator: SlotAllocator
+        let slotOffset: Int
+
+        switch type {
+        case .splatBuffer:
+            slotAllocator = splatBufferSlots
+            slotOffset = 0
+        case .uniformBuffer:
+            slotAllocator = uniformBufferSlots
+            slotOffset = configuration.maxSplatBuffers
+        case .indexBuffer:
+            // Index buffers use splat buffer slots
+            slotAllocator = splatBufferSlots
+            slotOffset = 0
+        case .texture, .sampler:
+            Self.log.error("Cannot register texture/sampler as buffer")
+            return nil
         }
-        
+
+        guard let slot = slotAllocator.allocate() else {
+            Self.log.error("No available slots for resource type \(String(describing: type))")
+            return nil
+        }
+
+        let argumentIndex = slotOffset + slot
+
+        guard let handle = resourceRegistry.register(buffer, type: type, argumentIndex: argumentIndex) else {
+            slotAllocator.free(slot)
+            Self.log.error("Resource table is full, cannot register buffer")
+            return nil
+        }
+
+        // Queue for background population or populate immediately
+        if configuration.enableBackgroundPopulation {
+            pendingResources.append(handle)
+            populationSemaphore.signal()  // Wake up background thread
+        } else {
+            populateResourceUnsafe(handle, buffer: buffer, argumentIndex: argumentIndex)
+        }
+
         bindlessMetrics.resourcesRegistered += 1
-        
-        Self.log.debug("Registered \(String(describing: type)) buffer with handle: \(handle.value)")
+
+        Self.log.debug("Registered \(String(describing: type)) buffer with handle: \(handle.value), argument index: \(argumentIndex)")
         return handle
     }
-    
+
     /// Register a texture for bindless access
-    public func registerTexture(_ texture: MTLTexture) -> ResourceHandle {
+    /// Returns nil if resource table is full
+    public func registerTexture(_ texture: MTLTexture) -> ResourceHandle? {
         resourceLock.lock()
         defer { resourceLock.unlock() }
-        
-        let handle = resourceRegistry.register(texture, type: .texture)
-        
-        if configuration.enableBackgroundPopulation {
-            pendingResources.insert(handle)
-        } else {
-            populateResource(handle, texture: texture)
+
+        guard let slot = textureSlots.allocate() else {
+            Self.log.error("No available texture slots")
+            return nil
         }
-        
+
+        let argumentIndex = configuration.maxSplatBuffers + configuration.maxUniformBuffers + slot
+
+        guard let handle = resourceRegistry.register(texture, type: .texture, argumentIndex: argumentIndex) else {
+            textureSlots.free(slot)
+            Self.log.error("Resource table is full, cannot register texture")
+            return nil
+        }
+
+        if configuration.enableBackgroundPopulation {
+            pendingResources.append(handle)
+            populationSemaphore.signal()
+        } else {
+            populateResourceUnsafe(handle, texture: texture, argumentIndex: argumentIndex)
+        }
+
         bindlessMetrics.resourcesRegistered += 1
-        
-        Self.log.debug("Registered texture with handle: \(handle.value)")
+
+        Self.log.debug("Registered texture with handle: \(handle.value), argument index: \(argumentIndex)")
         return handle
     }
-    
+
     // MARK: - Background Resource Population
-    
+
     private func startBackgroundResourcePopulation() {
         populationQueue.async { [weak self] in
-            while let strongSelf = self, !strongSelf.shouldStopPopulation {
-                strongSelf.processPendingResources()
-                Thread.sleep(forTimeInterval: 0.001) // 1ms between batches
+            while let strongSelf = self {
+                // Check stop flag
+                strongSelf.populationLock.lock()
+                let shouldStop = strongSelf.shouldStopPopulation
+                strongSelf.populationLock.unlock()
+
+                if shouldStop {
+                    break
+                }
+
+                // Wait for work with timeout (allows periodic stop flag checks)
+                let result = strongSelf.populationSemaphore.wait(timeout: .now() + .milliseconds(100))
+
+                if result == .success {
+                    strongSelf.processPendingResources()
+                }
             }
         }
     }
 
     deinit {
+        populationLock.lock()
         shouldStopPopulation = true
+        populationLock.unlock()
+        populationSemaphore.signal()  // Wake up thread so it can exit
     }
-    
+
     private func processPendingResources() {
         resourceLock.lock()
-        let resourcesToProcess = Array(pendingResources.prefix(16)) // Process up to 16 at a time
-        pendingResources.subtract(resourcesToProcess)
+        let resourcesToProcess = Array(pendingResources.prefix(16))
+        pendingResources.removeFirst(min(16, pendingResources.count))
         resourceLock.unlock()
-        
+
         guard !resourcesToProcess.isEmpty else { return }
-        
+
         Self.log.debug("Processing \(resourcesToProcess.count) pending resources in background")
-        
+
+        // Get the back buffer for writing (not currently being read by GPU)
+        let writeBufferIndex = 1 - currentBufferIndex
+
         for handle in resourcesToProcess {
-            if let resource = resourceRegistry.getResource(for: handle) {
-                switch resource {
+            if let entry = resourceRegistry.getEntry(for: handle) {
+                switch entry.resource {
                 case .buffer(let buffer):
-                    populateResource(handle, buffer: buffer)
+                    populateToBuffer(at: writeBufferIndex, handle: handle, buffer: buffer, argumentIndex: entry.argumentIndex)
                 case .texture(let texture):
-                    populateResource(handle, texture: texture)
+                    populateToBuffer(at: writeBufferIndex, handle: handle, texture: texture, argumentIndex: entry.argumentIndex)
                 }
             }
         }
-        
+
+        // Also update the current buffer for immediate visibility
+        resourceLock.lock()
+        let currentIndex = currentBufferIndex
+        resourceLock.unlock()
+
+        for handle in resourcesToProcess {
+            if let entry = resourceRegistry.getEntry(for: handle) {
+                switch entry.resource {
+                case .buffer(let buffer):
+                    populateToBuffer(at: currentIndex, handle: handle, buffer: buffer, argumentIndex: entry.argumentIndex)
+                case .texture(let texture):
+                    populateToBuffer(at: currentIndex, handle: handle, texture: texture, argumentIndex: entry.argumentIndex)
+                }
+            }
+        }
+
         bindlessMetrics.resourcesPopulatedInBackground += resourcesToProcess.count
     }
-    
-    private func populateResource(_ handle: ResourceHandle, buffer: MTLBuffer) {
+
+    /// Populate resource to a specific buffer (thread-safe via buffer index isolation)
+    private func populateToBuffer(at bufferIndex: Int, handle: ResourceHandle, buffer: MTLBuffer, argumentIndex: Int) {
         guard let encoder = argumentEncoder,
-              let argBuffer = indirectArgumentBuffer else { return }
-        
-        // Calculate offset in argument buffer
-        let offset = Int(handle.index) * encoder.encodedLength / configuration.maxResources
-        
-        encoder.setArgumentBuffer(argBuffer, offset: offset)
-        encoder.setBuffer(buffer, offset: 0, index: Int(handle.index) % configuration.maxSplatBuffers)
-        
-        // Update resource table
-        if let table = resourceTable {
-            let contents = table.contents().bindMemory(to: UInt64.self, capacity: configuration.resourceTableSize)
-            contents[Int(handle.index)] = handle.value
-        }
-        
+              bufferIndex < argumentBuffers.count else { return }
+
+        let argBuffer = argumentBuffers[bufferIndex]
+
+        encoder.setArgumentBuffer(argBuffer, offset: 0)
+        encoder.setBuffer(buffer, offset: 0, index: argumentIndex)
+
+        // Update resource table (single shared table)
+        updateResourceTable(handle: handle)
+
         // Track residency
         residencyController?.trackResource(buffer, handle: handle)
     }
-    
-    private func populateResource(_ handle: ResourceHandle, texture: MTLTexture) {
+
+    private func populateToBuffer(at bufferIndex: Int, handle: ResourceHandle, texture: MTLTexture, argumentIndex: Int) {
         guard let encoder = argumentEncoder,
-              let argBuffer = indirectArgumentBuffer else { return }
-        
-        let textureIndex = configuration.maxSplatBuffers + configuration.maxUniformBuffers + (Int(handle.index) % configuration.maxTextures)
-        let offset = Int(handle.index) * encoder.encodedLength / configuration.maxResources
-        
-        encoder.setArgumentBuffer(argBuffer, offset: offset)
-        encoder.setTexture(texture, index: textureIndex)
-        
-        // Update resource table
-        if let table = resourceTable {
-            let contents = table.contents().bindMemory(to: UInt64.self, capacity: configuration.resourceTableSize)
-            contents[Int(handle.index)] = handle.value
-        }
-        
-        // Track residency
+              bufferIndex < argumentBuffers.count else { return }
+
+        let argBuffer = argumentBuffers[bufferIndex]
+
+        encoder.setArgumentBuffer(argBuffer, offset: 0)
+        encoder.setTexture(texture, index: argumentIndex)
+
+        updateResourceTable(handle: handle)
         residencyController?.trackResource(texture, handle: handle)
     }
-    
+
+    /// Unsafe population - called under resourceLock for immediate population
+    private func populateResourceUnsafe(_ handle: ResourceHandle, buffer: MTLBuffer, argumentIndex: Int) {
+        guard let encoder = argumentEncoder else { return }
+
+        // Populate both buffers
+        for argBuffer in argumentBuffers {
+            encoder.setArgumentBuffer(argBuffer, offset: 0)
+            encoder.setBuffer(buffer, offset: 0, index: argumentIndex)
+        }
+
+        updateResourceTable(handle: handle)
+        residencyController?.trackResource(buffer, handle: handle)
+    }
+
+    private func populateResourceUnsafe(_ handle: ResourceHandle, texture: MTLTexture, argumentIndex: Int) {
+        guard let encoder = argumentEncoder else { return }
+
+        for argBuffer in argumentBuffers {
+            encoder.setArgumentBuffer(argBuffer, offset: 0)
+            encoder.setTexture(texture, index: argumentIndex)
+        }
+
+        updateResourceTable(handle: handle)
+        residencyController?.trackResource(texture, handle: handle)
+    }
+
+    private func updateResourceTable(handle: ResourceHandle) {
+        guard let table = resourceTable else { return }
+
+        let index = Int(handle.index)
+        guard index < self.configuration.resourceTableSize else {
+            Self.log.error("Handle index \(index) exceeds resource table size \(self.configuration.resourceTableSize)")
+            return
+        }
+
+        let contents = table.contents().bindMemory(to: UInt64.self, capacity: self.configuration.resourceTableSize)
+        contents[index] = handle.value
+    }
+
     // MARK: - Render Integration (Zero Per-Draw Binding)
-    
+
     /// Bind all resources once at the beginning of a render pass - no per-draw binding needed
+    /// Call this at the start of each render pass. The binding uses the current buffer which
+    /// is guaranteed to be fully populated.
     public func bindToRenderEncoder(_ renderEncoder: MTLRenderCommandEncoder) {
-        guard let argBuffer = indirectArgumentBuffer,
+        resourceLock.lock()
+        let bufferIndex = currentBufferIndex
+        resourceLock.unlock()
+
+        guard bufferIndex < argumentBuffers.count,
               let table = resourceTable else { return }
-        
+
+        let argBuffer = argumentBuffers[bufferIndex]
+
         // Bind argument buffer once for entire render pass
         renderEncoder.setVertexBuffer(argBuffer, offset: 0, index: 30) // Reserved index for bindless
         renderEncoder.setFragmentBuffer(argBuffer, offset: 0, index: 30)
-        
+
         // Bind resource table
         renderEncoder.setVertexBuffer(table, offset: 0, index: 31) // Reserved index for table
         renderEncoder.setFragmentBuffer(table, offset: 0, index: 31)
-        
+
         // Resources are automatically tracked by the argument buffer
         // useResource is deprecated in macOS 13.0+, no longer needed for bindless
-        
+
         bindlessMetrics.renderPassesWithoutBinding += 1
-        
+
         Self.log.debug("Bound bindless resources for entire render pass - no per-draw binding needed")
     }
-    
+
+    /// Swap to the back buffer after GPU has finished with current frame
+    /// Call this after command buffer completion to switch to the updated buffer
+    public func swapBuffers() {
+        resourceLock.lock()
+        currentBufferIndex = 1 - currentBufferIndex
+        resourceLock.unlock()
+    }
+
     /// Bind to compute encoder for compute passes
     public func bindToComputeEncoder(_ computeEncoder: MTLComputeCommandEncoder) {
-        guard let argBuffer = indirectArgumentBuffer,
+        resourceLock.lock()
+        let bufferIndex = currentBufferIndex
+        resourceLock.unlock()
+
+        guard bufferIndex < argumentBuffers.count,
               let table = resourceTable else { return }
-        
+
+        let argBuffer = argumentBuffers[bufferIndex]
+
         computeEncoder.setBuffer(argBuffer, offset: 0, index: 30)
         computeEncoder.setBuffer(table, offset: 0, index: 31)
-        
+
         computeEncoder.useResource(argBuffer, usage: .read)
         computeEncoder.useResource(table, usage: .read)
     }
-    
+
     // MARK: - Residency Management
-    
+
     /// Update residency for visible resources
     public func updateResidency(visibleHandles: [ResourceHandle], commandBuffer: MTLCommandBuffer) {
         residencyController?.updateResidency(
             visibleHandles: visibleHandles,
             commandBuffer: commandBuffer
         )
-        
+
         bindlessMetrics.residencyUpdates += 1
     }
-    
+
     /// Handle memory pressure by evicting unused resources
     public func handleMemoryPressure() {
         residencyController?.evictUnusedResources()
-        
+
         // Clear pending resources if needed
         resourceLock.lock()
         let clearedCount = pendingResources.count
         pendingResources.removeAll()
         resourceLock.unlock()
-        
+
         Self.log.info("Handled memory pressure, cleared \(clearedCount) pending resources")
     }
-    
+
     // MARK: - Statistics
-    
+
     public func getStatistics() -> BindlessStatistics {
+        resourceLock.lock()
+        let pending = pendingResources.count
+        resourceLock.unlock()
+
         return BindlessStatistics(
             registeredResources: resourceRegistry.count,
-            pendingResources: pendingResources.count,
-            argumentBufferSize: indirectArgumentBuffer?.length ?? 0,
+            pendingResources: pending,
+            argumentBufferSize: argumentBuffers.first?.length ?? 0,
             resourceTableSize: resourceTable?.length ?? 0,
             metrics: bindlessMetrics,
             residencyInfo: residencyController?.getInfo() ?? ResidencyInfo()
         )
     }
-    
+
     public func printStatistics() {
         let stats = getStatistics()
         print("=== Metal 4 Bindless Architecture Statistics ===")
@@ -394,19 +546,19 @@ public struct ResourceHandle: Hashable, CustomStringConvertible, Sendable {
     let value: UInt64
     let index: UInt32
     let generation: UInt32
-    
+
     static let null = ResourceHandle(value: 0, index: 0, generation: 0)
-    
+
     public var description: String {
         return "ResourceHandle(index: \(index), generation: \(generation))"
     }
-    
+
     init(index: UInt32, generation: UInt32) {
         self.index = index
         self.generation = generation
         self.value = (UInt64(generation) << 32) | UInt64(index)
     }
-    
+
     private init(value: UInt64, index: UInt32, generation: UInt32) {
         self.value = value
         self.index = index
@@ -430,7 +582,9 @@ public enum BindlessError: LocalizedError {
     case argumentBufferCreationFailed
     case resourceTableCreationFailed
     case resourceNotFound(ResourceHandle)
-    
+    case resourceTableFull
+    case noAvailableSlots(ResourceType)
+
     public var errorDescription: String? {
         switch self {
         case .unsupportedDevice(let reason):
@@ -443,56 +597,115 @@ public enum BindlessError: LocalizedError {
             return "Failed to create resource table"
         case .resourceNotFound(let handle):
             return "Resource not found for handle: \(handle)"
+        case .resourceTableFull:
+            return "Resource table is full"
+        case .noAvailableSlots(let type):
+            return "No available slots for resource type: \(type)"
         }
     }
 }
 
-/// Resource registry for tracking registered resources
-private class ResourceRegistry {
-    private var resources: [ResourceHandle: Resource] = [:]
-    private var nextIndex: UInt32 = 1
-    private var generation: UInt32 = 1
+/// Slot allocator for managing typed resource slots
+private class SlotAllocator {
+    private var availableSlots: [Int]
+    private var allocatedSlots: Set<Int>
     private let lock = NSLock()
-    
+    let maxSlots: Int
+
+    init(maxSlots: Int) {
+        self.maxSlots = maxSlots
+        self.availableSlots = Array(0..<maxSlots)
+        self.allocatedSlots = []
+    }
+
+    func allocate() -> Int? {
+        lock.lock()
+        defer { lock.unlock() }
+
+        guard let slot = availableSlots.popLast() else {
+            return nil
+        }
+        allocatedSlots.insert(slot)
+        return slot
+    }
+
+    func free(_ slot: Int) {
+        lock.lock()
+        defer { lock.unlock() }
+
+        guard allocatedSlots.remove(slot) != nil else { return }
+        availableSlots.append(slot)
+    }
+}
+
+/// Resource registry entry with argument index
+private struct ResourceEntry {
     enum Resource {
         case buffer(MTLBuffer)
         case texture(MTLTexture)
     }
-    
+
+    let resource: Resource
+    let type: ResourceType
+    let argumentIndex: Int
+}
+
+/// Resource registry for tracking registered resources with bounds checking
+private class ResourceRegistry {
+    private var resources: [ResourceHandle: ResourceEntry] = [:]
+    private var nextIndex: UInt32 = 1
+    private var generation: UInt32 = 1
+    private let maxResources: Int
+    private let lock = NSLock()
+
+    init(maxResources: Int) {
+        self.maxResources = maxResources
+    }
+
     var count: Int {
         lock.lock()
         defer { lock.unlock() }
         return resources.count
     }
-    
-    func register(_ buffer: MTLBuffer, type: ResourceType) -> ResourceHandle {
+
+    /// Register a buffer. Returns nil if table is full.
+    func register(_ buffer: MTLBuffer, type: ResourceType, argumentIndex: Int) -> ResourceHandle? {
         lock.lock()
         defer { lock.unlock() }
-        
+
+        guard nextIndex < maxResources else {
+            return nil
+        }
+
         let handle = ResourceHandle(index: nextIndex, generation: generation)
-        resources[handle] = .buffer(buffer)
+        resources[handle] = ResourceEntry(resource: .buffer(buffer), type: type, argumentIndex: argumentIndex)
         nextIndex += 1
-        
+
         return handle
     }
-    
-    func register(_ texture: MTLTexture, type: ResourceType) -> ResourceHandle {
+
+    /// Register a texture. Returns nil if table is full.
+    func register(_ texture: MTLTexture, type: ResourceType, argumentIndex: Int) -> ResourceHandle? {
         lock.lock()
         defer { lock.unlock() }
-        
+
+        guard nextIndex < maxResources else {
+            return nil
+        }
+
         let handle = ResourceHandle(index: nextIndex, generation: generation)
-        resources[handle] = .texture(texture)
+        resources[handle] = ResourceEntry(resource: .texture(texture), type: type, argumentIndex: argumentIndex)
         nextIndex += 1
-        
+
         return handle
     }
-    
-    func getResource(for handle: ResourceHandle) -> Resource? {
+
+    func getEntry(for handle: ResourceHandle) -> ResourceEntry? {
         lock.lock()
         defer { lock.unlock() }
         return resources[handle]
     }
-    
+
     func remove(_ handle: ResourceHandle) {
         lock.lock()
         defer { lock.unlock() }
@@ -508,69 +721,69 @@ private class ResidencyController {
     private var lastAccessTime: [ResourceHandle: Date] = [:]
     private var memoryPressureEvents = 0
     private let lock = NSLock()
-    
+
     init(device: MTLDevice) {
         self.device = device
     }
-    
+
     func trackResource(_ resource: MTLResource, handle: ResourceHandle) {
         lock.lock()
         defer { lock.unlock() }
-        
+
         residentResources.insert(handle)
         resourceMemory[handle] = resource.allocatedSize
         lastAccessTime[handle] = Date()
-        
+
         // In Metal 4, this would use MTLResidencySet
         // For now, we track manually
     }
-    
+
     func updateResidency(visibleHandles: [ResourceHandle], commandBuffer: MTLCommandBuffer) {
         lock.lock()
         defer { lock.unlock() }
-        
+
         // Update access times for visible resources
         let now = Date()
         for handle in visibleHandles {
             lastAccessTime[handle] = now
         }
-        
+
         // In Metal 4, this would use:
         // residencySet.commit(to: commandBuffer)
     }
-    
+
     func evictUnusedResources() {
         lock.lock()
         defer { lock.unlock() }
-        
+
         memoryPressureEvents += 1
-        
+
         // Evict resources not accessed in last 5 seconds
         let cutoffTime = Date().addingTimeInterval(-5.0)
         var evictedHandles: [ResourceHandle] = []
-        
+
         for (handle, accessTime) in lastAccessTime {
             if accessTime < cutoffTime {
                 evictedHandles.append(handle)
             }
         }
-        
+
         for handle in evictedHandles {
             residentResources.remove(handle)
             resourceMemory.removeValue(forKey: handle)
             lastAccessTime.removeValue(forKey: handle)
         }
-        
+
         // Log through a simple print for now
         print("Metal4BindlessArchitecture: Evicted \(evictedHandles.count) resources due to memory pressure")
     }
-    
+
     func getInfo() -> ResidencyInfo {
         lock.lock()
         defer { lock.unlock() }
-        
+
         let totalMemory = resourceMemory.values.reduce(0, +)
-        
+
         return ResidencyInfo(
             residentCount: residentResources.count,
             evictedCount: 0,

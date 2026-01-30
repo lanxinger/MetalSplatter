@@ -45,17 +45,26 @@ extension SplatRenderer {
     @available(iOS 18.0, macOS 15.0, visionOS 2.0, *)
     private func registerExistingResourcesForBindless(_ bindless: Metal4BindlessArchitecture) {
         // Register splat buffer
-        let splatHandle = bindless.registerBuffer(splatBuffer.buffer, type: .splatBuffer)
-        Self.log.debug("Registered splat buffer with handle: \(splatHandle)")
-        
+        if let splatHandle = bindless.registerBuffer(splatBuffer.buffer, type: .splatBuffer) {
+            Self.log.debug("Registered splat buffer with handle: \(splatHandle)")
+        } else {
+            Self.log.warning("Failed to register splat buffer for bindless access")
+        }
+
         // Register uniform buffers
-        let uniformHandle = bindless.registerBuffer(dynamicUniformBuffers, type: .uniformBuffer)
-        Self.log.debug("Registered uniform buffer with handle: \(uniformHandle)")
-        
+        if let uniformHandle = bindless.registerBuffer(dynamicUniformBuffers, type: .uniformBuffer) {
+            Self.log.debug("Registered uniform buffer with handle: \(uniformHandle)")
+        } else {
+            Self.log.warning("Failed to register uniform buffer for bindless access")
+        }
+
         // Register index buffer (always available in SplatRenderer)
-        let indexHandle = bindless.registerBuffer(indexBuffer.buffer, type: .indexBuffer)
-        Self.log.debug("Registered index buffer with handle: \(indexHandle)")
-        
+        if let indexHandle = bindless.registerBuffer(indexBuffer.buffer, type: .indexBuffer) {
+            Self.log.debug("Registered index buffer with handle: \(indexHandle)")
+        } else {
+            Self.log.warning("Failed to register index buffer for bindless access")
+        }
+
         // Additional buffers can be registered as needed
     }
     

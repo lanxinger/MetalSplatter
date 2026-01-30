@@ -272,21 +272,22 @@ private struct MetalKitSceneViewWithSettings: ViewRepresentable {
 // MARK: - Gesture handling extension (reuse from original)
 #if os(iOS)
 extension MetalKitSceneViewWithSettings.Coordinator {
-    private static let verticalRotationKey = UnsafeRawPointer(bitPattern: "verticalRotation".hashValue)!
-    private static let pan2TranslationKey = UnsafeRawPointer(bitPattern: "pan2Translation".hashValue)!
-    
+    // Static keys for associated objects (stable addresses, no force unwrap)
+    private static nonisolated(unsafe) var verticalRotationKey: UInt8 = 0
+    private static nonisolated(unsafe) var pan2TranslationKey: UInt8 = 0
+
     @objc func handlePan(_ gesture: UIPanGestureRecognizer) {
         guard let renderer = renderer else { return }
         let location = gesture.location(in: gesture.view)
-        
+
         if gesture.state == .ended || gesture.state == .cancelled {
             renderer.endUserInteraction()
             lastPanLocation = nil
-            objc_setAssociatedObject(self, MetalKitSceneViewWithSettings.Coordinator.verticalRotationKey, nil, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
-            objc_setAssociatedObject(self, MetalKitSceneViewWithSettings.Coordinator.pan2TranslationKey, nil, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
+            objc_setAssociatedObject(self, &MetalKitSceneViewWithSettings.Coordinator.verticalRotationKey, nil, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
+            objc_setAssociatedObject(self, &MetalKitSceneViewWithSettings.Coordinator.pan2TranslationKey, nil, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
             return
         }
-        
+
         switch gesture.numberOfTouches {
         case 1:
             switch gesture.state {
@@ -294,14 +295,14 @@ extension MetalKitSceneViewWithSettings.Coordinator {
                 lastPanLocation = location
                 lastRotation = renderer.rotation
                 let vert = renderer.verticalRotation
-                objc_setAssociatedObject(self, MetalKitSceneViewWithSettings.Coordinator.verticalRotationKey, vert, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
+                objc_setAssociatedObject(self, &MetalKitSceneViewWithSettings.Coordinator.verticalRotationKey, vert, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
             case .changed:
                 guard let lastLocation = lastPanLocation else { return }
                 let deltaX = Float(location.x - lastLocation.x)
                 let deltaY = Float(location.y - lastLocation.y)
                 let newRotation = lastRotation + Angle(degrees: Double(deltaX) * 0.2)
                 var newVertical: Float = 0
-                if let vert = objc_getAssociatedObject(self, MetalKitSceneViewWithSettings.Coordinator.verticalRotationKey) as? Float {
+                if let vert = objc_getAssociatedObject(self, &MetalKitSceneViewWithSettings.Coordinator.verticalRotationKey) as? Float {
                     newVertical = vert + deltaY * 0.01
                     newVertical = max(-.pi/2, min(.pi/2, newVertical))
                 }
@@ -313,9 +314,9 @@ extension MetalKitSceneViewWithSettings.Coordinator {
             switch gesture.state {
             case .began:
                 let initial = renderer.translation
-                objc_setAssociatedObject(self, MetalKitSceneViewWithSettings.Coordinator.pan2TranslationKey, initial, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
+                objc_setAssociatedObject(self, &MetalKitSceneViewWithSettings.Coordinator.pan2TranslationKey, initial, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
             case .changed:
-                if let initial = objc_getAssociatedObject(self, MetalKitSceneViewWithSettings.Coordinator.pan2TranslationKey) as? SIMD2<Float> {
+                if let initial = objc_getAssociatedObject(self, &MetalKitSceneViewWithSettings.Coordinator.pan2TranslationKey) as? SIMD2<Float> {
                     let translation = gesture.translation(in: gesture.view)
                     let dx = Float(translation.x) * 0.01
                     let dy = Float(translation.y) * 0.01

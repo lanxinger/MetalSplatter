@@ -642,13 +642,14 @@ extension UIRotationGestureRecognizer {
 
 private class GestureTarget<T: UIGestureRecognizer>: NSObject {
     let handler: (T) -> Void
-    
+
     init(handler: @escaping (T) -> Void) {
         self.handler = handler
     }
-    
+
     @objc func handle(gesture: UIGestureRecognizer) {
-        handler(gesture as! T)
+        guard let typedGesture = gesture as? T else { return }
+        handler(typedGesture)
     }
 }
 

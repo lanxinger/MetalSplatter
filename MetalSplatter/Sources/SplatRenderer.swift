@@ -123,6 +123,8 @@ public class SplatRenderer: @unchecked Sendable {
     // Cached bounds - computed once on GPU, reused until splats change
     private var cachedBounds: (min: SIMD3<Float>, max: SIMD3<Float>)?
     private var boundsDirty = true
+    private var boundsComputationInProgress = false
+    private let boundsLock = NSLock()
     
     // Metal 4 TensorOps batch precompute (pre-computes covariance/transforms)
     private var batchPrecomputePipelineState: MTLComputePipelineState?
@@ -1260,54 +1262,122 @@ public class SplatRenderer: @unchecked Sendable {
         invalidatePrecomputedData()
     }
 
-    /// Get cached AABB bounds - computes on first call or when splats change
-    /// Uses GPU SIMD-group parallel reduction, cached for subsequent calls
+    /// Get cached AABB bounds - returns immediately with cached value (never blocks).
+    /// If bounds are dirty and no computation is in progress, triggers async GPU computation.
+    /// Uses GPU SIMD-group parallel reduction, cached for subsequent calls.
+    ///
+    /// - Note: For callers that need guaranteed results (e.g., initial viewport setup),
+    ///   use `getBoundsBlocking()` or `calculateBounds()` instead.
     public func getBounds() -> (min: SIMD3<Float>, max: SIMD3<Float>)? {
         guard splatCount > 0 else { return nil }
-        
+
+        boundsLock.lock()
+        let cached = cachedBounds
+        let dirty = boundsDirty
+        let inProgress = boundsComputationInProgress
+        boundsLock.unlock()
+
         // Return cached bounds if valid
-        if !boundsDirty, let cached = cachedBounds {
+        if !dirty, let cached = cached {
             return cached
         }
-        
-        // Compute bounds (GPU preferred, CPU fallback)
-        let bounds = calculateBoundsGPU() ?? calculateBoundsCPU()
-        
+
+        // If dirty and not already computing, start async computation
+        if dirty && !inProgress {
+            requestBoundsUpdateAsync()
+        }
+
+        // Return stale cached bounds while computation is in progress, or nil if none available
+        return cached
+    }
+
+    /// Get AABB bounds, computing synchronously if needed (may block).
+    /// Use this when you need guaranteed results, such as initial viewport setup.
+    /// Uses CPU fallback for synchronous computation to avoid GPU stalls.
+    public func getBoundsBlocking() -> (min: SIMD3<Float>, max: SIMD3<Float>)? {
+        guard splatCount > 0 else { return nil }
+
+        boundsLock.lock()
+        let cached = cachedBounds
+        let dirty = boundsDirty
+        boundsLock.unlock()
+
+        // Return cached bounds if valid
+        if !dirty, let cached = cached {
+            return cached
+        }
+
+        // Compute synchronously using CPU (avoids GPU stalls)
+        let bounds = calculateBoundsCPU()
+
         // Cache the result
         if let bounds = bounds {
+            boundsLock.lock()
             cachedBounds = bounds
             boundsDirty = false
+            boundsLock.unlock()
         }
-        
+
         return bounds
     }
-    
-    /// Calculate AABB bounds - uses GPU when available, falls back to CPU
-    /// Prefer getBounds() for cached access
+
+    /// Calculate AABB bounds - uses CPU for synchronous access.
+    /// This is the backwards-compatible method that guarantees a result.
     public func calculateBounds() -> (min: SIMD3<Float>, max: SIMD3<Float>)? {
-        return getBounds()
+        return getBoundsBlocking()
     }
-    
-    /// GPU-accelerated bounds computation using SIMD-group parallel reduction
-    /// Uses simd_min/simd_max for 32x fewer atomic operations than naive approach
-    private func calculateBoundsGPU() -> (min: SIMD3<Float>, max: SIMD3<Float>)? {
+
+    /// Request async bounds update. Non-blocking - updates cached bounds when complete.
+    public func requestBoundsUpdateAsync() {
+        boundsLock.lock()
+        if boundsComputationInProgress {
+            boundsLock.unlock()
+            return
+        }
+        boundsComputationInProgress = true
+        boundsLock.unlock()
+
+        // First try GPU async computation
+        if calculateBoundsGPUAsync() {
+            return  // GPU computation started
+        }
+
+        // GPU not available, fall back to CPU on background thread
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard let self = self else { return }
+            let bounds = self.calculateBoundsCPU()
+
+            self.boundsLock.lock()
+            if let bounds = bounds {
+                self.cachedBounds = bounds
+                self.boundsDirty = false
+            }
+            self.boundsComputationInProgress = false
+            self.boundsLock.unlock()
+        }
+    }
+
+    /// GPU-accelerated bounds computation using SIMD-group parallel reduction (async version).
+    /// Uses simd_min/simd_max for 32x fewer atomic operations than naive approach.
+    /// Returns true if GPU computation was started, false if GPU is unavailable.
+    private func calculateBoundsGPUAsync() -> Bool {
         guard let computePipeline = computeBoundsPipelineState,
               let resetPipeline = resetBoundsPipelineState,
               let minBuffer = boundsMinBuffer,
               let maxBuffer = boundsMaxBuffer,
               splatCount > 0 else {
-            return nil
+            return false
         }
-        
+
         guard let commandBuffer = commandBufferManager.makeCommandBuffer() else {
             Self.log.warning("Failed to create command buffer for GPU bounds computation")
-            return nil
+            return false
         }
-        
+
         // Step 1: Reset atomic bounds to initial values
         guard let resetEncoder = commandBuffer.makeComputeCommandEncoder() else {
             Self.log.warning("Failed to create compute encoder for reset bounds")
-            return nil
+            return false
         }
         resetEncoder.label = "Reset Bounds Atomics"
         resetEncoder.setComputePipelineState(resetPipeline)
@@ -1316,43 +1386,52 @@ public class SplatRenderer: @unchecked Sendable {
         resetEncoder.dispatchThreads(MTLSize(width: 1, height: 1, depth: 1),
                                      threadsPerThreadgroup: MTLSize(width: 1, height: 1, depth: 1))
         resetEncoder.endEncoding()
-        
+
         // Step 2: Compute bounds with SIMD-group parallel reduction
         guard let computeEncoder = commandBuffer.makeComputeCommandEncoder() else {
             Self.log.warning("Failed to create compute encoder for bounds computation")
-            return nil
+            return false
         }
         computeEncoder.label = "Compute Bounds Parallel"
         computeEncoder.setComputePipelineState(computePipeline)
         computeEncoder.setBuffer(splatBuffer.buffer, offset: 0, index: 0)
-        
+
         var count = UInt32(splatCount)
         computeEncoder.setBytes(&count, length: MemoryLayout<UInt32>.size, index: 1)
         computeEncoder.setBuffer(minBuffer, offset: 0, index: 2)
         computeEncoder.setBuffer(maxBuffer, offset: 0, index: 3)
-        
+
         let threadsPerThreadgroup = MTLSize(width: 256, height: 1, depth: 1)
         let threadgroups = MTLSize(width: (splatCount + 255) / 256, height: 1, depth: 1)
         computeEncoder.dispatchThreadgroups(threadgroups, threadsPerThreadgroup: threadsPerThreadgroup)
         computeEncoder.endEncoding()
-        
-        // Execute and wait
-        commandBuffer.commit()
-        commandBuffer.waitUntilCompleted()
-        
-        // Read results from GPU
-        let minPtr = minBuffer.contents().bindMemory(to: Float.self, capacity: 3)
-        let maxPtr = maxBuffer.contents().bindMemory(to: Float.self, capacity: 3)
-        
-        let minBounds = SIMD3<Float>(minPtr[0], minPtr[1], minPtr[2])
-        let maxBounds = SIMD3<Float>(maxPtr[0], maxPtr[1], maxPtr[2])
-        
-        // Validate bounds (check for infinity which indicates no valid splats)
-        if minBounds.x.isInfinite || maxBounds.x.isInfinite {
-            return nil
+
+        // Execute asynchronously with completion handler
+        // Note: We capture self weakly and re-access the instance buffers in the completion handler.
+        // This is safe because boundsMinBuffer/boundsMaxBuffer are instance properties with storageModeShared.
+        commandBuffer.addCompletedHandler { [weak self] _ in
+            guard let self = self,
+                  let minBuf = self.boundsMinBuffer,
+                  let maxBuf = self.boundsMaxBuffer else { return }
+
+            // Read results from GPU
+            let minPtr = minBuf.contents().bindMemory(to: Float.self, capacity: 3)
+            let maxPtr = maxBuf.contents().bindMemory(to: Float.self, capacity: 3)
+            let minBounds = SIMD3<Float>(minPtr[0], minPtr[1], minPtr[2])
+            let maxBounds = SIMD3<Float>(maxPtr[0], maxPtr[1], maxPtr[2])
+
+            self.boundsLock.lock()
+            // Validate bounds (check for infinity which indicates no valid splats)
+            if !minBounds.x.isInfinite && !maxBounds.x.isInfinite {
+                self.cachedBounds = (min: minBounds, max: maxBounds)
+                self.boundsDirty = false
+            }
+            self.boundsComputationInProgress = false
+            self.boundsLock.unlock()
         }
-        
-        return (min: minBounds, max: maxBounds)
+
+        commandBuffer.commit()
+        return true
     }
     
     /// CPU fallback for bounds computation
