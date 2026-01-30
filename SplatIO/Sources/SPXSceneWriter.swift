@@ -324,20 +324,24 @@ public class SPXSceneWriter: SplatSceneWriter {
     }
     
     private func compressData(_ data: Data) -> Data? {
+        guard !data.isEmpty else { return nil }
         return data.withUnsafeBytes { bytes in
+            guard let baseAddress = bytes.bindMemory(to: UInt8.self).baseAddress else {
+                return nil
+            }
             let buffer = UnsafeMutablePointer<UInt8>.allocate(capacity: data.count)
             defer { buffer.deallocate() }
-            
+
             let compressedSize = compression_encode_buffer(
                 buffer, data.count,
-                bytes.bindMemory(to: UInt8.self).baseAddress!, data.count,
+                baseAddress, data.count,
                 nil, COMPRESSION_ZLIB
             )
-            
+
             guard compressedSize > 0 else {
                 return nil
             }
-            
+
             return Data(bytes: buffer, count: compressedSize)
         }
     }

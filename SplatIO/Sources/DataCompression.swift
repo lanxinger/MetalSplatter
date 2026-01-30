@@ -26,7 +26,10 @@ extension Data {
         
         // Setup the source buffer
         return try self.withUnsafeBytes { (inputPointer: UnsafeRawBufferPointer) -> Data in
-            stream.next_in = UnsafeMutablePointer<Bytef>(mutating: inputPointer.bindMemory(to: Bytef.self).baseAddress!)
+            guard let baseAddress = inputPointer.bindMemory(to: Bytef.self).baseAddress else {
+                throw SplatFileFormatError.decompressionFailed
+            }
+            stream.next_in = UnsafeMutablePointer<Bytef>(mutating: baseAddress)
             stream.avail_in = uInt(self.count)
             
             // Prepare for output

@@ -211,7 +211,10 @@ public class PLYReader {
         switch header.format {
         case .ascii:
             try body[bodyOffset...].withUnsafeMutableBytes { (bodyUnsafeRawBufferPointer: UnsafeMutableRawBufferPointer) in
-                let bodyUnsafeBytePointer = bodyUnsafeRawBufferPointer.bindMemory(to: UInt8.self).baseAddress!
+                guard let bodyUnsafeBytePointer = bodyUnsafeRawBufferPointer.bindMemory(to: UInt8.self).baseAddress else {
+                    // Empty buffer - nothing to process
+                    return
+                }
                 var bodyUnsafeBytePointerOffset = 0
                 let bodyUnsafeBytePointerCount = bodyUnsafeRawBufferPointer.count
                 while !isComplete {
@@ -259,7 +262,10 @@ public class PLYReader {
             }
         case .binaryBigEndian, .binaryLittleEndian:
             try body[bodyOffset...].withUnsafeBytes { (bodyUnsafeRawBufferPointer: UnsafeRawBufferPointer) in
-                let bodyUnsafeRawPointer = bodyUnsafeRawBufferPointer.baseAddress!
+                guard let bodyUnsafeRawPointer = bodyUnsafeRawBufferPointer.baseAddress else {
+                    // Empty buffer - nothing to process
+                    return
+                }
                 var bodyUnsafeRawPointerOffset = 0
                 while !isComplete {
                     let elementHeader = header.elements[self.currentElementGroup]

@@ -56,17 +56,25 @@ using SplatMeshType = metal::mesh<MeshVertexOutput, void, MAX_VERTICES, MAX_PRIM
 // MARK: - Helper Functions
 // =============================================================================
 
+// Small epsilon to prevent division by zero
+constant constexpr float kDivisionEpsilon = 1e-6f;
+
 inline float3 meshCalcCovariance2D(float3 viewPos,
                                     packed_half3 cov3Da,
                                     packed_half3 cov3Db,
                                     float4x4 viewMatrix,
                                     float4x4 projectionMatrix,
                                     uint2 screenSize) {
-    float invViewPosZ = 1.0f / viewPos.z;
+    // Guard against division by zero
+    float safeViewPosZ = (abs(viewPos.z) < kDivisionEpsilon) ? copysign(kDivisionEpsilon, viewPos.z) : viewPos.z;
+    float invViewPosZ = 1.0f / safeViewPosZ;
     float invViewPosZSquared = invViewPosZ * invViewPosZ;
 
-    float tanHalfFovX = 1.0f / projectionMatrix[0][0];
-    float tanHalfFovY = 1.0f / projectionMatrix[1][1];
+    // Guard projection matrix diagonal elements
+    float proj00 = (abs(projectionMatrix[0][0]) < kDivisionEpsilon) ? kDivisionEpsilon : projectionMatrix[0][0];
+    float proj11 = (abs(projectionMatrix[1][1]) < kDivisionEpsilon) ? kDivisionEpsilon : projectionMatrix[1][1];
+    float tanHalfFovX = 1.0f / proj00;
+    float tanHalfFovY = 1.0f / proj11;
     float limX = 1.3f * tanHalfFovX;
     float limY = 1.3f * tanHalfFovY;
     viewPos.x = clamp(viewPos.x * invViewPosZ, -limX, limX) * viewPos.z;
@@ -170,8 +178,10 @@ void splatObjectShader(
         // Cull if behind camera
         if (viewPos.z < 0.0f) {
             float4 projectedCenter = uniforms.projectionMatrix * float4(viewPos, 1.0f);
-            float3 ndc = projectedCenter.xyz / projectedCenter.w;
-            
+            // Guard against division by zero
+            float safeW = (abs(projectedCenter.w) < kDivisionEpsilon) ? copysign(kDivisionEpsilon, projectedCenter.w) : projectedCenter.w;
+            float3 ndc = projectedCenter.xyz / safeW;
+
             // Frustum check with margin
             if (ndc.z <= 1.0f && all(abs(ndc.xy) <= 1.5f)) {
                 isVisible = true;

@@ -20,7 +20,9 @@ public enum SplatRendererError: LocalizedError {
     case failedToCreateComputePipelineState(functionName: String, underlying: Error)
     case failedToCreateRenderPipelineState(label: String, underlying: Error)
     case bundleIdentifierUnavailable
-    
+    case unsupportedArchitecture
+    case failedToCreateRenderEncoder
+
     public var errorDescription: String? {
         switch self {
         case .metalDeviceUnavailable:
@@ -39,6 +41,10 @@ public enum SplatRendererError: LocalizedError {
             return "Failed to create render pipeline state \"\(label)\": \(underlying.localizedDescription)"
         case .bundleIdentifierUnavailable:
             return "Bundle identifier is not available"
+        case .unsupportedArchitecture:
+            return "MetalSplatter is unsupported on Intel architecture (x86_64)"
+        case .failedToCreateRenderEncoder:
+            return "Failed to create Metal render command encoder"
         }
     }
 }
@@ -530,6 +536,31 @@ public class SplatRenderer: @unchecked Sendable {
         return sortJobsInFlight < maxConcurrentSorts
     }
 
+    /// Atomically try to start a sort operation.
+    /// Returns true if sort was started, false if already sorting or too many jobs in flight.
+    private func tryStartSort() -> Bool {
+        os_unfair_lock_lock(&sortStateLock)
+        defer { os_unfair_lock_unlock(&sortStateLock) }
+
+        // Check both conditions atomically
+        guard !sorting && sortJobsInFlight < maxConcurrentSorts else {
+            return false
+        }
+
+        // Set sorting flag and increment job count atomically
+        sorting = true
+        sortJobsInFlight += 1
+        return true
+    }
+
+    /// Atomically mark sort as complete.
+    private func finishSort() {
+        os_unfair_lock_lock(&sortStateLock)
+        sorting = false
+        sortJobsInFlight -= 1
+        os_unfair_lock_unlock(&sortStateLock)
+    }
+
     /// Thread-safe access to the current sorted indices buffer for rendering
     private func getCurrentSortedIndicesBuffer() -> MetalBuffer<Int32>? {
         os_unfair_lock_lock(&sortStateLock)
@@ -572,7 +603,7 @@ public class SplatRenderer: @unchecked Sendable {
                 maxViewCount: Int,
                 maxSimultaneousRenders: Int) throws {
 #if arch(x86_64)
-        fatalError("MetalSplatter is unsupported on Intel architecture (x86_64)")
+        throw SplatRendererError.unsupportedArchitecture
 #endif
 
         self.device = device
@@ -2299,8 +2330,7 @@ public class SplatRenderer: @unchecked Sendable {
             if self.sortDataRevision == dataDirtySnapshot {
                 self.sortDirtyDueToData = false
             }
-            self.sorting = false
-            self.decrementSortJobsInFlight()
+            self.finishSort()
 
             Self.log.debug("Async sort completed in \(String(format: "%.1f", elapsed * 1000))ms")
 
@@ -2312,16 +2342,12 @@ public class SplatRenderer: @unchecked Sendable {
 
     // Sort splatBuffer (read-only), storing the results in splatBuffer (write-only) then swap splatBuffer and splatBufferPrime
     public func resort(useGPU: Bool = true) {
-        guard !sorting else { return }
-
-        // Prevent sort queue buildup - skip if too many sorts already in flight
-        guard self.canStartNewSort() else {
-            Self.log.debug("Skipping sort request - \(self.getSortJobsInFlight()) job(s) already in flight (max: \(self.maxConcurrentSorts))")
+        // Atomically check sorting flag and job count, and set if available
+        guard tryStartSort() else {
+            // Already sorting or too many jobs in flight
             return
         }
 
-        sorting = true
-        self.incrementSortJobsInFlight()
         onSortStart?()
 
         let splatCount = splatBuffer.count
@@ -2350,8 +2376,7 @@ public class SplatRenderer: @unchecked Sendable {
                     indexOutputBuffer.count = splatCount
                 } catch {
                     Self.log.error("Failed to acquire index output buffer from pool: \(error)")
-                    self.sorting = false
-                    self.decrementSortJobsInFlight()
+                    self.finishSort()
                     return
                 }
 
@@ -2363,8 +2388,7 @@ public class SplatRenderer: @unchecked Sendable {
                     guard let commandBuffer = sortCommandBufferManager.makeCommandBuffer() else {
                         Self.log.error("Failed to create compute command buffer.")
                         sortIndexBufferPool.release(indexOutputBuffer)
-                        self.sorting = false
-                        self.decrementSortJobsInFlight()
+                        self.finishSort()
                         return
                     }
 
@@ -2397,8 +2421,7 @@ public class SplatRenderer: @unchecked Sendable {
                     } catch {
                         Self.log.error("Counting sort failed: \(error)")
                         sortIndexBufferPool.release(indexOutputBuffer)
-                        self.sorting = false
-                        self.decrementSortJobsInFlight()
+                        self.finishSort()
                         return
                     }
 
@@ -2432,8 +2455,7 @@ public class SplatRenderer: @unchecked Sendable {
                     } catch {
                         Self.log.error("Failed to acquire distance buffer from pool: \(error)")
                         sortIndexBufferPool.release(indexOutputBuffer)
-                        self.sorting = false
-                        self.decrementSortJobsInFlight()
+                        self.finishSort()
                         return
                     }
 
@@ -2442,8 +2464,7 @@ public class SplatRenderer: @unchecked Sendable {
                         Self.log.error("Failed to create compute command buffer.")
                         sortDistanceBufferPool.release(distanceBuffer)
                         sortIndexBufferPool.release(indexOutputBuffer)
-                        self.sorting = false
-                        self.decrementSortJobsInFlight()
+                        self.finishSort()
                         return
                     }
 
@@ -2453,8 +2474,7 @@ public class SplatRenderer: @unchecked Sendable {
                         Self.log.error("Failed to create compute encoder.")
                         sortDistanceBufferPool.release(distanceBuffer)
                         sortIndexBufferPool.release(indexOutputBuffer)
-                        self.sorting = false
-                        self.decrementSortJobsInFlight()
+                        self.finishSort()
                         return
                     }
 
@@ -2500,8 +2520,7 @@ public class SplatRenderer: @unchecked Sendable {
                             Self.log.error("MPSArgSort failed: \(error)")
                             self.sortDistanceBufferPool.release(distanceBuffer)
                             self.sortIndexBufferPool.release(indexOutputBuffer)
-                            self.sorting = false
-                            self.decrementSortJobsInFlight()
+                            self.finishSort()
                             return
                         }
 
@@ -2575,8 +2594,7 @@ public class SplatRenderer: @unchecked Sendable {
                 if self.sortDataRevision == dataDirtySnapshot {
                     self.sortDirtyDueToData = false
                 }
-                self.sorting = false
-                self.decrementSortJobsInFlight()
+                self.finishSort()
                 if self.shouldResortForCurrentCamera() {
                     self.resort(useGPU: useGPU)
                 }

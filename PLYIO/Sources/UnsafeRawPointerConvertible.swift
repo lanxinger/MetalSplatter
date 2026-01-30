@@ -88,9 +88,11 @@ public extension BinaryInteger where Self: UnsafeRawPointerConvertible, Self: En
 
     @discardableResult
     static func store(_ values: [Self], to data: UnsafeMutableRawPointer, at offset: Int, bigEndian: Bool) -> Int {
+        guard !values.isEmpty else { return 0 }
         if bigEndian == UnsafeRawPointerConvertibleConstants.isBigEndian {
             values.withUnsafeBytes {
-                (data + offset).copyMemory(from: $0.baseAddress!, byteCount: values.count * byteWidth)
+                guard let baseAddress = $0.baseAddress else { return }
+                (data + offset).copyMemory(from: baseAddress, byteCount: values.count * byteWidth)
             }
         } else {
             for (index, value) in values.enumerated() {
@@ -103,9 +105,11 @@ public extension BinaryInteger where Self: UnsafeRawPointerConvertible, Self: En
 
     @discardableResult
     static func store(_ values: [Self], to data: UnsafeMutableRawPointer, bigEndian: Bool) -> Int {
+        guard !values.isEmpty else { return 0 }
         if bigEndian == UnsafeRawPointerConvertibleConstants.isBigEndian {
             values.withUnsafeBytes {
-                data.copyMemory(from: $0.baseAddress!, byteCount: values.count * byteWidth)
+                guard let baseAddress = $0.baseAddress else { return }
+                data.copyMemory(from: baseAddress, byteCount: values.count * byteWidth)
             }
         } else {
             for (index, value) in values.enumerated() {
@@ -173,9 +177,11 @@ public extension BinaryFloatingPoint where Self: UnsafeRawPointerConvertible, Se
 
     @discardableResult
     static func store(_ values: [Self], to data: UnsafeMutableRawPointer, at offset: Int, bigEndian: Bool) -> Int {
+        guard !values.isEmpty else { return 0 }
         if bigEndian == UnsafeRawPointerConvertibleConstants.isBigEndian {
             values.withUnsafeBytes {
-                (data + offset).copyMemory(from: $0.baseAddress!, byteCount: values.count * byteWidth)
+                guard let baseAddress = $0.baseAddress else { return }
+                (data + offset).copyMemory(from: baseAddress, byteCount: values.count * byteWidth)
             }
         } else {
             for (index, value) in values.enumerated() {
@@ -188,9 +194,11 @@ public extension BinaryFloatingPoint where Self: UnsafeRawPointerConvertible, Se
 
     @discardableResult
     static func store(_ values: [Self], to data: UnsafeMutableRawPointer, bigEndian: Bool) -> Int {
+        guard !values.isEmpty else { return 0 }
         if bigEndian == UnsafeRawPointerConvertibleConstants.isBigEndian {
             values.withUnsafeBytes {
-                data.copyMemory(from: $0.baseAddress!, byteCount: values.count * byteWidth)
+                guard let baseAddress = $0.baseAddress else { return }
+                data.copyMemory(from: baseAddress, byteCount: values.count * byteWidth)
             }
         } else {
             for (index, value) in values.enumerated() {

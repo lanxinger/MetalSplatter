@@ -123,7 +123,7 @@ extension SplatRenderer {
         }
         
         guard let renderEncoder = commandBuffer.makeRenderCommandEncoder(descriptor: renderPassDescriptor) else {
-            fatalError("Failed to create render encoder")
+            throw SplatRendererError.failedToCreateRenderEncoder
         }
         
         renderEncoder.label = "Bindless Splat Render"

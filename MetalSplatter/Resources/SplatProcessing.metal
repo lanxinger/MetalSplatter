@@ -2,19 +2,25 @@
 
 // Debug flags moved to SplatProcessing.h
 
+// Small epsilon to prevent division by zero
+constant constexpr float kDivisionEpsilon = 1e-6f;
+
 float3 calcCovariance2D(float3 viewPos,
                         packed_half3 cov3Da,
                         packed_half3 cov3Db,
                         float4x4 viewMatrix,
                         float4x4 projectionMatrix,
                         uint2 screenSize) {
-    // Use fast division for better performance
-    float invViewPosZ = fast::divide(1.0f, viewPos.z);
+    // Guard against division by zero with epsilon
+    float safeViewPosZ = (abs(viewPos.z) < kDivisionEpsilon) ? copysign(kDivisionEpsilon, viewPos.z) : viewPos.z;
+    float invViewPosZ = fast::divide(1.0f, safeViewPosZ);
     float invViewPosZSquared = invViewPosZ * invViewPosZ;
 
-    // Use fast division for projection matrix reciprocals
-    float tanHalfFovX = fast::divide(1.0f, projectionMatrix[0][0]);
-    float tanHalfFovY = fast::divide(1.0f, projectionMatrix[1][1]);
+    // Guard projection matrix diagonal elements
+    float proj00 = (abs(projectionMatrix[0][0]) < kDivisionEpsilon) ? kDivisionEpsilon : projectionMatrix[0][0];
+    float proj11 = (abs(projectionMatrix[1][1]) < kDivisionEpsilon) ? kDivisionEpsilon : projectionMatrix[1][1];
+    float tanHalfFovX = fast::divide(1.0f, proj00);
+    float tanHalfFovY = fast::divide(1.0f, proj11);
     float limX = 1.3 * tanHalfFovX;
     float limY = 1.3 * tanHalfFovY;
     viewPos.x = clamp(viewPos.x * invViewPosZ, -limX, limX) * viewPos.z;
@@ -120,7 +126,9 @@ FragmentIn splatVertex(Splat splat,
     float4 projectedCenter = uniforms.projectionMatrix * float4(viewPosition3, 1.0);
     
     // Optimized frustum culling with single bounds calculation
-    float invW = fast::divide(1.0f, projectedCenter.w);
+    // Guard against division by zero
+    float safeW = (abs(projectedCenter.w) < kDivisionEpsilon) ? copysign(kDivisionEpsilon, projectedCenter.w) : projectedCenter.w;
+    float invW = fast::divide(1.0f, safeW);
     float3 ndc = projectedCenter.xyz * invW;
     // Combined frustum check: depth + XY bounds in one condition
     if (ndc.z > 1.0f || any(abs(ndc.xy) > 1.2f)) {

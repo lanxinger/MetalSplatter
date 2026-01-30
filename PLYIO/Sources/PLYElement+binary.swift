@@ -170,7 +170,8 @@ fileprivate extension PLYElement.Property {
         case .int32 : countSize = Int32( listCount).store(to: data, at: offset, bigEndian: bigEndian)
         case .uint32: countSize = UInt32(listCount).store(to: data, at: offset, bigEndian: bigEndian)
         case .float32, .float64:
-            fatalError("Internal error: unhandled list count type during encode: \(countType)")
+            // Float types are not valid for list count - should have been caught by guard above
+            throw PLYElement.BinaryEncodeError.invalidListCountType(countType)
         }
 
         let offset = offset + countSize

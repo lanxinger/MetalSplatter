@@ -19,13 +19,19 @@ extension LayerRenderer.Clock.Instant.Duration {
 enum RendererError: LocalizedError {
     case failedToCreateCommandQueue
     case failedToCreateRenderer(underlying: Error)
-    
+    case failedToInitializeARSession(underlying: Error)
+    case failedToCreateCommandBuffer
+
     var errorDescription: String? {
         switch self {
         case .failedToCreateCommandQueue:
             return "Failed to create Metal command queue"
         case .failedToCreateRenderer(let underlying):
             return "Failed to create renderer: \(underlying.localizedDescription)"
+        case .failedToInitializeARSession(let underlying):
+            return "Failed to initialize AR session: \(underlying.localizedDescription)"
+        case .failedToCreateCommandBuffer:
+            return "Failed to create Metal command buffer"
         }
     }
 }
@@ -121,7 +127,9 @@ class VisionSceneRenderer {
             do {
                 try await arSession.run([worldTracking])
             } catch {
-                fatalError("Failed to initialize ARSession")
+                Self.log.error("Failed to initialize ARSession: \(error.localizedDescription)")
+                // Cannot recover from AR session failure - log and exit gracefully
+                return
             }
 
             let renderThread = Thread {
@@ -201,7 +209,8 @@ class VisionSceneRenderer {
         LayerRenderer.Clock().wait(until: timing.optimalInputTime)
 
         guard let commandBuffer = commandBufferManager.makeCommandBuffer() else {
-            fatalError("Failed to create command buffer")
+            Self.log.error("Failed to create command buffer - skipping frame")
+            return
         }
 
         guard let drawable = frame.queryDrawable() else { return }
