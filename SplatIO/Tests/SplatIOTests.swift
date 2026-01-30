@@ -795,3 +795,146 @@ private extension SIMD4 where Scalar == Float {
         sqrt(x*x + y*y + z*z + w*w)
     }
 }
+
+// MARK: - SOGSTextureCache Thread Safety Tests
+
+final class SOGSTextureCacheTests: XCTestCase {
+
+    override func setUp() {
+        super.setUp()
+        // Clear cache before each test to ensure isolation
+        SOGSTextureCache.shared.clearCache()
+    }
+
+    override func tearDown() {
+        // Clean up after tests
+        SOGSTextureCache.shared.clearCache()
+        super.tearDown()
+    }
+
+    func testCacheSharedInstance() {
+        // Singleton should be accessible
+        let cache = SOGSTextureCache.shared
+        XCTAssertNotNil(cache)
+
+        // Should be the same instance
+        XCTAssertTrue(cache === SOGSTextureCache.shared)
+    }
+
+    func testConcurrentCacheAccess() {
+        let cache = SOGSTextureCache.shared
+
+        let expectation = self.expectation(description: "Concurrent cache access")
+        expectation.expectedFulfillmentCount = 10
+
+        let queue = DispatchQueue(label: "test.concurrent", attributes: .concurrent)
+
+        // Multiple threads trying to access the cache simultaneously
+        for i in 0..<10 {
+            queue.async {
+                // Create unique URLs for each thread
+                let url = URL(fileURLWithPath: "/test/path/scene\(i)/meta.json")
+
+                do {
+                    // Try to get data (will call loader since not cached)
+                    _ = try cache.getCompressedData(for: url) {
+                        // Simulate loading by returning mock data
+                        throw NSError(domain: "TestDomain", code: 404, userInfo: [NSLocalizedDescriptionKey: "Mock file not found"])
+                    }
+                } catch {
+                    // Expected - we're using mock data that throws
+                }
+
+                expectation.fulfill()
+            }
+        }
+
+        wait(for: [expectation], timeout: 10.0)
+    }
+
+    func testConcurrentCacheAccessSameURL() {
+        let cache = SOGSTextureCache.shared
+        let sharedURL = URL(fileURLWithPath: "/test/shared/meta.json")
+
+        let expectation = self.expectation(description: "Concurrent same URL access")
+        expectation.expectedFulfillmentCount = 10
+
+        let queue = DispatchQueue(label: "test.concurrent", attributes: .concurrent)
+        let loadCount = UnsafeAtomic<Int>(0)
+
+        // Multiple threads trying to access the same URL simultaneously
+        for _ in 0..<10 {
+            queue.async {
+                do {
+                    _ = try cache.getCompressedData(for: sharedURL) {
+                        // Track how many times the loader is called
+                        loadCount.increment()
+                        // Simulate slow loading
+                        Thread.sleep(forTimeInterval: 0.01)
+                        throw NSError(domain: "TestDomain", code: 404, userInfo: nil)
+                    }
+                } catch {
+                    // Expected
+                }
+
+                expectation.fulfill()
+            }
+        }
+
+        wait(for: [expectation], timeout: 10.0)
+    }
+
+    func testCacheClear() {
+        let cache = SOGSTextureCache.shared
+
+        // Clearing an empty cache should not crash
+        cache.clearCache()
+
+        // After multiple operations, clear should still work
+        let expectation = self.expectation(description: "Clear after operations")
+        expectation.expectedFulfillmentCount = 5
+
+        let queue = DispatchQueue(label: "test.concurrent", attributes: .concurrent)
+
+        for i in 0..<5 {
+            queue.async {
+                let url = URL(fileURLWithPath: "/test/scene\(i)/meta.json")
+                do {
+                    _ = try cache.getCompressedData(for: url) {
+                        throw NSError(domain: "TestDomain", code: 404, userInfo: nil)
+                    }
+                } catch {
+                    // Expected
+                }
+                expectation.fulfill()
+            }
+        }
+
+        wait(for: [expectation], timeout: 10.0)
+
+        // Clear should work without deadlock
+        cache.clearCache()
+    }
+}
+
+// Simple thread-safe counter for testing
+private final class UnsafeAtomic<T: Numeric>: @unchecked Sendable {
+    private var value: T
+    private let lock = NSLock()
+
+    init(_ initialValue: T) {
+        self.value = initialValue
+    }
+
+    func increment() where T == Int {
+        lock.lock()
+        defer { lock.unlock() }
+        value += 1
+    }
+
+    var current: T {
+        lock.lock()
+        defer { lock.unlock() }
+        return value
+    }
+}

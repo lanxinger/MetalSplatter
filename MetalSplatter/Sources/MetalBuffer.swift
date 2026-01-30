@@ -3,7 +3,7 @@ import Metal
 import os
 
 fileprivate let log =
-    Logger(subsystem: Bundle.module.bundleIdentifier!,
+    Logger(subsystem: Bundle.module.bundleIdentifier ?? "MetalSplatter",
            category: "MetalBuffer")
 
 /// Thread-safe Metal buffer wrapper for GPU data storage.
