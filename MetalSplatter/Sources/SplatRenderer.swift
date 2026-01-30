@@ -22,6 +22,7 @@ public enum SplatRendererError: LocalizedError {
     case bundleIdentifierUnavailable
     case unsupportedArchitecture
     case failedToCreateRenderEncoder
+    case failedToCreateComputeEncoder
 
     public var errorDescription: String? {
         switch self {
@@ -45,6 +46,8 @@ public enum SplatRendererError: LocalizedError {
             return "MetalSplatter is unsupported on Intel architecture (x86_64)"
         case .failedToCreateRenderEncoder:
             return "Failed to create Metal render command encoder"
+        case .failedToCreateComputeEncoder:
+            return "Failed to create Metal compute command encoder"
         }
     }
 }
@@ -163,6 +166,8 @@ public class SplatRenderer: @unchecked Sendable {
         case uniforms       = 0
         case splat          = 1
         case sortedIndices  = 2  // GPU-side sorted indices for indirect rendering
+        case precomputed    = 3  // Precomputed splat data (Metal 4 TensorOps)
+        case packedColors   = 4  // Optional packed colors (snorm10a2)
     }
 
     // Keep in sync with Shaders.metal : Uniforms
@@ -402,7 +407,13 @@ public class SplatRenderer: @unchecked Sendable {
     
     /// Returns true if mesh shaders are supported on this device
     public var isMeshShaderSupported: Bool { meshShadersSupported }
-    
+
+    /// Returns true if mesh shaders can be safely used without quality regression
+    /// Note: useCulledDitheredPath check stays inline in render() since it's a local
+    private var canUseMeshShadersSafely: Bool {
+        meshShadersSupported && !useMultiStagePipeline && !useDitheredTransparency
+    }
+
     // Debug AABB rendering
     private var debugAABBPipelineState: MTLRenderPipelineState?
     private var debugAABBDepthState: MTLDepthStencilState?
@@ -510,6 +521,45 @@ public class SplatRenderer: @unchecked Sendable {
     /// This improves visual quality for close objects while saving precision budget on distant ones.
     /// Only effective when useCountingSort is true.
     public var useCameraRelativeBinning: Bool = true
+
+    // Metal 4 Advanced Atomics Sorter - GPU radix sort for very large scenes
+    // Note: Metal4Sorter is only available on iOS 26+, macOS 26+, visionOS 26+
+    // Stored as AnyObject to avoid @available restrictions on stored properties
+    private var _metal4Sorter: AnyObject?
+
+    @available(iOS 26.0, macOS 26.0, visionOS 26.0, *)
+    private var metal4Sorter: Metal4Sorter? {
+        get { _metal4Sorter as? Metal4Sorter }
+        set { _metal4Sorter = newValue }
+    }
+
+    /// When true and Metal 4 is available, uses atomic radix sort for scenes >100K splats.
+    /// This is opt-in because it requires Metal 4 and is only beneficial for very large scenes.
+    /// For smaller scenes, counting sort remains more efficient.
+    public var useMetal4Sorting: Bool = false
+
+    /// Minimum splat count to use Metal 4 sorting (below this, counting sort is faster)
+    public var metal4SortingThreshold: Int = 100_000
+
+    // snorm10a2 color packing for bandwidth optimization
+    // When enabled, colors are stored in 4 bytes instead of 8 bytes (50% reduction)
+    // Note: May cause visible precision loss with SH data - test before enabling
+    private var packedColorBuffer: MTLBuffer?
+
+    /// When true, uses snorm10a2 packed colors (4 bytes) instead of half4 (8 bytes).
+    /// This reduces memory bandwidth by 50% for color data but may cause
+    /// precision loss that's visible with spherical harmonics. Opt-in only.
+    /// Requires rebuilding splat buffer after changing this setting.
+    public var usePackedColors: Bool = false {
+        didSet {
+            if usePackedColors != oldValue {
+                rebuildPackedColorBufferIfNeeded()
+                // Rebuild pipeline states with updated function constants
+                resetPipelineStates()
+                setupMeshShaders()  // Rebuild mesh shader pipeline with new constants
+            }
+        }
+    }
 
     // MARK: - Thread-safe sort state accessors
 
@@ -782,6 +832,18 @@ public class SplatRenderer: @unchecked Sendable {
         } catch {
             Self.log.warning("Failed to initialize counting sorter, using MPS fallback: \(error)")
         }
+
+        // Initialize Metal 4 radix sorter for very large scenes (iOS 26+, macOS 26+)
+        if #available(iOS 26.0, macOS 26.0, visionOS 26.0, *) {
+            if device.supportsFamily(.apple9) {
+                do {
+                    metal4Sorter = try Metal4Sorter(device: device, library: library)
+                    Self.log.info("Metal 4 radix sort available for large scenes (>100K splats)")
+                } catch {
+                    Self.log.warning("Failed to initialize Metal 4 sorter: \(error)")
+                }
+            }
+        }
     }
     
     /// Check if mesh shaders are supported and set up the pipeline
@@ -795,9 +857,16 @@ public class SplatRenderer: @unchecked Sendable {
         }
         
         do {
-            // Try to load mesh shader functions
+            // Set function constants for packed colors
+            let functionConstants = MTLFunctionConstantValues()
+            var usePackedColorsValue = usePackedColors
+            var hasPackedColorsBufferValue = packedColorBuffer != nil
+            functionConstants.setConstantValue(&usePackedColorsValue, type: .bool, index: 10)
+            functionConstants.setConstantValue(&hasPackedColorsBufferValue, type: .bool, index: 11)
+
+            // Try to load mesh shader functions with function constants
             guard let objectFunction = library.makeFunction(name: "splatObjectShader"),
-                  let meshFunction = library.makeFunction(name: "splatMeshShader"),
+                  let meshFunction = try? library.makeFunction(name: "splatMeshShader", constantValues: functionConstants),
                   let fragmentFunction = library.makeFunction(name: "meshSplatFragmentShader") else {
                 Self.log.info("Mesh shader functions not found in library")
                 return
@@ -839,7 +908,15 @@ public class SplatRenderer: @unchecked Sendable {
             meshShaderDepthState = device.makeDepthStencilState(descriptor: depthStateDescriptor)
             
             meshShadersSupported = true
-            Self.log.info("✅ Mesh shaders enabled - geometry generated on GPU")
+
+            // Auto-enable mesh shaders only when NOT using multi-stage depth pipeline
+            // Multi-stage is critical for Vision Pro depth quality
+            if !useMultiStagePipeline && !useDitheredTransparency {
+                meshShaderEnabled = true
+                Self.log.info("✅ Mesh shaders auto-enabled (single-stage path) - geometry generated on GPU")
+            } else {
+                Self.log.info("✅ Mesh shaders available but not auto-enabled (multi-stage or dithered path active)")
+            }
             
         } catch {
             Self.log.warning("Failed to create mesh shader pipeline: \(error)")
@@ -927,6 +1004,7 @@ public class SplatRenderer: @unchecked Sendable {
         drawSplatDepthState = nil
         postprocessPipelineState = nil
         postprocessDepthState = nil
+        meshShaderPipelineState = nil  // Rebuild with updated function constants
     }
 
     private func invalidatePipelineStates() {
@@ -956,7 +1034,15 @@ public class SplatRenderer: @unchecked Sendable {
         let pipelineDescriptor = MTLRenderPipelineDescriptor()
 
         pipelineDescriptor.label = "SingleStagePipeline"
-        pipelineDescriptor.vertexFunction = try library.makeRequiredFunction(name: "singleStageSplatVertexShader")
+
+        // Set function constants for packed colors
+        let functionConstants = MTLFunctionConstantValues()
+        var usePackedColorsValue = usePackedColors
+        var hasPackedColorsBufferValue = packedColorBuffer != nil
+        functionConstants.setConstantValue(&usePackedColorsValue, type: .bool, index: 10)
+        functionConstants.setConstantValue(&hasPackedColorsBufferValue, type: .bool, index: 11)
+
+        pipelineDescriptor.vertexFunction = try library.makeFunction(name: "singleStageSplatVertexShader", constantValues: functionConstants)
         pipelineDescriptor.fragmentFunction = try library.makeRequiredFunction(name: "singleStageSplatFragmentShader")
 
         pipelineDescriptor.rasterSampleCount = sampleCount
@@ -1003,7 +1089,15 @@ public class SplatRenderer: @unchecked Sendable {
         let pipelineDescriptor = MTLRenderPipelineDescriptor()
 
         pipelineDescriptor.label = "DitheredTransparencyPipeline"
-        pipelineDescriptor.vertexFunction = try library.makeRequiredFunction(name: "singleStageSplatVertexShader")
+
+        // Set function constants for packed colors
+        let functionConstants = MTLFunctionConstantValues()
+        var usePackedColorsValue = usePackedColors
+        var hasPackedColorsBufferValue = packedColorBuffer != nil
+        functionConstants.setConstantValue(&usePackedColorsValue, type: .bool, index: 10)
+        functionConstants.setConstantValue(&hasPackedColorsBufferValue, type: .bool, index: 11)
+
+        pipelineDescriptor.vertexFunction = try library.makeFunction(name: "singleStageSplatVertexShader", constantValues: functionConstants)
         pipelineDescriptor.fragmentFunction = try library.makeRequiredFunction(name: "singleStageSplatFragmentShaderDithered")
 
         pipelineDescriptor.rasterSampleCount = sampleCount
@@ -1050,7 +1144,15 @@ public class SplatRenderer: @unchecked Sendable {
         let pipelineDescriptor = MTLRenderPipelineDescriptor()
 
         pipelineDescriptor.label = "DrawSplatPipeline"
-        pipelineDescriptor.vertexFunction = try library.makeRequiredFunction(name: "multiStageSplatVertexShader")
+
+        // Set function constants for packed colors
+        let functionConstants = MTLFunctionConstantValues()
+        var usePackedColorsValue = usePackedColors
+        var hasPackedColorsBufferValue = packedColorBuffer != nil
+        functionConstants.setConstantValue(&usePackedColorsValue, type: .bool, index: 10)
+        functionConstants.setConstantValue(&hasPackedColorsBufferValue, type: .bool, index: 11)
+
+        pipelineDescriptor.vertexFunction = try library.makeFunction(name: "multiStageSplatVertexShader", constantValues: functionConstants)
         pipelineDescriptor.fragmentFunction = try library.makeRequiredFunction(name: "multiStageSplatFragmentShader")
 
         pipelineDescriptor.rasterSampleCount = sampleCount
@@ -1539,11 +1641,15 @@ public class SplatRenderer: @unchecked Sendable {
         }
         
         // Check if we need to recompute (view matrix changed significantly)
+        // Must check FULL matrix change (rotation + translation), not just translation
         if let lastMatrix = lastPrecomputeViewMatrix, !precomputedDataDirty {
-            // Simple change detection - check if matrix changed
-            let diff = simd_length(lastMatrix.columns.3 - viewport.viewMatrix.columns.3)
-            if diff < 0.001 {
-                return  // No significant camera movement, reuse cached data
+            // Compare rotation (upper-left 3x3) and translation
+            let rotDiff = simd_length(lastMatrix.columns.0 - viewport.viewMatrix.columns.0) +
+                          simd_length(lastMatrix.columns.1 - viewport.viewMatrix.columns.1) +
+                          simd_length(lastMatrix.columns.2 - viewport.viewMatrix.columns.2)
+            let transDiff = simd_length(lastMatrix.columns.3 - viewport.viewMatrix.columns.3)
+            if rotDiff < 0.001 && transDiff < 0.001 {
+                return  // No significant camera movement or rotation, reuse cached data
             }
         }
         
@@ -1599,7 +1705,66 @@ public class SplatRenderer: @unchecked Sendable {
         precomputedDataDirty = true
         lastPrecomputeViewMatrix = nil
     }
-    
+
+    // MARK: - Packed Color Buffer (snorm10a2 bandwidth optimization)
+
+    /// Rebuild the packed color buffer from current splat data
+    /// Called when usePackedColors is enabled or splat data changes
+    private func rebuildPackedColorBufferIfNeeded() {
+        guard usePackedColors, splatBuffer.count > 0 else {
+            packedColorBuffer = nil
+            return
+        }
+
+        // Each packed color is 4 bytes (uint)
+        let bufferSize = splatBuffer.count * MemoryLayout<UInt32>.stride
+        if packedColorBuffer == nil || packedColorBuffer!.length < bufferSize {
+            packedColorBuffer = device.makeBuffer(length: bufferSize, options: .storageModeShared)
+            packedColorBuffer?.label = "Packed Colors (snorm10a2)"
+        }
+
+        guard let buffer = packedColorBuffer else {
+            Self.log.error("Failed to create packed color buffer")
+            return
+        }
+
+        // Pack colors from splat buffer to packed buffer
+        let packedPtr = buffer.contents().bindMemory(to: UInt32.self, capacity: splatBuffer.count)
+
+        for i in 0..<splatBuffer.count {
+            let color = splatBuffer.values[i].color
+            // Pack half4 color to snorm10a2
+            // Format: [A:2][B:10][G:10][R:10]
+            let r = packSnorm10(Float(color.r))
+            let g = packSnorm10(Float(color.g))
+            let b = packSnorm10(Float(color.b))
+            let a = packUnorm2(Float(color.a))
+
+            packedPtr[i] = r | (g << 10) | (b << 20) | (a << 30)
+        }
+
+        Self.log.debug("Packed \(self.splatBuffer.count) colors to snorm10a2 format")
+    }
+
+    /// Pack a float value to signed normalized 10-bit integer
+    private func packSnorm10(_ value: Float) -> UInt32 {
+        let clamped = max(-1.0, min(1.0, value))
+        let scaled = clamped * 511.0
+        let signed = Int(scaled.rounded())
+        // Convert to two's complement 10-bit representation
+        if signed < 0 {
+            return UInt32(bitPattern: Int32(1024 + signed)) & 0x3FF
+        } else {
+            return UInt32(signed) & 0x3FF
+        }
+    }
+
+    /// Pack a float value to unsigned normalized 2-bit integer
+    private func packUnorm2(_ value: Float) -> UInt32 {
+        let clamped = max(0.0, min(1.0, value))
+        return UInt32((clamped * 3.0).rounded()) & 0x3
+    }
+
     // MARK: - Frustum Culling
     
     /// Encode frustum culling compute pass into command buffer
@@ -1979,6 +2144,20 @@ public class SplatRenderer: @unchecked Sendable {
         let indexedSplatCount = min(splatCount, Constants.maxIndexedSplatCount)
         let instanceCount = (splatCount + indexedSplatCount - 1) / indexedSplatCount
 
+        // Rebuild packed color buffer if enabled and splat data has changed
+        if usePackedColors && colorsDirty {
+            let hadPackedBuffer = packedColorBuffer != nil
+            rebuildPackedColorBufferIfNeeded()
+            colorsDirty = false
+
+            // If packed buffer was just created, rebuild pipelines with updated function constants
+            // This handles the case where usePackedColors was set before splats were loaded
+            if !hadPackedBuffer && packedColorBuffer != nil {
+                resetPipelineStates()
+                setupMeshShaders()
+            }
+        }
+
         switchToNextDynamicBuffer()
         updateUniforms(forViewports: viewports, splatCount: UInt32(splatCount), indexedSplatCount: UInt32(indexedSplatCount))
         frameBufferUploads += 1 // uniforms update
@@ -1994,7 +2173,8 @@ public class SplatRenderer: @unchecked Sendable {
         }
         
         // Metal 4 TensorOps: batch precompute covariance/transforms (when enabled)
-        if batchPrecomputeEnabled, let firstViewport = viewports.first {
+        // Only run for single-viewport rendering until per-viewport buffers are implemented
+        if batchPrecomputeEnabled && viewports.count == 1, let firstViewport = viewports.first {
             runBatchPrecompute(viewport: firstViewport, to: commandBuffer)
         }
 
@@ -2018,7 +2198,7 @@ public class SplatRenderer: @unchecked Sendable {
         // (would need indirect dispatch with visible count)
         // =========================================================================
         let useCulledDitheredPath = useDitheredTransparency && frustumCullingEnabled
-        if meshShaderEnabled && meshShadersSupported && !useCulledDitheredPath,
+        if meshShaderEnabled && canUseMeshShadersSafely && !useCulledDitheredPath,
            let meshPipeline = meshShaderPipelineState,
            let meshDepth = meshShaderDepthState,
            let sortedIndices = getCurrentSortedIndicesBuffer() {
@@ -2050,7 +2230,19 @@ public class SplatRenderer: @unchecked Sendable {
             renderEncoder.setMeshBuffer(dynamicUniformBuffers, offset: uniformBufferOffset, index: BufferIndex.uniforms.rawValue)
             renderEncoder.setMeshBuffer(splatBuffer.buffer, offset: 0, index: BufferIndex.splat.rawValue)
             renderEncoder.setMeshBuffer(sortedIndices.buffer, offset: 0, index: BufferIndex.sortedIndices.rawValue)
-            
+
+            // Bind precomputed buffer if TensorOps precompute is enabled and data is valid
+            if batchPrecomputeEnabled, let precomputedBuffer = precomputedSplatBuffer, !precomputedDataDirty {
+                renderEncoder.setMeshBuffer(precomputedBuffer, offset: 0, index: BufferIndex.precomputed.rawValue)
+            }
+
+            // Bind packed colors buffer (or placeholder for shader compatibility)
+            if let packedColors = packedColorBuffer {
+                renderEncoder.setMeshBuffer(packedColors, offset: 0, index: BufferIndex.packedColors.rawValue)
+            } else {
+                renderEncoder.setMeshBuffer(splatBuffer.buffer, offset: 0, index: BufferIndex.packedColors.rawValue)
+            }
+
             // Calculate number of meshlets needed
             // Each meshlet handles 64 splats (increased from 32, limited by Metal's 256 vertex max)
             let splatsPerMeshlet: Int = 64
@@ -2141,12 +2333,16 @@ public class SplatRenderer: @unchecked Sendable {
             renderEncoder.setRenderPipelineState(drawSplatPipelineState)
             renderEncoder.setDepthStencilState(drawSplatDepthState)
         } else if useDitheredTransparency {
-            guard let ditheredPipelineState, let ditheredDepthState
+            guard let ditheredPipelineState
             else { return }
 
             renderEncoder.pushDebugGroup("Draw Splats (Dithered)")
             renderEncoder.setRenderPipelineState(ditheredPipelineState)
-            renderEncoder.setDepthStencilState(ditheredDepthState)
+            // Only set depth stencil state if we have a depth texture
+            // Dithered mode benefits from depth testing for occlusion, but works without it
+            if depthTexture != nil, let ditheredDepthState {
+                renderEncoder.setDepthStencilState(ditheredDepthState)
+            }
         } else {
             guard let singleStagePipelineState
             else { return }
@@ -2158,6 +2354,15 @@ public class SplatRenderer: @unchecked Sendable {
 
         renderEncoder.setVertexBuffer(dynamicUniformBuffers, offset: uniformBufferOffset, index: BufferIndex.uniforms.rawValue)
         renderEncoder.setVertexBuffer(splatBuffer.buffer, offset: 0, index: BufferIndex.splat.rawValue)
+
+        // Bind packed colors buffer if enabled (or a dummy buffer for shader compatibility)
+        // The shader uses function constants to decide whether to use packed colors
+        if let packedColors = packedColorBuffer {
+            renderEncoder.setVertexBuffer(packedColors, offset: 0, index: BufferIndex.packedColors.rawValue)
+        } else {
+            // Bind splat buffer as placeholder (shader won't access it when function constant is false)
+            renderEncoder.setVertexBuffer(splatBuffer.buffer, offset: 0, index: BufferIndex.packedColors.rawValue)
+        }
 
         // Dithered + Frustum Culling: use culled indices directly (order-independent)
         // This avoids sorting entirely while still benefiting from frustum culling
@@ -2412,6 +2617,56 @@ public class SplatRenderer: @unchecked Sendable {
                     Self.log.error("Failed to acquire index output buffer from pool: \(error)")
                     self.finishSort()
                     return
+                }
+
+                // === METAL 4 RADIX SORT PATH (for very large scenes) ===
+                // Uses GPU atomics-based radix sort, beneficial for >100K splats
+                if #available(iOS 26.0, macOS 26.0, visionOS 26.0, *) {
+                    if self.useMetal4Sorting,
+                       splatCount > self.metal4SortingThreshold,
+                       let sorter = self.metal4Sorter {
+                        let sortCommandBufferManager = self.computeCommandBufferManager ?? commandBufferManager
+                        guard let commandBuffer = sortCommandBufferManager.makeCommandBuffer() else {
+                            Self.log.error("Failed to create compute command buffer for Metal 4 sort.")
+                            sortIndexBufferPool.release(indexOutputBuffer)
+                            self.finishSort()
+                            return
+                        }
+
+                        do {
+                            try sorter.sort(
+                                splats: splatBuffer.buffer,
+                                count: splatCount,
+                                cameraPosition: cameraWorldPosition,
+                                cameraForward: cameraWorldForward,
+                                sortByDistance: Constants.sortByDistance,
+                                outputIndices: indexOutputBuffer.buffer,
+                                commandBuffer: commandBuffer
+                            )
+                        } catch {
+                            Self.log.error("Metal 4 radix sort failed: \(error)")
+                            sortIndexBufferPool.release(indexOutputBuffer)
+                            self.finishSort()
+                            return
+                        }
+
+                        commandBuffer.addCompletedHandler { [weak self] _ in
+                            guard let self = self else {
+                                self?.sortIndexBufferPool.release(indexOutputBuffer)
+                                return
+                            }
+                            self.finishSort(
+                                indexOutputBuffer: indexOutputBuffer,
+                                sortStartTime: sortStartTime,
+                                cameraWorldPosition: cameraWorldPosition,
+                                cameraWorldForward: cameraWorldForward,
+                                dataDirtySnapshot: dataDirtySnapshot,
+                                useGPU: true
+                            )
+                        }
+                        commandBuffer.commit()
+                        return
+                    }
                 }
 
                 // === O(n) COUNTING SORT PATH ===

@@ -262,33 +262,34 @@ void splatMeshShader(
     constant Splat* splatArray [[buffer(BufferIndexSplat)]],
     constant UniformsArray& uniformsArray [[buffer(BufferIndexUniforms)]],
     constant int32_t* sortedIndices [[buffer(BufferIndexSortedIndices)]],
+    constant PackedColor* packedColors [[buffer(BufferIndexPackedColors)]],
     uint threadIndex [[thread_index_in_threadgroup]]
 ) {
     Uniforms uniforms = uniformsArray.uniforms[0];
-    
+
     // First thread sets primitive count
     if (threadIndex == 0) {
         outputMesh.set_primitive_count(payload.visibleCount * TRIANGLES_PER_SPLAT);
     }
-    
+
     if (threadIndex >= payload.visibleCount) {
         return;
     }
-    
+
     uint localIndex = payload.visibleLocalIndices[threadIndex];
     uint globalSortedIndex = payload.meshletStartIndex + localIndex;
     uint actualSplatIndex = uint(sortedIndices[globalSortedIndex]);
-    
+
     Splat splat = splatArray[actualSplatIndex];
     float3 viewPos = payload.viewPositions[threadIndex];
-    
+
     // Compute 2D covariance ONCE per splat (key optimization vs vertex shader)
     float3 cov2D = meshCalcCovariance2D(viewPos, splat.covA, splat.covB,
                                          uniforms.viewMatrix, uniforms.projectionMatrix, uniforms.screenSize);
-    
+
     float2 axis1, axis2;
     meshDecomposeCovariance(cov2D, axis1, axis2);
-    
+
     float4 projectedCenter = uniforms.projectionMatrix * float4(viewPos, 1.0f);
 
     // Pre-compute scale factor ONCE (saves 3 divisions per splat)
@@ -300,7 +301,8 @@ void splatMeshShader(
     half2 scaledAxis2 = half2(axis2) * scaleFactor;
 
     // Pre-compute common vertex attributes
-    half4 splatColor = splat.color;
+    // Use packed colors if enabled (via function constant), otherwise use splat.color
+    half4 splatColor = getSplatColor(actualSplatIndex, splatArray, packedColors);
     uint debugFlags = uniforms.debugFlags;
     float projW = projectedCenter.w;
 
@@ -382,6 +384,138 @@ void splatMeshShader(
     outputMesh.set_index(triangleBase * 3 + 4, vertexBase + 2);
     outputMesh.set_index(triangleBase * 3 + 5, vertexBase + 3);
 }
+
+// =============================================================================
+// MARK: - Mesh Shader with Precomputed Data (Metal 4 TensorOps)
+// - Uses precomputed covariance and axes from batch compute pass
+// - Skips covariance calculation entirely (major performance win)
+// =============================================================================
+
+#if __METAL_VERSION__ >= 400
+[[user_annotation("splat_mesh_shader_precomputed")]]
+[[mesh, max_total_threads_per_threadgroup(SPLATS_PER_MESHLET)]]
+void splatMeshShaderPrecomputed(
+    SplatMeshType outputMesh,
+    const object_data MeshletPayload& payload [[payload]],
+    constant Splat* splatArray [[buffer(BufferIndexSplat)]],
+    constant UniformsArray& uniformsArray [[buffer(BufferIndexUniforms)]],
+    constant int32_t* sortedIndices [[buffer(BufferIndexSortedIndices)]],
+    constant PrecomputedSplat* precomputed [[buffer(BufferIndexPrecomputed)]],
+    constant PackedColor* packedColors [[buffer(BufferIndexPackedColors)]],
+    uint threadIndex [[thread_index_in_threadgroup]]
+) {
+    Uniforms uniforms = uniformsArray.uniforms[0];
+
+    // First thread sets primitive count
+    if (threadIndex == 0) {
+        outputMesh.set_primitive_count(payload.visibleCount * TRIANGLES_PER_SPLAT);
+    }
+
+    if (threadIndex >= payload.visibleCount) {
+        return;
+    }
+
+    uint localIndex = payload.visibleLocalIndices[threadIndex];
+    uint globalSortedIndex = payload.meshletStartIndex + localIndex;
+    uint actualSplatIndex = uint(sortedIndices[globalSortedIndex]);
+
+    // Read precomputed data instead of computing covariance
+    PrecomputedSplat pre = precomputed[actualSplatIndex];
+
+    // Skip culled splats (already determined in precompute pass)
+    if (pre.visible == 0) {
+        return;
+    }
+
+    // Use precomputed axes directly (no covariance calculation needed!)
+    float2 axis1 = pre.axis1;
+    float2 axis2 = pre.axis2;
+    float4 projectedCenter = pre.clipPosition;
+
+    // Get color using packed buffer if enabled, otherwise from splat data
+    half4 splatColor = getSplatColor(actualSplatIndex, splatArray, packedColors);
+    uint debugFlags = uniforms.debugFlags;
+    float projW = projectedCenter.w;
+
+    // Pre-compute scale factor ONCE (saves 3 divisions per splat)
+    half2 scaleFactor = (2.0h * kBoundsRadius) / half2(uniforms.screenSize);
+    half2 scaledAxis1 = half2(axis1) * scaleFactor;
+    half2 scaledAxis2 = half2(axis2) * scaleFactor;
+
+    uint vertexBase = threadIndex * VERTICES_PER_SPLAT;
+
+    // Generate 4 vertices for this splat's quad (unrolled, same as standard mesh shader)
+
+    // Vertex 0: bottom-left (-1, -1)
+    {
+        half2 screenDelta = -scaledAxis1 - scaledAxis2;
+        MeshVertexOutput v0;
+        v0.position = float4(projectedCenter.x + float(screenDelta.x) * projW,
+                             projectedCenter.y + float(screenDelta.y) * projW,
+                             projectedCenter.z, projW);
+        v0.relativePosition = half2(-kBoundsRadius, -kBoundsRadius);
+        v0.color = splatColor;
+        v0.lodBand = half(0);
+        v0.debugFlags = debugFlags;
+        outputMesh.set_vertex(vertexBase + 0, v0);
+    }
+
+    // Vertex 1: top-left (-1, 1)
+    {
+        half2 screenDelta = -scaledAxis1 + scaledAxis2;
+        MeshVertexOutput v1;
+        v1.position = float4(projectedCenter.x + float(screenDelta.x) * projW,
+                             projectedCenter.y + float(screenDelta.y) * projW,
+                             projectedCenter.z, projW);
+        v1.relativePosition = half2(-kBoundsRadius, kBoundsRadius);
+        v1.color = splatColor;
+        v1.lodBand = half(0);
+        v1.debugFlags = debugFlags;
+        outputMesh.set_vertex(vertexBase + 1, v1);
+    }
+
+    // Vertex 2: bottom-right (1, -1)
+    {
+        half2 screenDelta = scaledAxis1 - scaledAxis2;
+        MeshVertexOutput v2;
+        v2.position = float4(projectedCenter.x + float(screenDelta.x) * projW,
+                             projectedCenter.y + float(screenDelta.y) * projW,
+                             projectedCenter.z, projW);
+        v2.relativePosition = half2(kBoundsRadius, -kBoundsRadius);
+        v2.color = splatColor;
+        v2.lodBand = half(0);
+        v2.debugFlags = debugFlags;
+        outputMesh.set_vertex(vertexBase + 2, v2);
+    }
+
+    // Vertex 3: top-right (1, 1)
+    {
+        half2 screenDelta = scaledAxis1 + scaledAxis2;
+        MeshVertexOutput v3;
+        v3.position = float4(projectedCenter.x + float(screenDelta.x) * projW,
+                             projectedCenter.y + float(screenDelta.y) * projW,
+                             projectedCenter.z, projW);
+        v3.relativePosition = half2(kBoundsRadius, kBoundsRadius);
+        v3.color = splatColor;
+        v3.lodBand = half(0);
+        v3.debugFlags = debugFlags;
+        outputMesh.set_vertex(vertexBase + 3, v3);
+    }
+
+    // Generate 2 triangles for this splat's quad
+    uint triangleBase = threadIndex * TRIANGLES_PER_SPLAT;
+
+    // Triangle 0: vertices 0, 1, 2
+    outputMesh.set_index(triangleBase * 3 + 0, vertexBase + 0);
+    outputMesh.set_index(triangleBase * 3 + 1, vertexBase + 1);
+    outputMesh.set_index(triangleBase * 3 + 2, vertexBase + 2);
+
+    // Triangle 1: vertices 1, 2, 3
+    outputMesh.set_index(triangleBase * 3 + 3, vertexBase + 1);
+    outputMesh.set_index(triangleBase * 3 + 4, vertexBase + 2);
+    outputMesh.set_index(triangleBase * 3 + 5, vertexBase + 3);
+}
+#endif
 
 // =============================================================================
 // MARK: - Fragment Shader (Metal 4 Optimized)

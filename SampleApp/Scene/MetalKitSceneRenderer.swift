@@ -92,9 +92,9 @@ class MetalKitSceneRenderer: NSObject, MTKViewDelegate {
         self.commandBufferManager = CommandBufferManager(commandQueue: queue)
         self.metalKitView = metalKitView
         metalKitView.colorPixelFormat = MTLPixelFormat.bgra8Unorm_srgb
-        // Depth buffer not needed for iOS/macOS - splats use painter's algorithm (sorted back-to-front)
-        // This saves memory bandwidth since depth isn't read after rendering
-        metalKitView.depthStencilPixelFormat = MTLPixelFormat.invalid
+        // Enable depth buffer for dithered transparency support
+        // Dithered transparency uses stochastic alpha testing + depth for order-independence
+        metalKitView.depthStencilPixelFormat = MTLPixelFormat.depth32Float
         metalKitView.sampleCount = 1
         metalKitView.clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 0)
     }
@@ -490,6 +490,10 @@ class MetalKitSceneRenderer: NSObject, MTKViewDelegate {
     func setDitheredTransparency(_ enabled: Bool) {
         if let splat = modelRenderer as? SplatRenderer {
             splat.useDitheredTransparency = enabled
+            // Dithered transparency requires single-stage pipeline, which is only used when
+            // highQualityDepth is false. Multi-stage pipeline (used with highQualityDepth=true)
+            // bypasses the dithered path entirely.
+            splat.highQualityDepth = !enabled
             if enabled {
                 Self.log.info("Dithered transparency enabled - order-independent, no sorting needed")
             } else {
@@ -514,6 +518,48 @@ class MetalKitSceneRenderer: NSObject, MTKViewDelegate {
                 Self.log.info("SH rendering enabled - view-dependent lighting active")
             } else {
                 Self.log.info("SH rendering disabled - using base color only (~50% faster)")
+            }
+        }
+
+        // Request redraw
+        #if os(macOS)
+        metalKitView.setNeedsDisplay(metalKitView.bounds)
+        #else
+        metalKitView.setNeedsDisplay()
+        #endif
+    }
+
+    /// Enable or disable Metal 4 GPU radix sorting
+    /// Uses advanced atomics for GPU-accelerated stable radix sort
+    /// Best for very large scenes (>100K splats) where GPU parallelism outweighs multi-pass overhead
+    func setMetal4Sorting(_ enabled: Bool) {
+        if let splat = modelRenderer as? SplatRenderer {
+            splat.useMetal4Sorting = enabled
+            if enabled {
+                Self.log.info("Metal 4 GPU radix sorting enabled (>100K splat threshold)")
+            } else {
+                Self.log.info("Metal 4 GPU radix sorting disabled - using counting sort/MPS")
+            }
+        }
+
+        // Request redraw
+        #if os(macOS)
+        metalKitView.setNeedsDisplay(metalKitView.bounds)
+        #else
+        metalKitView.setNeedsDisplay()
+        #endif
+    }
+
+    /// Enable or disable snorm10a2 packed colors for bandwidth optimization
+    /// Packs RGBA into 4 bytes (10-10-10-2) instead of 8 bytes (half4)
+    /// May have minor precision loss visible with high SH data
+    func setPackedColors(_ enabled: Bool) {
+        if let splat = modelRenderer as? SplatRenderer {
+            splat.usePackedColors = enabled
+            if enabled {
+                Self.log.info("Packed colors enabled - 50% bandwidth reduction")
+            } else {
+                Self.log.info("Packed colors disabled - using full precision half4")
             }
         }
 

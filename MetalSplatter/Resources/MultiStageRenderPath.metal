@@ -34,7 +34,8 @@ vertex FragmentIn multiStageSplatVertexShader(uint vertexID [[vertex_id]],
                                               ushort amplificationID [[amplification_id]],
                                               constant Splat* splatArray [[ buffer(BufferIndexSplat) ]],
                                               constant UniformsArray & uniformsArray [[ buffer(BufferIndexUniforms) ]],
-                                              constant int32_t* sortedIndices [[ buffer(BufferIndexSortedIndices) ]]) {
+                                              constant int32_t* sortedIndices [[ buffer(BufferIndexSortedIndices) ]],
+                                              constant PackedColor* packedColors [[ buffer(BufferIndexPackedColors) ]]) {
     Uniforms uniforms = uniformsArray.uniforms[min(int(amplificationID), kMaxViewCount)];
 
     uint logicalSplatID = instanceID * uniforms.indexedSplatCount + (vertexID / 4);
@@ -51,6 +52,9 @@ vertex FragmentIn multiStageSplatVertexShader(uint vertexID [[vertex_id]],
     // Use sorted index to access splat in depth-sorted order
     uint actualSplatID = uint(sortedIndices[logicalSplatID]);
     Splat splat = splatArray[actualSplatID];
+
+    // Override color with packed buffer if enabled (via function constant)
+    splat.color = getSplatColor(actualSplatID, splatArray, packedColors);
 
     return splatVertex(splat, uniforms, vertexID % 4);
 }

@@ -25,15 +25,7 @@ using namespace metal;
 // -----------------------------------------------------------------------------
 // MARK: - Pre-computed Splat Data Structure
 // -----------------------------------------------------------------------------
-
-struct PrecomputedSplat {
-    float4 clipPosition;    // Already projected to clip space
-    float3 cov2D;           // 2D covariance (cov_xx, cov_xy, cov_yy)
-    float2 axis1;           // Decomposed covariance axis 1
-    float2 axis2;           // Decomposed covariance axis 2
-    float depth;            // For sorting
-    uint visible;           // Frustum culling result (0 = culled, 1 = visible)
-};
+// Note: PrecomputedSplat is now defined in ShaderCommon.h for CPU/GPU sharing
 
 // -----------------------------------------------------------------------------
 // MARK: - Helper Functions

@@ -20,10 +20,12 @@ struct MetalKitSceneView: View {
     @State private var fastSHEnabled = true
     @State private var metal4BindlessEnabled = true // Default to enabled
     @State private var showDebugAABB = false // Debug: visualize GPU-computed bounds
-    @State private var frustumCullingEnabled = false // GPU frustum culling
+    @State private var frustumCullingEnabled = true // GPU frustum culling - enabled by default for AR performance
     @State private var meshShaderEnabled = true // Metal 3+ mesh shader rendering - enabled by default
     @State private var ditheredTransparencyEnabled = false // Stochastic transparency - disabled by default
-    
+    @State private var metal4SortingEnabled = true // Metal 4 GPU radix sort - enabled by default
+    @State private var packedColorsEnabled = true // snorm10a2 packed colors - enabled by default
+
     var body: some View {
         ZStack {
             // The actual Metal view
@@ -34,7 +36,9 @@ struct MetalKitSceneView: View {
                 showDebugAABB: $showDebugAABB,
                 frustumCullingEnabled: $frustumCullingEnabled,
                 meshShaderEnabled: $meshShaderEnabled,
-                ditheredTransparencyEnabled: $ditheredTransparencyEnabled
+                ditheredTransparencyEnabled: $ditheredTransparencyEnabled,
+                metal4SortingEnabled: $metal4SortingEnabled,
+                packedColorsEnabled: $packedColorsEnabled
             )
             .ignoresSafeArea()
             
@@ -217,7 +221,43 @@ struct MetalKitSceneView: View {
                                 }
                                 .padding(.top, 4)
                             }
-                            
+
+                            Divider()
+
+                            // Metal 4 GPU Sorting Toggle
+                            Toggle(isOn: $metal4SortingEnabled) {
+                                VStack(alignment: .leading, spacing: 2) {
+                                    HStack {
+                                        Text("Metal 4 GPU Sorting")
+                                            .font(.subheadline)
+                                        Text("(iOS 26+)")
+                                            .font(.caption2)
+                                            .foregroundColor(.purple)
+                                    }
+                                    Text("Stable radix sort for large scenes (>100K splats)")
+                                        .font(.caption)
+                                        .foregroundColor(.secondary)
+                                }
+                            }
+
+                            Divider()
+
+                            // Packed Colors Toggle
+                            Toggle(isOn: $packedColorsEnabled) {
+                                VStack(alignment: .leading, spacing: 2) {
+                                    HStack {
+                                        Text("Packed Colors")
+                                            .font(.subheadline)
+                                        Text("(iOS 26+)")
+                                            .font(.caption2)
+                                            .foregroundColor(.orange)
+                                    }
+                                    Text("50% color bandwidth reduction via snorm10a2")
+                                        .font(.caption)
+                                        .foregroundColor(.secondary)
+                                }
+                            }
+
                         }
                         .padding()
 #if os(iOS)
@@ -277,6 +317,8 @@ struct MetalKitRendererView: ViewRepresentable {
     @Binding var frustumCullingEnabled: Bool
     @Binding var meshShaderEnabled: Bool
     @Binding var ditheredTransparencyEnabled: Bool
+    @Binding var metal4SortingEnabled: Bool
+    @Binding var packedColorsEnabled: Bool
 
     class Coordinator: NSObject {
         var renderer: MetalKitSceneRenderer?
@@ -300,6 +342,8 @@ struct MetalKitRendererView: ViewRepresentable {
             renderer?.setFrustumCulling(parent.frustumCullingEnabled)
             renderer?.setMeshShader(parent.meshShaderEnabled)
             renderer?.setDitheredTransparency(parent.ditheredTransparencyEnabled)
+            renderer?.setMetal4Sorting(parent.metal4SortingEnabled)
+            renderer?.setPackedColors(parent.packedColorsEnabled)
         }
     }
 
@@ -343,6 +387,8 @@ struct MetalKitRendererView: ViewRepresentable {
         renderer?.setFrustumCulling(frustumCullingEnabled)
         renderer?.setMeshShader(meshShaderEnabled)
         renderer?.setDitheredTransparency(ditheredTransparencyEnabled)
+        renderer?.setMetal4Sorting(metal4SortingEnabled)
+        renderer?.setPackedColors(packedColorsEnabled)
 
         // --- Interactivity: Pan (rotation) and Pinch (zoom) ---
         #if os(iOS)
