@@ -43,7 +43,7 @@ public enum SplatRendererError: LocalizedError {
     }
 }
 
-public class SplatRenderer {
+public class SplatRenderer: @unchecked Sendable {
     enum Constants {
         // Keep in sync with Shaders.metal : maxViewCount
         static let maxViewCount = 2
@@ -70,7 +70,7 @@ public class SplatRenderer {
         Logger(subsystem: Bundle.module.bundleIdentifier ?? "com.metalsplatter.unknown",
                category: "SplatRenderer")
     
-    public struct DebugOptions: OptionSet {
+    public struct DebugOptions: OptionSet, Sendable {
         public let rawValue: UInt32
         public init(rawValue: UInt32) { self.rawValue = rawValue }
 
@@ -1524,13 +1524,16 @@ public class SplatRenderer {
         
         // Schedule a final high-quality sort after a brief delay
         // This allows the last frame to render before the sort overhead kicks in
-        DispatchQueue.main.asyncAfter(deadline: .now() + postInteractionSortDelay) { [weak self] in
-            guard let self = self else { return }
-            // Only trigger if we haven't started interacting again
-            if !self.isInteracting {
-                Self.log.debug("Interaction mode ended - triggering final sort")
-                self.sortDirtyDueToData = true  // Force a re-sort
-                self.resort(useGPU: true)
+        // Skip if using dithered transparency (order-independent, no sort needed)
+        if !useDitheredTransparency {
+            DispatchQueue.main.asyncAfter(deadline: .now() + postInteractionSortDelay) { [weak self] in
+                guard let self = self else { return }
+                // Only trigger if we haven't started interacting again
+                if !self.isInteracting {
+                    Self.log.debug("Interaction mode ended - triggering final sort")
+                    self.sortDirtyDueToData = true  // Force a re-sort
+                    self.resort(useGPU: true)
+                }
             }
         }
     }
@@ -2067,6 +2070,7 @@ public class SplatRenderer {
 
     /// Completes a GPU sort by swapping buffers and updating state.
     /// Called from command buffer completion handlers to avoid blocking.
+    /// Dispatches to main thread to avoid race conditions with render/update calls.
     private func finishSort(
         indexOutputBuffer: MetalBuffer<Int32>,
         sortStartTime: CFAbsoluteTime,
@@ -2075,50 +2079,58 @@ public class SplatRenderer {
         dataDirtySnapshot: UInt64,
         useGPU: Bool
     ) {
-        // GPU-ONLY SORTING with double-buffering for async overlap
-        // Swap buffers atomically - rendering continues with old buffer
-        // until this completes, then switches to new buffer
-
-        // Release the "other" buffer (the one NOT currently being rendered)
-        if self.usingSortedBufferA {
-            // Currently rendering with A, so B is safe to replace
-            if let oldB = self.sortedIndicesBufferB {
-                sortIndexBufferPool.release(oldB)
+        // Dispatch to main thread to serialize with render/update calls
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else {
+                // If self is deallocated, we can't release to pool, just let it leak
+                return
             }
-            self.sortedIndicesBufferB = indexOutputBuffer
-        } else {
-            // Currently rendering with B, so A is safe to replace
-            if let oldA = self.sortedIndicesBufferA {
-                sortIndexBufferPool.release(oldA)
+
+            // GPU-ONLY SORTING with double-buffering for async overlap
+            // Swap buffers atomically - rendering continues with old buffer
+            // until this completes, then switches to new buffer
+
+            // Release the "other" buffer (the one NOT currently being rendered)
+            if self.usingSortedBufferA {
+                // Currently rendering with A, so B is safe to replace
+                if let oldB = self.sortedIndicesBufferB {
+                    self.sortIndexBufferPool.release(oldB)
+                }
+                self.sortedIndicesBufferB = indexOutputBuffer
+            } else {
+                // Currently rendering with B, so A is safe to replace
+                if let oldA = self.sortedIndicesBufferA {
+                    self.sortIndexBufferPool.release(oldA)
+                }
+                self.sortedIndicesBufferA = indexOutputBuffer
             }
-            self.sortedIndicesBufferA = indexOutputBuffer
-        }
 
-        // Flip the active buffer for next render
-        // This is the "swap" - rendering will now use the newly sorted buffer
-        self.usingSortedBufferA = !self.usingSortedBufferA
+            // Flip the active buffer for next render
+            // This is the "swap" - rendering will now use the newly sorted buffer
+            self.usingSortedBufferA = !self.usingSortedBufferA
 
-        // Update the main sortedIndicesBuffer pointer for compatibility
-        self.sortedIndicesBuffer = self.usingSortedBufferA
-            ? self.sortedIndicesBufferA
-            : self.sortedIndicesBufferB
+            // Update the main sortedIndicesBuffer pointer for compatibility
+            self.sortedIndicesBuffer = self.usingSortedBufferA
+                ? self.sortedIndicesBufferA
+                : self.sortedIndicesBufferB
 
-        let elapsed = CFAbsoluteTimeGetCurrent() - sortStartTime
-        self.lastSortDuration = elapsed
-        self.onSortComplete?(elapsed)
-        self.lastSortedCameraPosition = cameraWorldPosition
-        self.lastSortedCameraForward = cameraWorldForward
-        self.lastSortTime = CFAbsoluteTimeGetCurrent()
-        if self.sortDataRevision == dataDirtySnapshot {
-            self.sortDirtyDueToData = false
-        }
-        self.sorting = false
-        self.sortJobsInFlight -= 1
+            let elapsed = CFAbsoluteTimeGetCurrent() - sortStartTime
+            self.lastSortDuration = elapsed
+            self.onSortComplete?(elapsed)
+            self.lastSortedCameraPosition = cameraWorldPosition
+            self.lastSortedCameraForward = cameraWorldForward
+            self.lastSortTime = CFAbsoluteTimeGetCurrent()
+            if self.sortDataRevision == dataDirtySnapshot {
+                self.sortDirtyDueToData = false
+            }
+            self.sorting = false
+            self.sortJobsInFlight -= 1
 
-        Self.log.debug("Async sort completed in \(String(format: "%.1f", elapsed * 1000))ms")
+            Self.log.debug("Async sort completed in \(String(format: "%.1f", elapsed * 1000))ms")
 
-        if self.shouldResortForCurrentCamera() {
-            self.resort(useGPU: useGPU)
+            if self.shouldResortForCurrentCamera() {
+                self.resort(useGPU: useGPU)
+            }
         }
     }
 
@@ -2170,7 +2182,9 @@ public class SplatRenderer {
                 // === O(n) COUNTING SORT PATH ===
                 // Uses histogram-based sorting which is faster than O(n log n) radix sort
                 if self.useCountingSort, let sorter = self.countingSorter {
-                    guard let commandBuffer = commandBufferManager.makeCommandBuffer() else {
+                    // Use compute queue for sorting to allow overlap with rendering
+                    let sortCommandBufferManager = self.computeCommandBufferManager ?? commandBufferManager
+                    guard let commandBuffer = sortCommandBufferManager.makeCommandBuffer() else {
                         Self.log.error("Failed to create compute command buffer.")
                         sortIndexBufferPool.release(indexOutputBuffer)
                         self.sorting = false

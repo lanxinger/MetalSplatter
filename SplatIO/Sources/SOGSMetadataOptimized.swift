@@ -377,7 +377,7 @@ extension SplatSOGSSceneReader {
 
 // MARK: - Texture Cache for Repeated Access
 
-public class SOGSTextureCache {
+public final class SOGSTextureCache: @unchecked Sendable {
     private var cache: [URL: SOGSCompressedData] = [:]
     private let lock = NSLock()
     private let maxCacheSize = 5 // Maximum number of cached SOGS scenes

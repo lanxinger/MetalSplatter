@@ -5,6 +5,20 @@ import Compression
 import Dispatch
 import ZIPFoundation
 
+/// Thread-safe counter for use in concurrent code
+private final class LockedCounter: @unchecked Sendable {
+    private var value: Int = 0
+    private let lock = NSLock()
+
+    /// Adds to the counter and returns the new value
+    func add(_ amount: Int) -> Int {
+        lock.lock()
+        defer { lock.unlock() }
+        value += amount
+        return value
+    }
+}
+
 public class SplatSOGSSceneReaderV2: SplatSceneReader {
     public enum SOGSV2Error: Error {
         case invalidMetadata
@@ -510,8 +524,7 @@ public class SplatSOGSSceneReaderV2: SplatSceneReader {
         }
 
         var chunkResults = Array(repeating: [SplatScenePoint](), count: chunkDescriptors.count)
-        let progressLock = NSLock()
-        var processed = 0
+        let progressCounter = LockedCounter()
         let logStep = max(1, min(preferredBatchSize * 2, totalSplats / max(1, maxParallelChunks)))
 
         chunkResults.withUnsafeMutableBufferPointer { buffer in
@@ -528,12 +541,10 @@ public class SplatSOGSSceneReaderV2: SplatSceneReader {
 
                 buffer[chunkIndex] = localPoints
 
-                progressLock.lock()
-                processed += descriptor.count
+                let processed = progressCounter.add(descriptor.count)
                 if processed == totalSplats || processed % logStep == 0 {
                     print("SplatSOGSSceneReaderV2: Batch processed \(processed)/\(totalSplats) splats")
                 }
-                progressLock.unlock()
             }
         }
 

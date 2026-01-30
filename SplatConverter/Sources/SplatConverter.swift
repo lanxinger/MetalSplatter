@@ -9,7 +9,7 @@ struct SplatConverter: ParsableCommand {
         case unknownWriteError(String)
     }
 
-    static var configuration = CommandConfiguration(
+    static let configuration = CommandConfiguration(
         commandName: "SplatConverter",
         abstract: "A utility for converting splat scene files",
         version: "1.0.0"

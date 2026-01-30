@@ -232,7 +232,7 @@ extension SplatRenderer {
 }
 
 // Associated object key for storing bindless architecture
-private var bindlessArchitectureKey: UInt8 = 0
+private nonisolated(unsafe) var bindlessArchitectureKey: UInt8 = 0
 
 // MARK: - Shader Integration Support
 

@@ -6,7 +6,7 @@ fileprivate let log =
     Logger(subsystem: Bundle.module.bundleIdentifier!,
            category: "MetalBuffer")
 
-public class MetalBuffer<T> {
+public class MetalBuffer<T>: @unchecked Sendable {
     public enum Error: LocalizedError {
         case capacityGreatedThanMaxCapacity(requested: Int, max: Int)
         case bufferCreationFailed

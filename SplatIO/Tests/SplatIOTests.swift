@@ -151,7 +151,7 @@ final class SplatIOTests: XCTestCase {
         
         XCTAssertEqual(metadata.version, 2)
         XCTAssertEqual(metadata.count, 1000)
-        XCTAssertTrue(metadata.antialias)
+        XCTAssertEqual(metadata.antialias, true)
         
         // Test means
         XCTAssertEqual(metadata.means.mins.count, 3)
@@ -266,7 +266,7 @@ final class SplatIOTests: XCTestCase {
         
         XCTAssertEqual(metadata.version, 2)
         XCTAssertEqual(metadata.count, 500)
-        XCTAssertFalse(metadata.antialias)
+        XCTAssertEqual(metadata.antialias, false)
         XCTAssertNil(metadata.shN)
     }
     

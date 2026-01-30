@@ -8,7 +8,7 @@ import SplatIO
 import simd
 import UIKit
 
-public class ARSplatRenderer: NSObject {
+public class ARSplatRenderer: NSObject, @unchecked Sendable {
     private let device: MTLDevice
     private let commandQueue: MTLCommandQueue
     private let commandBufferManager: CommandBufferManager

@@ -383,7 +383,7 @@ public class Metal4BindlessArchitecture {
 // MARK: - Supporting Types
 
 /// Handle for bindless resource access
-public struct ResourceHandle: Hashable, CustomStringConvertible {
+public struct ResourceHandle: Hashable, CustomStringConvertible, Sendable {
     let value: UInt64
     let index: UInt32
     let generation: UInt32

@@ -449,8 +449,8 @@ extension FastSHSplatRenderer {
                 indexBuffer.values[i * 6 + 1] = UInt32(i * 4 + 1)
                 indexBuffer.values[i * 6 + 2] = UInt32(i * 4 + 2)
                 indexBuffer.values[i * 6 + 3] = UInt32(i * 4 + 1)
-                indexBuffer.values[i * 6 + 4] = UInt32(i * 4 + 3)
-                indexBuffer.values[i * 6 + 5] = UInt32(i * 4 + 2)
+                indexBuffer.values[i * 6 + 4] = UInt32(i * 4 + 2)
+                indexBuffer.values[i * 6 + 5] = UInt32(i * 4 + 3)
             }
         }
 

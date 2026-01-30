@@ -1,7 +1,7 @@
 import Foundation
 
 public struct SplatMemoryBuffer {
-    private class BufferReader: SplatSceneReaderDelegate {
+    private final class BufferReader: SplatSceneReaderDelegate, @unchecked Sendable {
         enum Error: Swift.Error {
             case unknown
         }
