@@ -63,7 +63,10 @@ public class Metal4BindlessArchitecture {
     
     // Performance metrics
     private var bindlessMetrics = BindlessMetrics()
-    
+
+    // Background thread cancellation
+    private var shouldStopPopulation = false
+
     // MARK: - Initialization
     
     public init(device: MTLDevice, configuration: Configuration = Configuration()) throws {
@@ -220,11 +223,15 @@ public class Metal4BindlessArchitecture {
     
     private func startBackgroundResourcePopulation() {
         populationQueue.async { [weak self] in
-            while true {
-                self?.processPendingResources()
+            while let strongSelf = self, !strongSelf.shouldStopPopulation {
+                strongSelf.processPendingResources()
                 Thread.sleep(forTimeInterval: 0.001) // 1ms between batches
             }
         }
+    }
+
+    deinit {
+        shouldStopPopulation = true
     }
     
     private func processPendingResources() {

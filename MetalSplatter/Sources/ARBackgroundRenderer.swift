@@ -13,7 +13,7 @@ public class ARBackgroundRenderer {
     private let renderPipelineState: MTLRenderPipelineState
     
     // Captured image texture cache
-    private var capturedImageTextureCache: CVMetalTextureCache!
+    private var capturedImageTextureCache: CVMetalTextureCache
     private var viewportSize = CGSize(width: 0, height: 0)
     private var updateGeometry = true
     
@@ -83,8 +83,13 @@ public class ARBackgroundRenderer {
         }
         
         // Setup texture cache
-        setupTextureCache()
-        
+        var textureCache: CVMetalTextureCache?
+        let status = CVMetalTextureCacheCreate(nil, nil, device, nil, &textureCache)
+        guard status == kCVReturnSuccess, let cache = textureCache else {
+            throw ARBackgroundRendererError.failedToCreateTextureCache
+        }
+        self.capturedImageTextureCache = cache
+
         // Setup orientation change notification
         NotificationCenter.default.addObserver(
             forName: UIDevice.orientationDidChangeNotification,
@@ -215,12 +220,6 @@ public class ARBackgroundRenderer {
         )
     }
     
-    private func setupTextureCache() {
-        var textureCache: CVMetalTextureCache?
-        CVMetalTextureCacheCreate(nil, nil, device, nil, &textureCache)
-        capturedImageTextureCache = textureCache
-    }
-    
     private func createTexture(fromPixelBuffer pixelBuffer: CVPixelBuffer, pixelFormat: MTLPixelFormat, planeIndex: Int) -> CVMetalTexture? {
         let width = CVPixelBufferGetWidthOfPlane(pixelBuffer, planeIndex)
         let height = CVPixelBufferGetHeightOfPlane(pixelBuffer, planeIndex)
@@ -291,6 +290,7 @@ public enum ARBackgroundRendererError: Error {
     case failedToCreateVertexBuffer
     case failedToCreateIndexBuffer
     case failedToCreateShaderFunctions
+    case failedToCreateTextureCache
 }
 
 #endif // os(iOS)

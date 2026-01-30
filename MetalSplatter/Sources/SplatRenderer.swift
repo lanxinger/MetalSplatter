@@ -461,6 +461,7 @@ public class SplatRenderer: @unchecked Sendable {
     var sorting = false
     private var sortJobsInFlight: Int = 0  // Track concurrent sort operations
     private let maxConcurrentSorts: Int = 2  // Allow overlap: one sorting while one renders
+    private var sortStateLock = os_unfair_lock()  // Protects sortJobsInFlight and buffer swap
     var orderAndDepthTempSort: [SplatIndexAndDepth] = []
 
     // Metal 4 command buffer pool for improved performance
@@ -489,6 +490,67 @@ public class SplatRenderer: @unchecked Sendable {
     /// sufficient depth precision (16-bit quantization) for visual correctness.
     /// Set to false to use the traditional MPS-based radix sort.
     public var useCountingSort: Bool = true
+
+    // MARK: - Thread-safe sort state accessors
+
+    private func incrementSortJobsInFlight() {
+        os_unfair_lock_lock(&sortStateLock)
+        sortJobsInFlight += 1
+        os_unfair_lock_unlock(&sortStateLock)
+    }
+
+    private func decrementSortJobsInFlight() {
+        os_unfair_lock_lock(&sortStateLock)
+        sortJobsInFlight -= 1
+        os_unfair_lock_unlock(&sortStateLock)
+    }
+
+    private func getSortJobsInFlight() -> Int {
+        os_unfair_lock_lock(&sortStateLock)
+        defer { os_unfair_lock_unlock(&sortStateLock) }
+        return sortJobsInFlight
+    }
+
+    private func canStartNewSort() -> Bool {
+        os_unfair_lock_lock(&sortStateLock)
+        defer { os_unfair_lock_unlock(&sortStateLock) }
+        return sortJobsInFlight < maxConcurrentSorts
+    }
+
+    /// Thread-safe access to the current sorted indices buffer for rendering
+    private func getCurrentSortedIndicesBuffer() -> MetalBuffer<Int32>? {
+        os_unfair_lock_lock(&sortStateLock)
+        defer { os_unfair_lock_unlock(&sortStateLock) }
+        return sortedIndicesBuffer
+    }
+
+    /// Thread-safe buffer swap for double-buffered sorting
+    /// Returns the old buffer that was replaced (if any) for release back to pool
+    private func swapSortedIndicesBuffer(newBuffer: MetalBuffer<Int32>) -> MetalBuffer<Int32>? {
+        os_unfair_lock_lock(&sortStateLock)
+        defer { os_unfair_lock_unlock(&sortStateLock) }
+
+        let oldBuffer: MetalBuffer<Int32>?
+        if usingSortedBufferA {
+            // Currently rendering with A, so B is safe to replace
+            oldBuffer = sortedIndicesBufferB
+            sortedIndicesBufferB = newBuffer
+        } else {
+            // Currently rendering with B, so A is safe to replace
+            oldBuffer = sortedIndicesBufferA
+            sortedIndicesBufferA = newBuffer
+        }
+
+        // Flip the active buffer for next render
+        usingSortedBufferA = !usingSortedBufferA
+
+        // Update the main sortedIndicesBuffer pointer
+        sortedIndicesBuffer = usingSortedBufferA
+            ? sortedIndicesBufferA
+            : sortedIndicesBufferB
+
+        return oldBuffer
+    }
 
     public init(device: MTLDevice,
                 colorFormat: MTLPixelFormat,
@@ -714,8 +776,12 @@ public class SplatRenderer: @unchecked Sendable {
         splatBufferPool.release(splatBuffer)
         splatBufferPool.release(splatBufferPrime)
         indexBufferPool.release(indexBuffer)
-        if let sortedIndices = sortedIndicesBuffer {
-            sortIndexBufferPool.release(sortedIndices)
+        // Release double-buffered sort index buffers
+        if let bufferA = sortedIndicesBufferA {
+            sortIndexBufferPool.release(bufferA)
+        }
+        if let bufferB = sortedIndicesBufferB {
+            sortIndexBufferPool.release(bufferB)
         }
     }
 
@@ -1240,6 +1306,7 @@ public class SplatRenderer: @unchecked Sendable {
         
         // Step 1: Reset atomic bounds to initial values
         guard let resetEncoder = commandBuffer.makeComputeCommandEncoder() else {
+            Self.log.warning("Failed to create compute encoder for reset bounds")
             return nil
         }
         resetEncoder.label = "Reset Bounds Atomics"
@@ -1252,6 +1319,7 @@ public class SplatRenderer: @unchecked Sendable {
         
         // Step 2: Compute bounds with SIMD-group parallel reduction
         guard let computeEncoder = commandBuffer.makeComputeCommandEncoder() else {
+            Self.log.warning("Failed to create compute encoder for bounds computation")
             return nil
         }
         computeEncoder.label = "Compute Bounds Parallel"
@@ -1350,7 +1418,10 @@ public class SplatRenderer: @unchecked Sendable {
         
         var splatCountValue = UInt32(splatCount)
         
-        guard let computeEncoder = commandBuffer.makeComputeCommandEncoder() else { return }
+        guard let computeEncoder = commandBuffer.makeComputeCommandEncoder() else {
+            Self.log.error("Failed to create compute encoder for batch precompute")
+            return
+        }
         computeEncoder.label = "Batch Precompute Splats"
         computeEncoder.setComputePipelineState(precomputePipeline)
         
@@ -1418,7 +1489,10 @@ public class SplatRenderer: @unchecked Sendable {
         cullDataBuffer.contents().copyMemory(from: &cullData, byteCount: MemoryLayout<FrustumCullData>.stride)
         
         // === Step 1: Reset visible count on GPU ===
-        guard let resetEncoder = commandBuffer.makeComputeCommandEncoder() else { return }
+        guard let resetEncoder = commandBuffer.makeComputeCommandEncoder() else {
+            Self.log.error("Failed to create compute encoder for reset visible count")
+            return
+        }
         resetEncoder.label = "Reset Visible Count"
         resetEncoder.setComputePipelineState(resetPipeline)
         resetEncoder.setBuffer(countBuffer, offset: 0, index: 0)
@@ -1427,7 +1501,10 @@ public class SplatRenderer: @unchecked Sendable {
         resetEncoder.endEncoding()
         
         // === Step 2: Frustum cull splats ===
-        guard let cullEncoder = commandBuffer.makeComputeCommandEncoder() else { return }
+        guard let cullEncoder = commandBuffer.makeComputeCommandEncoder() else {
+            Self.log.error("Failed to create compute encoder for frustum culling")
+            return
+        }
         cullEncoder.label = "Frustum Culling"
         cullEncoder.setComputePipelineState(cullPipeline)
         cullEncoder.setBuffer(splatBuffer.buffer, offset: 0, index: 0)
@@ -1444,7 +1521,10 @@ public class SplatRenderer: @unchecked Sendable {
         cullEncoder.endEncoding()
         
         // === Step 3: Generate indirect draw arguments ===
-        guard let argsEncoder = commandBuffer.makeComputeCommandEncoder() else { return }
+        guard let argsEncoder = commandBuffer.makeComputeCommandEncoder() else {
+            Self.log.error("Failed to create compute encoder for indirect draw args")
+            return
+        }
         argsEncoder.label = "Generate Indirect Draw Args"
         argsEncoder.setComputePipelineState(generateArgsPipeline)
         argsEncoder.setBuffer(argsBuffer, offset: 0, index: 0)
@@ -1677,7 +1757,7 @@ public class SplatRenderer: @unchecked Sendable {
                        depthStoreAction: MTLStoreAction = .dontCare,
                        rasterizationRateMap: MTLRasterizationRateMap?,
                        renderTargetArrayLength: Int,
-                       for commandBuffer: MTLCommandBuffer) -> MTLRenderCommandEncoder {
+                       for commandBuffer: MTLCommandBuffer) -> MTLRenderCommandEncoder? {
         let renderPassDescriptor = MTLRenderPassDescriptor()
         renderPassDescriptor.colorAttachments[0].texture = colorTexture
         renderPassDescriptor.colorAttachments[0].loadAction = colorLoadAction
@@ -1704,7 +1784,8 @@ public class SplatRenderer: @unchecked Sendable {
         }
 
         guard let renderEncoder = commandBuffer.makeRenderCommandEncoder(descriptor: renderPassDescriptor) else {
-            fatalError("Failed to create render encoder")
+            Self.log.error("Failed to create primary render encoder")
+            return nil
         }
 
         renderEncoder.label = "Primary Render Encoder"
@@ -1785,9 +1866,9 @@ public class SplatRenderer: @unchecked Sendable {
         if meshShaderEnabled && meshShadersSupported && !useCulledDitheredPath,
            let meshPipeline = meshShaderPipelineState,
            let meshDepth = meshShaderDepthState,
-           let sortedIndices = sortedIndicesBuffer {
+           let sortedIndices = getCurrentSortedIndicesBuffer() {
             
-            let renderEncoder = renderEncoder(multiStage: false,
+            guard let renderEncoder = renderEncoder(multiStage: false,
                                               viewports: viewports,
                                               colorTexture: colorTexture,
                                               colorLoadAction: colorLoadAction,
@@ -1796,8 +1877,10 @@ public class SplatRenderer: @unchecked Sendable {
                                               depthStoreAction: depthStoreAction,
                                               rasterizationRateMap: rasterizationRateMap,
                                               renderTargetArrayLength: renderTargetArrayLength,
-                                              for: commandBuffer)
-            
+                                              for: commandBuffer) else {
+                return
+            }
+
             renderEncoder.pushDebugGroup("Mesh Shader Splats")
             renderEncoder.setRenderPipelineState(meshPipeline)
             renderEncoder.setDepthStencilState(meshDepth)
@@ -1852,7 +1935,7 @@ public class SplatRenderer: @unchecked Sendable {
             try buildSingleStagePipelineStatesIfNeeded()
         }
 
-        let renderEncoder = renderEncoder(multiStage: multiStage,
+        guard let renderEncoder = renderEncoder(multiStage: multiStage,
                                           viewports: viewports,
                                           colorTexture: colorTexture,
                                           colorLoadAction: colorLoadAction,
@@ -1861,7 +1944,9 @@ public class SplatRenderer: @unchecked Sendable {
                                           depthStoreAction: depthStoreAction,
                                           rasterizationRateMap: rasterizationRateMap,
                                           renderTargetArrayLength: renderTargetArrayLength,
-                                          for: commandBuffer)
+                                          for: commandBuffer) else {
+            return
+        }
 
         let indexCount = indexedSplatCount * 6
         if indexBuffer.count < indexCount {
@@ -1938,7 +2023,7 @@ public class SplatRenderer: @unchecked Sendable {
             )
         } else {
             // Standard path: use sorted indices for correct alpha blending
-            if let sortedIndices = sortedIndicesBuffer {
+            if let sortedIndices = getCurrentSortedIndicesBuffer() {
                 renderEncoder.setVertexBuffer(sortedIndices.buffer, offset: 0, index: BufferIndex.sortedIndices.rawValue)
             }
 
@@ -2033,7 +2118,7 @@ public class SplatRenderer: @unchecked Sendable {
                 splatCount: splatCount,
                 frameTime: lastFrameTime,
                 sortBufferPoolStats: sortBufferStats,
-                sortJobsInFlight: sortJobsInFlight
+                sortJobsInFlight: getSortJobsInFlight()
             )
             frameReadyCallback(stats)
         }
@@ -2071,7 +2156,10 @@ public class SplatRenderer: @unchecked Sendable {
                 renderPassDescriptor.depthAttachment.storeAction = .store
             }
             
-            guard let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: renderPassDescriptor) else { return }
+            guard let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: renderPassDescriptor) else {
+                Self.log.warning("Failed to create render encoder for debug AABB")
+                return
+            }
             encoder.label = "Debug AABB Encoder"
             
             encoder.setRenderPipelineState(pipeline)
@@ -2100,37 +2188,17 @@ public class SplatRenderer: @unchecked Sendable {
         // Dispatch to main thread to serialize with render/update calls
         DispatchQueue.main.async { [weak self] in
             guard let self = self else {
-                // If self is deallocated, we can't release to pool, just let it leak
+                // If self is deallocated, the pool is also gone. The indexOutputBuffer
+                // will be freed when this closure completes (Metal buffers are refcounted).
                 return
             }
 
             // GPU-ONLY SORTING with double-buffering for async overlap
             // Swap buffers atomically - rendering continues with old buffer
             // until this completes, then switches to new buffer
-
-            // Release the "other" buffer (the one NOT currently being rendered)
-            if self.usingSortedBufferA {
-                // Currently rendering with A, so B is safe to replace
-                if let oldB = self.sortedIndicesBufferB {
-                    self.sortIndexBufferPool.release(oldB)
-                }
-                self.sortedIndicesBufferB = indexOutputBuffer
-            } else {
-                // Currently rendering with B, so A is safe to replace
-                if let oldA = self.sortedIndicesBufferA {
-                    self.sortIndexBufferPool.release(oldA)
-                }
-                self.sortedIndicesBufferA = indexOutputBuffer
+            if let oldBuffer = self.swapSortedIndicesBuffer(newBuffer: indexOutputBuffer) {
+                self.sortIndexBufferPool.release(oldBuffer)
             }
-
-            // Flip the active buffer for next render
-            // This is the "swap" - rendering will now use the newly sorted buffer
-            self.usingSortedBufferA = !self.usingSortedBufferA
-
-            // Update the main sortedIndicesBuffer pointer for compatibility
-            self.sortedIndicesBuffer = self.usingSortedBufferA
-                ? self.sortedIndicesBufferA
-                : self.sortedIndicesBufferB
 
             let elapsed = CFAbsoluteTimeGetCurrent() - sortStartTime
             self.lastSortDuration = elapsed
@@ -2142,7 +2210,7 @@ public class SplatRenderer: @unchecked Sendable {
                 self.sortDirtyDueToData = false
             }
             self.sorting = false
-            self.sortJobsInFlight -= 1
+            self.decrementSortJobsInFlight()
 
             Self.log.debug("Async sort completed in \(String(format: "%.1f", elapsed * 1000))ms")
 
@@ -2157,13 +2225,13 @@ public class SplatRenderer: @unchecked Sendable {
         guard !sorting else { return }
 
         // Prevent sort queue buildup - skip if too many sorts already in flight
-        guard self.sortJobsInFlight < self.maxConcurrentSorts else {
-            Self.log.debug("Skipping sort request - \(self.sortJobsInFlight) job(s) already in flight (max: \(self.maxConcurrentSorts))")
+        guard self.canStartNewSort() else {
+            Self.log.debug("Skipping sort request - \(self.getSortJobsInFlight()) job(s) already in flight (max: \(self.maxConcurrentSorts))")
             return
         }
 
         sorting = true
-        sortJobsInFlight += 1
+        self.incrementSortJobsInFlight()
         onSortStart?()
 
         let splatCount = splatBuffer.count
@@ -2193,7 +2261,7 @@ public class SplatRenderer: @unchecked Sendable {
                 } catch {
                     Self.log.error("Failed to acquire index output buffer from pool: \(error)")
                     self.sorting = false
-                    self.sortJobsInFlight -= 1
+                    self.decrementSortJobsInFlight()
                     return
                 }
 
@@ -2206,7 +2274,7 @@ public class SplatRenderer: @unchecked Sendable {
                         Self.log.error("Failed to create compute command buffer.")
                         sortIndexBufferPool.release(indexOutputBuffer)
                         self.sorting = false
-                        self.sortJobsInFlight -= 1
+                        self.decrementSortJobsInFlight()
                         return
                     }
 
@@ -2239,7 +2307,7 @@ public class SplatRenderer: @unchecked Sendable {
                         Self.log.error("Counting sort failed: \(error)")
                         sortIndexBufferPool.release(indexOutputBuffer)
                         self.sorting = false
-                        self.sortJobsInFlight -= 1
+                        self.decrementSortJobsInFlight()
                         return
                     }
 
@@ -2274,7 +2342,7 @@ public class SplatRenderer: @unchecked Sendable {
                         Self.log.error("Failed to acquire distance buffer from pool: \(error)")
                         sortIndexBufferPool.release(indexOutputBuffer)
                         self.sorting = false
-                        self.sortJobsInFlight -= 1
+                        self.decrementSortJobsInFlight()
                         return
                     }
 
@@ -2284,7 +2352,7 @@ public class SplatRenderer: @unchecked Sendable {
                         sortDistanceBufferPool.release(distanceBuffer)
                         sortIndexBufferPool.release(indexOutputBuffer)
                         self.sorting = false
-                        self.sortJobsInFlight -= 1
+                        self.decrementSortJobsInFlight()
                         return
                     }
 
@@ -2295,7 +2363,7 @@ public class SplatRenderer: @unchecked Sendable {
                         sortDistanceBufferPool.release(distanceBuffer)
                         sortIndexBufferPool.release(indexOutputBuffer)
                         self.sorting = false
-                        self.sortJobsInFlight -= 1
+                        self.decrementSortJobsInFlight()
                         return
                     }
 
@@ -2332,10 +2400,19 @@ public class SplatRenderer: @unchecked Sendable {
                         // Run argsort (synchronous, but we're in a completion handler so not blocking main thread)
                         // MPSArgSort's callAsFunction is synchronous but fast
                         let argSort = MPSArgSort(dataType: .float32, descending: true)
-                        argSort(commandQueue: sortQueue,
-                                input: distanceBuffer.buffer,
-                                output: indexOutputBuffer.buffer,
-                                count: splatCount)
+                        do {
+                            try argSort(commandQueue: sortQueue,
+                                    input: distanceBuffer.buffer,
+                                    output: indexOutputBuffer.buffer,
+                                    count: splatCount)
+                        } catch {
+                            Self.log.error("MPSArgSort failed: \(error)")
+                            self.sortDistanceBufferPool.release(distanceBuffer)
+                            self.sortIndexBufferPool.release(indexOutputBuffer)
+                            self.sorting = false
+                            self.decrementSortJobsInFlight()
+                            return
+                        }
 
                         // Release distance buffer (only used by MPS path)
                         self.sortDistanceBufferPool.release(distanceBuffer)
@@ -2408,7 +2485,7 @@ public class SplatRenderer: @unchecked Sendable {
                     self.sortDirtyDueToData = false
                 }
                 self.sorting = false
-                self.sortJobsInFlight -= 1
+                self.decrementSortJobsInFlight()
                 if self.shouldResortForCurrentCamera() {
                     self.resort(useGPU: useGPU)
                 }

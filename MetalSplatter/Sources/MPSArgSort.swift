@@ -32,20 +32,28 @@ public class MPSArgSort {
         }
     }
 
+    enum SortError: Error {
+        case failedToCreateCommandBuffer
+        case commandBufferFailed(Error?)
+    }
+
     func callAsFunction(
         commandQueue: any MTLCommandQueue,
         input: any MTLBuffer,
         output: any MTLBuffer,
         count: Int
-    ) {
-        autoreleasepool {
-            let commandBuffer = commandQueue.makeCommandBuffer()!
+    ) throws {
+        try autoreleasepool {
+            guard let commandBuffer = commandQueue.makeCommandBuffer() else {
+                throw SortError.failedToCreateCommandBuffer
+            }
             callAsFunction(commandBuffer: commandBuffer,
                            input: input,
                            output: output,
                            count: count)
-            assert(commandBuffer.error == nil)
-            assert(commandBuffer.status == .completed)
+            if commandBuffer.status != .completed {
+                throw SortError.commandBufferFailed(commandBuffer.error)
+            }
         }
     }
 
