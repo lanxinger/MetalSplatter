@@ -1778,8 +1778,11 @@ public class SplatRenderer: @unchecked Sendable {
         // =========================================================================
         // MESH SHADER PATH (Metal 3+)
         // Generates geometry entirely on GPU - significant performance improvement
+        // Note: Mesh shader path doesn't support frustum culling with dithered mode yet
+        // (would need indirect dispatch with visible count)
         // =========================================================================
-        if meshShaderEnabled && meshShadersSupported,
+        let useCulledDitheredPath = useDitheredTransparency && frustumCullingEnabled
+        if meshShaderEnabled && meshShadersSupported && !useCulledDitheredPath,
            let meshPipeline = meshShaderPipelineState,
            let meshDepth = meshShaderDepthState,
            let sortedIndices = sortedIndicesBuffer {
@@ -1915,22 +1918,37 @@ public class SplatRenderer: @unchecked Sendable {
 
         renderEncoder.setVertexBuffer(dynamicUniformBuffers, offset: uniformBufferOffset, index: BufferIndex.uniforms.rawValue)
         renderEncoder.setVertexBuffer(splatBuffer.buffer, offset: 0, index: BufferIndex.splat.rawValue)
-        
-        // GPU-only sorting: pass sorted indices buffer to shader
-        // Note: Frustum culling stats are computed but we still use sorted indices for correct rendering
-        // TODO: Implement sort-after-cull for true frustum culling with correct depth order
-        if let sortedIndices = sortedIndicesBuffer {
-            renderEncoder.setVertexBuffer(sortedIndices.buffer, offset: 0, index: BufferIndex.sortedIndices.rawValue)
-        }
 
-        // Standard draw with sorted indices (frustum culling computes stats only for now)
-        // Using unsorted visible indices causes severe flickering due to incorrect alpha blending
-        renderEncoder.drawIndexedPrimitives(type: .triangle,
-                                            indexCount: indexCount,
-                                            indexType: .uint32,
-                                            indexBuffer: indexBuffer.buffer,
-                                            indexBufferOffset: 0,
-                                            instanceCount: instanceCount)
+        // Dithered + Frustum Culling: use culled indices directly (order-independent)
+        // This avoids sorting entirely while still benefiting from frustum culling
+        if useDitheredTransparency && frustumCullingEnabled,
+           let visibleIndices = visibleIndicesBuffer,
+           let indirectArgs = indirectDrawArgsBuffer {
+            // Use culled visible indices (unsorted is fine for dithered transparency)
+            renderEncoder.setVertexBuffer(visibleIndices, offset: 0, index: BufferIndex.sortedIndices.rawValue)
+
+            // GPU-driven indirect draw using culled count from compute pass
+            renderEncoder.drawIndexedPrimitives(
+                type: MTLPrimitiveType.triangle,
+                indexType: MTLIndexType.uint32,
+                indexBuffer: indexBuffer.buffer,
+                indexBufferOffset: 0,
+                indirectBuffer: indirectArgs,
+                indirectBufferOffset: 0
+            )
+        } else {
+            // Standard path: use sorted indices for correct alpha blending
+            if let sortedIndices = sortedIndicesBuffer {
+                renderEncoder.setVertexBuffer(sortedIndices.buffer, offset: 0, index: BufferIndex.sortedIndices.rawValue)
+            }
+
+            renderEncoder.drawIndexedPrimitives(type: .triangle,
+                                                indexCount: indexCount,
+                                                indexType: .uint32,
+                                                indexBuffer: indexBuffer.buffer,
+                                                indexBufferOffset: 0,
+                                                instanceCount: instanceCount)
+        }
 
         if multiStage {
             guard let postprocessPipelineState
