@@ -1,6 +1,9 @@
 import Foundation
 import Metal
+import os
 import simd
+
+fileprivate let log = Logger(subsystem: Bundle.module.bundleIdentifier!, category: "SphericalHarmonicsEvaluator")
 
 /// Manages fast spherical harmonics evaluation for SOGS format
 public class SphericalHarmonicsEvaluator {
@@ -28,11 +31,18 @@ public class SphericalHarmonicsEvaluator {
         "L3,0 (z*(2zz-3xx-3yy))", "L3,1 (x*(4zz-xx-yy))", "L3,2 (z*(xx-yy))", "L3,3 (x*(xx-3yy))"
     ]
 
+    /// Validates that the SH coefficient count matches the expected count for the given degree.
+    /// - Returns: `true` if the layout is valid, `false` otherwise (logs a warning on mismatch).
     @inline(__always)
-    public static func validateLayout(degree: Int, coefficientCount: Int) {
+    @discardableResult
+    public static func validateLayout(degree: Int, coefficientCount: Int) -> Bool {
         let expected = coefficientCountForDegree(degree)
         let matchesSPZ = degree == 3 && coefficientCount == 15 // SPZ packs 15 coeffs; treated as degree 3
-        assert(coefficientCount == expected || matchesSPZ, "SH count \(coefficientCount) does not match degree \(degree); expected \(expected). Order: \(coefficientOrder)")
+        let isValid = coefficientCount == expected || matchesSPZ
+        if !isValid {
+            log.warning("SH coefficient count \(coefficientCount) does not match degree \(degree); expected \(expected). SH evaluation will be skipped.")
+        }
+        return isValid
     }
 
     /// Structure matching the Metal shader parameters
@@ -128,7 +138,9 @@ public class SphericalHarmonicsEvaluator {
     ) -> MTLBuffer? {
         if paletteSize > 0 {
             let coeffCount = (shPalette.length / MemoryLayout<SIMD3<Float>>.stride) / max(paletteSize, 1)
-            Self.validateLayout(degree: degree, coefficientCount: coeffCount)
+            guard Self.validateLayout(degree: degree, coefficientCount: coeffCount) else {
+                return nil
+            }
         }
 
         // Calculate buffer size for output
