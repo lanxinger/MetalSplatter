@@ -1,21 +1,31 @@
 #include <metal_stdlib>
-#include <metal_tensor>
 
-#if __METAL_VERSION__ >= 400
-#include <MetalPerformancePrimitives/MetalPerformancePrimitives.h>
-#endif
+// NOTE: <metal_tensor> and <MetalPerformancePrimitives/MetalPerformancePrimitives.h>
+// are NOT included here because:
+// 1. These headers may not be available in all SDK versions
+// 2. The kernels below don't actually use tensor<> or MPP TensorOps APIs
+// 3. Including unavailable headers would break builds
+//
+// When you're ready to use real MPP TensorOps (matmul2d, convolution2d), you would:
+// 1. Verify your SDK includes the headers
+// 2. Add: #include <metal_tensor>
+// 3. Add: #include <MetalPerformancePrimitives/MetalPerformancePrimitives.h>
+// 4. Use actual MPP APIs like: mpp::tensor_ops::matmul2d
 
 using namespace metal;
 
 // Import our common structures
 #include "SplatProcessing.h"
 
-// MARK: - Metal Performance Primitives for AR Matrix Operations
+// MARK: - AR Matrix Operations (Standard Metal, NOT MPP)
 
 #if __METAL_VERSION__ >= 400
-using namespace mpp;
 
-// AR-specific matrix operations using MPP for optimal performance
+// AR-specific batch matrix multiplication
+// NOTE: This is a standard Metal kernel, not using MPP TensorOps.
+// The "_mpp" suffix is kept for backward compatibility with ARSplatRenderer.
+// For actual MPP-accelerated matrix multiply, you would use:
+//   mpp::tensor_ops::matmul2d<descriptor, execution_simdgroup>
 [[user_annotation("ar_camera_transform_mpp")]]
 kernel void ar_camera_transform_mpp(
     device float4x4* camera_matrices [[buffer(0)]],
@@ -23,30 +33,34 @@ kernel void ar_camera_transform_mpp(
     device float4x4* result_transforms [[buffer(2)]],
     uint gid [[thread_position_in_grid]]
 ) {
-    // Perform matrix multiplication for AR camera transforms
-    // This provides better performance than CPU-side matrix ops
+    // Standard matrix multiplication - NOT using MPP
+    // This is still GPU-accelerated, just not using the specialized TensorOps path
     result_transforms[gid] = camera_matrices[gid] * model_transforms[gid];
 }
 
-// AR tracking state update using cooperative operations
-[[user_annotation("ar_tracking_update_cooperative")]]
-kernel void ar_tracking_update_cooperative(
+// AR tracking state update
+// NOTE: "cooperative" here refers to potential future use of cooperative_tensor,
+// but this implementation uses standard Metal operations.
+[[user_annotation("ar_tracking_update")]]
+kernel void ar_tracking_update(
     device float3* position_history [[buffer(0)]],
     device float4* rotation_history [[buffer(1)]],
     device float* confidence_scores [[buffer(2)]],
     device float4x4* updated_transforms [[buffer(3)]],
     uint gid [[thread_position_in_grid]]
 ) {
-    // Use cooperative operations for AR state prediction
-    // This would integrate with ARKit's tracking system for enhanced stability
+    // Standard Metal kernel for AR state updates
+    // Future enhancement: Use cooperative_tensor for ML-based prediction
 
-    // Example: Process tracking history using ML-based prediction
     if (gid == 0) {
-        // Access data for AR processing
-        // In real implementation, this would:
+        // Placeholder for AR processing logic:
         // 1. Analyze position/rotation trends
-        // 2. Predict next AR state using ML models
+        // 2. Predict next AR state
         // 3. Update transform matrices for stable rendering
+        (void)position_history;
+        (void)rotation_history;
+        (void)confidence_scores;
+        (void)updated_transforms;
     }
 }
 #endif
@@ -54,37 +68,36 @@ kernel void ar_tracking_update_cooperative(
 // MARK: - Enhanced AR Argument Buffer Structure
 
 // Comprehensive AR resource management for Metal 4
+// NOTE: The "tensor_data" fields below are raw float buffers, NOT Metal tensor<> types.
+// When Metal tensor<> types are adopted, these would change to:
+//   tensor<device float, dextents<int, 4>> surface_tensor [[id(7)]];
 struct ARMetal4Resources {
     // Camera input resources
     texture2d<float> camera_y [[id(0)]];
     texture2d<float> camera_cbcr [[id(1)]];
     texture2d<float> depth_texture [[id(2)]];
     texture2d<float> confidence_texture [[id(3)]];
-    
+
     // AR tracking and state data
     device float4x4* camera_transforms [[id(4)]];
     device float3* anchor_positions [[id(5)]];
     device float* tracking_confidence [[id(6)]];
-    
+
 #if __METAL_VERSION__ >= 400
-    // ML processing tensors (Metal 4.0+ only)
-    device float* surface_tensor_data [[id(7)]];
-    device float* object_tensor_data [[id(8)]];
+    // ML processing data buffers (raw float*, not tensor<> types)
+    // Future: Replace with tensor<device float, ...> when adopting MPP
+    device float* surface_data [[id(7)]];
+    device float* object_data [[id(8)]];
 #endif
-    
+
     // Enhanced splat resources
     device Splat* splat_data [[id(9)]];
     texture2d<float> splat_textures [[id(10)]];
-    
+
     // Occlusion and depth processing
     texture2d<float> occlusion_mask [[id(11)]];
     device float* depth_threshold_buffer [[id(12)]];
 };
-
-#if __METAL_VERSION__ >= 400
-// Note: user_annotation only applies to functions, not structs
-// ARMetal4Resources provides enhanced resource management for Metal 4
-#endif
 
 // MARK: - GPU-Driven AR Quality Management
 
@@ -198,34 +211,45 @@ kernel void ar_performance_monitor(
     }
 }
 
-// MARK: - Tensor-Based AR Features (Future Enhancement)
+// MARK: - Future ML/Tensor-Based AR Features
+//
+// NOTE: The structures below use raw float* buffers, NOT Metal tensor<> types.
+// This is a placeholder for future MPP TensorOps integration.
+//
+// When adopting real MPP, you would:
+// 1. Include <metal_tensor> and <MetalPerformancePrimitives/MetalPerformancePrimitives.h>
+// 2. Replace float* with tensor<device float, extents<...>>
+// 3. Use mpp::tensor_ops::matmul2d or convolution2d for ML inference
 
 #if __METAL_VERSION__ >= 400
-// Foundation for ML-based AR enhancements
-struct ARTensorProcessor {
-    // Object detection and tracking data
+
+// Placeholder structure for future ML processing (uses raw buffers, not tensor<>)
+struct ARMLDataBuffers {
+    // Object detection and tracking data (raw float buffers)
     device float* detection_input;
     device float* detection_output;
 
-    // Pose estimation data
+    // Pose estimation data (raw float buffers)
     device float* pose_input;
     device float* pose_output;
 
-    // Surface analysis data
+    // Surface analysis data (raw float buffers)
     device float* surface_input;
     device float* surface_confidence;
 };
 
-// Template for future ML-based AR processing
-[[user_annotation("ar_tensor_processing")]]
-kernel void ar_tensor_processing_template(
-    constant ARTensorProcessor& processor [[buffer(0)]],
+// Placeholder kernel for future ML-based AR processing
+// Currently does NOT use MPP TensorOps - would need real implementation
+[[user_annotation("ar_ml_processing_placeholder")]]
+kernel void ar_ml_processing_placeholder(
+    constant ARMLDataBuffers& buffers [[buffer(0)]],
     uint2 gid [[thread_position_in_grid]]
 ) {
-    // Placeholder for advanced tensor operations:
-    // - Real-time object detection
-    // - Enhanced pose estimation
-    // - Intelligent surface analysis
-    // - Predictive tracking
+    // PLACEHOLDER - Not implemented
+    // Future implementation would use MPP TensorOps:
+    //   mpp::tensor_ops::matmul2d for matrix operations
+    //   mpp::tensor_ops::convolution2d for conv layers
+    (void)buffers;
+    (void)gid;
 }
 #endif

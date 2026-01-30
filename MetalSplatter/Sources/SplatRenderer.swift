@@ -139,9 +139,10 @@ public class SplatRenderer: @unchecked Sendable {
     private var lastPrecomputeViewMatrix: simd_float4x4?
     public var batchPrecomputeEnabled = false  // Enable for large scenes
     
-    // PrecomputedSplat structure size (must match Metal shader)
-    // float4 clipPosition (16) + float3 cov2D (12) + float2 axis1 (8) + float2 axis2 (8) + float depth (4) + uint visible (4) = 52 bytes
-    private static let precomputedSplatStride = 52
+    // PrecomputedSplat structure size (must match Metal shader with proper alignment)
+    // Metal alignment: float4 (16) + float3 (12+4 padding) + float2 (8) + float2 (8) + float (4) + uint (4)
+    // = 56 bytes, rounded to 64 due to struct's 16-byte alignment (from float4/float3)
+    private static let precomputedSplatStride = 64
     
     public struct ViewportDescriptor {
         public var viewport: MTLViewport

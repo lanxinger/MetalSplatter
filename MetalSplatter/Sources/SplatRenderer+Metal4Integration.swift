@@ -91,6 +91,7 @@ extension SplatRenderer {
     // MARK: - Individual Metal 4.0 Rendering Paths
     
     /// Use Metal 4.0 SIMD-group operations for splat transformation
+    /// Uses batchTransformPositionsSIMD kernel from Metal4TensorOperations.metal
     @available(iOS 26.0, macOS 26.0, tvOS 26.0, visionOS 26.0, *)
     private func renderWithSIMDGroupOperations(
         encoder: MTLComputeCommandEncoder,
@@ -98,29 +99,52 @@ extension SplatRenderer {
         uniformsBuffer: MTLBuffer,
         splatCount: Int
     ) {
-        // Try to create pipeline state on-demand
-        guard let function = library.makeFunction(name: "metal4_simd_group_splatVertex"),
+        // Use actual compute kernel, not vertex shader
+        guard let function = library.makeFunction(name: "batchTransformPositionsSIMD"),
               let pipelineState = try? device.makeComputePipelineState(function: function) else {
-            Self.log.warning("Metal 4.0: SIMD-group pipeline not available")
+            Self.log.warning("Metal 4.0: SIMD-group compute pipeline not available (batchTransformPositionsSIMD)")
             return
         }
-        
+
+        // Allocate output buffers for transformed data
+        // Each thread processes 4 splats, so we need buffers for all splats
+        guard let viewPositionsBuffer = device.makeBuffer(length: splatCount * MemoryLayout<SIMD4<Float>>.stride, options: .storageModePrivate),
+              let clipPositionsBuffer = device.makeBuffer(length: splatCount * MemoryLayout<SIMD4<Float>>.stride, options: .storageModePrivate),
+              let depthsBuffer = device.makeBuffer(length: splatCount * MemoryLayout<Float>.stride, options: .storageModePrivate) else {
+            Self.log.error("Metal 4.0: Failed to create output buffers for SIMD transform")
+            return
+        }
+
+        var count = UInt32(splatCount)
+        guard let countBuffer = device.makeBuffer(bytes: &count, length: MemoryLayout<UInt32>.stride, options: .storageModeShared) else {
+            Self.log.error("Metal 4.0: Failed to create count buffer")
+            return
+        }
+
         encoder.setComputePipelineState(pipelineState)
         encoder.setBuffer(splatBuffer, offset: 0, index: 0)
-        encoder.setBuffer(uniformsBuffer, offset: uniformBufferOffset, index: 1)
-        
-        let threadsPerThreadgroup = MTLSize(width: 32, height: 1, depth: 1) // SIMD group size
+        encoder.setBuffer(viewPositionsBuffer, offset: 0, index: 1)
+        encoder.setBuffer(clipPositionsBuffer, offset: 0, index: 2)
+        encoder.setBuffer(depthsBuffer, offset: 0, index: 3)
+        encoder.setBuffer(uniformsBuffer, offset: uniformBufferOffset, index: 4)
+        encoder.setBuffer(countBuffer, offset: 0, index: 5)
+
+        // Each thread processes 4 splats
+        let splatsPerThread = 4
+        let threadCount = (splatCount + splatsPerThread - 1) / splatsPerThread
+        let threadsPerThreadgroup = MTLSize(width: 256, height: 1, depth: 1)
         let threadgroupsPerGrid = MTLSize(
-            width: (splatCount + threadsPerThreadgroup.width - 1) / threadsPerThreadgroup.width,
+            width: (threadCount + threadsPerThreadgroup.width - 1) / threadsPerThreadgroup.width,
             height: 1,
             depth: 1
         )
-        
+
         encoder.dispatchThreadgroups(threadgroupsPerGrid, threadsPerThreadgroup: threadsPerThreadgroup)
-        Self.log.debug("Metal 4.0: SIMD-group operations dispatched")
+        Self.log.debug("Metal 4.0: SIMD-group batch transform dispatched for \(splatCount) splats")
     }
     
     /// Use Metal 4.0 tensor operations for batch processing
+    /// Uses batchPrecomputeSplats kernel from Metal4TensorOperations.metal
     @available(iOS 26.0, macOS 26.0, tvOS 26.0, visionOS 26.0, *)
     private func renderWithTensorOperations(
         encoder: MTLComputeCommandEncoder,
@@ -128,36 +152,51 @@ extension SplatRenderer {
         uniformsBuffer: MTLBuffer,
         splatCount: Int
     ) {
-        // Try to create pipeline state on-demand
-        guard let function = library.makeFunction(name: "batch_transform_splats"),
+        // Use actual kernel name from Metal4TensorOperations.metal
+        guard let function = library.makeFunction(name: "batchPrecomputeSplats"),
               let pipelineState = try? device.makeComputePipelineState(function: function) else {
-            Self.log.warning("Metal 4.0: Tensor pipeline not available")
+            Self.log.warning("Metal 4.0: Batch precompute pipeline not available (batchPrecomputeSplats)")
             return
         }
-        
-        // Create temporary transformed buffer
-        guard let transformedBuffer = device.makeBuffer(
-            length: splatCount * MemoryLayout<TransformedSplat>.stride,
-            options: .storageModeShared) else {
-            Self.log.error("Metal 4.0: Failed to create transformed buffer")
+
+        // PrecomputedSplat alignment in Metal:
+        //   float4 clipPosition: offset 0, size 16 (16-byte aligned)
+        //   float3 cov2D:        offset 16, size 12 (16-byte aligned, 4 bytes padding follows)
+        //   float2 axis1:        offset 32, size 8  (8-byte aligned)
+        //   float2 axis2:        offset 40, size 8
+        //   float depth:         offset 48, size 4
+        //   uint visible:        offset 52, size 4
+        //   Total: 56 bytes, rounded to 64 due to struct's 16-byte alignment requirement
+        let precomputedSplatStride = 64
+        guard let precomputedBuffer = device.makeBuffer(
+            length: splatCount * precomputedSplatStride,
+            options: .storageModePrivate) else {
+            Self.log.error("Metal 4.0: Failed to create precomputed buffer")
             return
         }
-        
+
+        var count = UInt32(splatCount)
+        guard let countBuffer = device.makeBuffer(bytes: &count, length: MemoryLayout<UInt32>.stride, options: .storageModeShared) else {
+            Self.log.error("Metal 4.0: Failed to create count buffer")
+            return
+        }
+
         encoder.setComputePipelineState(pipelineState)
         encoder.setBuffer(splatBuffer, offset: 0, index: 0)
-        encoder.setBuffer(uniformsBuffer, offset: uniformBufferOffset, index: 1)
-        encoder.setBuffer(transformedBuffer, offset: 0, index: 2)
-        
-        // Use larger threadgroups for tensor operations
-        let threadsPerThreadgroup = MTLSize(width: 64, height: 1, depth: 1)
+        encoder.setBuffer(precomputedBuffer, offset: 0, index: 1)
+        encoder.setBuffer(uniformsBuffer, offset: uniformBufferOffset, index: 2)
+        encoder.setBuffer(countBuffer, offset: 0, index: 3)
+
+        // batchPrecomputeSplats uses max_total_threads_per_threadgroup(256)
+        let threadsPerThreadgroup = MTLSize(width: 256, height: 1, depth: 1)
         let threadgroupsPerGrid = MTLSize(
             width: (splatCount + threadsPerThreadgroup.width - 1) / threadsPerThreadgroup.width,
             height: 1,
             depth: 1
         )
-        
+
         encoder.dispatchThreadgroups(threadgroupsPerGrid, threadsPerThreadgroup: threadsPerThreadgroup)
-        Self.log.debug("Metal 4.0: Tensor batch operations dispatched")
+        Self.log.debug("Metal 4.0: Batch precompute dispatched for \(splatCount) splats")
     }
     
     /// Use Metal 4.0 mesh shaders for rendering (placeholder - mesh shaders need render pass)
@@ -181,12 +220,13 @@ extension SplatRenderer {
     internal func getMetal4Capabilities() -> Metal4Capabilities {
         if #available(iOS 26.0, macOS 26.0, tvOS 26.0, visionOS 26.0, *) {
             let available = device.supportsFamily(.apple9)
-            
+
+            // Check for actual kernel names from Metal4TensorOperations.metal and Metal4MeshShaders.metal
             return Metal4Capabilities(
                 available: available,
-                simdGroupOperations: available && library.makeFunction(name: "metal4_simd_group_splatVertex") != nil,
-                tensorOperations: available && library.makeFunction(name: "batch_transform_splats") != nil,
-                advancedAtomics: available && library.makeFunction(name: "atomic_radix_sort") != nil,
+                simdGroupOperations: available && library.makeFunction(name: "batchTransformPositionsSIMD") != nil,
+                tensorOperations: available && library.makeFunction(name: "batchPrecomputeSplats") != nil,
+                advancedAtomics: available && library.makeFunction(name: "countVisibleSplats") != nil,
                 meshShaders: available && library.makeFunction(name: "splatMeshShader") != nil
             )
         } else {
@@ -220,12 +260,9 @@ extension SplatRenderer {
     }
 }
 
-// MARK: - Supporting Structures
-
-/// Structure for tensor-transformed splat data
-private struct TransformedSplat {
-    let screenPosition: SIMD4<Float>
-    let scale: SIMD3<Float>
-    let rotation: SIMD4<Float>
-    let depth: Float
-}
+// MARK: - Supporting Notes
+//
+// The Metal 4 compute kernels use the following structures defined in Metal4TensorOperations.metal:
+// - PrecomputedSplat: clipPosition, cov2D, axis1, axis2, depth, visible (64 bytes with alignment)
+// - batchPrecomputeSplats: Main batch precompute kernel for large scenes (>10K splats)
+// - batchTransformPositionsSIMD: SIMD-optimized position transform for smaller scenes

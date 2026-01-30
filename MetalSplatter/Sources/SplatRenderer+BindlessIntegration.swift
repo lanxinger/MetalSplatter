@@ -4,17 +4,29 @@ import os
 
 // MARK: - Enhanced Bindless Integration for SplatRenderer
 
+// Associated object keys
+private nonisolated(unsafe) var bindlessPipelineStateKey: UInt8 = 0
+private nonisolated(unsafe) var bindlessArgumentBufferKey: UInt8 = 0
+
 extension SplatRenderer {
-    
-    /// Initialize enhanced Metal 4 bindless architecture
+
+    /// Initialize enhanced Metal 4 bindless architecture with proper pipeline setup
     @available(iOS 18.0, macOS 15.0, visionOS 2.0, *)
     public func initializeEnhancedBindless() throws {
         guard device.supportsFamily(.apple7) else {
             throw BindlessError.unsupportedDevice("Device must support Apple GPU Family 7+ for bindless")
         }
-        
+
         Self.log.info("Initializing enhanced Metal 4 bindless architecture...")
-        
+
+        // Create the bindless pipeline state using metal4_splatVertex/Fragment
+        let bindlessPipeline = try createBindlessPipelineState()
+        objc_setAssociatedObject(self, &bindlessPipelineStateKey, bindlessPipeline, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
+
+        // Create argument buffer matching SplatArgumentBuffer structure from Metal4ArgumentBuffer.metal
+        let argumentBuffer = try createBindlessArgumentBuffer()
+        objc_setAssociatedObject(self, &bindlessArgumentBufferKey, argumentBuffer, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
+
         // Create bindless architecture with optimized configuration
         let config = Metal4BindlessArchitecture.Configuration(
             maxResources: 2048,
@@ -25,20 +37,91 @@ extension SplatRenderer {
             enableResidencyTracking: true,
             resourceTableSize: 8192
         )
-        
+
         let bindlessArch = try Metal4BindlessArchitecture(device: device, configuration: config)
-        
+
         // Register existing resources for bindless access
         registerExistingResourcesForBindless(bindlessArch)
-        
-        // Store reference (would normally be a property)
+
+        // Store reference
         objc_setAssociatedObject(self, &bindlessArchitectureKey, bindlessArch, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
-        
+
         Self.log.info("✅ Enhanced bindless architecture initialized successfully")
+        Self.log.info("   • Bindless pipeline: metal4_splatVertex/Fragment")
         Self.log.info("   • Background resource population: ENABLED")
         Self.log.info("   • Residency tracking: ENABLED")
         Self.log.info("   • Per-draw binding: ELIMINATED")
         Self.log.info("   • Expected CPU overhead reduction: 50-80%")
+    }
+
+    /// Create the bindless render pipeline state using Metal4ArgumentBuffer shaders
+    @available(iOS 18.0, macOS 15.0, visionOS 2.0, *)
+    private func createBindlessPipelineState() throws -> MTLRenderPipelineState {
+        guard let vertexFunction = library.makeFunction(name: "metal4_splatVertex"),
+              let fragmentFunction = library.makeFunction(name: "metal4_splatFragment") else {
+            throw SplatRendererError.failedToLoadShaderFunction(name: "metal4_splatVertex/Fragment")
+        }
+
+        let pipelineDescriptor = MTLRenderPipelineDescriptor()
+        pipelineDescriptor.label = "Bindless Splat Pipeline"
+        pipelineDescriptor.vertexFunction = vertexFunction
+        pipelineDescriptor.fragmentFunction = fragmentFunction
+
+        // Match the renderer's configured formats (not hard-coded)
+        pipelineDescriptor.colorAttachments[0].pixelFormat = colorFormat
+        pipelineDescriptor.colorAttachments[0].isBlendingEnabled = true
+        pipelineDescriptor.colorAttachments[0].sourceRGBBlendFactor = .one
+        pipelineDescriptor.colorAttachments[0].destinationRGBBlendFactor = .oneMinusSourceAlpha
+        pipelineDescriptor.colorAttachments[0].sourceAlphaBlendFactor = .one
+        pipelineDescriptor.colorAttachments[0].destinationAlphaBlendFactor = .oneMinusSourceAlpha
+
+        pipelineDescriptor.depthAttachmentPixelFormat = depthFormat
+        pipelineDescriptor.rasterSampleCount = sampleCount
+
+        // Enable vertex amplification for stereo rendering (VisionOS)
+        pipelineDescriptor.maxVertexAmplificationCount = maxViewCount
+
+        do {
+            return try device.makeRenderPipelineState(descriptor: pipelineDescriptor)
+        } catch {
+            throw SplatRendererError.failedToCreateRenderPipelineState(label: "Bindless Splat", underlying: error)
+        }
+    }
+
+    /// Create argument buffer matching SplatArgumentBuffer structure from Metal4ArgumentBuffer.metal
+    @available(iOS 18.0, macOS 15.0, visionOS 2.0, *)
+    private func createBindlessArgumentBuffer() throws -> MTLBuffer {
+        // SplatArgumentBuffer has:
+        //   device Splat *splatBuffer [[id(0)]];
+        //   constant UniformsArray &uniformsArray [[id(1)]];
+        guard let vertexFunction = library.makeFunction(name: "metal4_splatVertex") else {
+            throw SplatRendererError.failedToLoadShaderFunction(name: "metal4_splatVertex")
+        }
+
+        // makeArgumentEncoder returns non-optional MTLArgumentEncoder
+        let argumentEncoder = vertexFunction.makeArgumentEncoder(bufferIndex: 0)
+
+        guard let argumentBuffer = device.makeBuffer(length: argumentEncoder.encodedLength, options: .storageModeShared) else {
+            throw BindlessError.argumentBufferCreationFailed
+        }
+
+        argumentBuffer.label = "Bindless SplatArgumentBuffer"
+        return argumentBuffer
+    }
+
+    /// Update the argument buffer with current resources before rendering
+    @available(iOS 18.0, macOS 15.0, visionOS 2.0, *)
+    private func updateBindlessArgumentBuffer() {
+        guard let argumentBuffer = objc_getAssociatedObject(self, &bindlessArgumentBufferKey) as? MTLBuffer,
+              let vertexFunction = library.makeFunction(name: "metal4_splatVertex") else {
+            return
+        }
+
+        // makeArgumentEncoder returns non-optional MTLArgumentEncoder
+        let argumentEncoder = vertexFunction.makeArgumentEncoder(bufferIndex: 0)
+        argumentEncoder.setArgumentBuffer(argumentBuffer, offset: 0)
+        argumentEncoder.setBuffer(splatBuffer.buffer, offset: 0, index: 0)  // splatBuffer [[id(0)]]
+        argumentEncoder.setBuffer(dynamicUniformBuffers, offset: uniformBufferOffset, index: 1)  // uniformsArray [[id(1)]]
     }
     
     /// Register existing buffers for bindless access
@@ -69,6 +152,7 @@ extension SplatRenderer {
     }
     
     /// Enhanced render method using bindless architecture - ZERO per-draw binding
+    /// Uses metal4_splatVertex/Fragment from Metal4ArgumentBuffer.metal
     @available(iOS 18.0, macOS 15.0, visionOS 2.0, *)
     public func renderWithBindless(
         viewports: [ViewportDescriptor],
@@ -82,8 +166,11 @@ extension SplatRenderer {
         to commandBuffer: MTLCommandBuffer
     ) throws {
 
-        guard let bindless = getBindlessArchitecture() else {
-            // Fallback to standard rendering
+        // Require both bindless architecture AND the dedicated pipeline
+        guard let bindless = getBindlessArchitecture(),
+              let bindlessPipeline = getBindlessPipelineState(),
+              let argumentBuffer = getBindlessArgumentBuffer() else {
+            // Fallback to standard rendering if bindless isn't fully initialized
             try render(
                 viewports: viewports,
                 colorTexture: colorTexture,
@@ -97,70 +184,65 @@ extension SplatRenderer {
             )
             return
         }
-        
+
         let splatCount = splatBuffer.count
         guard splatCount > 0 else { return }
-        
+
         let indexedSplatCount = min(splatCount, Constants.maxIndexedSplatCount)
         let instanceCount = (splatCount + indexedSplatCount - 1) / indexedSplatCount
-        
+
         // Update uniforms using internal methods
         switchToNextDynamicBuffer()
         updateUniforms(forViewports: viewports, splatCount: UInt32(splatCount), indexedSplatCount: UInt32(indexedSplatCount))
-        
+
+        // Update the argument buffer with current resources
+        updateBindlessArgumentBuffer()
+
         // Setup render pass
         let renderPassDescriptor = MTLRenderPassDescriptor()
         renderPassDescriptor.colorAttachments[0].texture = colorTexture
         renderPassDescriptor.colorAttachments[0].loadAction = colorLoadAction
         renderPassDescriptor.colorAttachments[0].storeAction = colorStoreAction
         renderPassDescriptor.colorAttachments[0].clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 0)
-        
+
         if let depthTexture = depthTexture {
             renderPassDescriptor.depthAttachment.texture = depthTexture
             renderPassDescriptor.depthAttachment.loadAction = .clear
             renderPassDescriptor.depthAttachment.storeAction = depthStoreAction
             renderPassDescriptor.depthAttachment.clearDepth = 0.0
         }
-        
+
         guard let renderEncoder = commandBuffer.makeRenderCommandEncoder(descriptor: renderPassDescriptor) else {
             throw SplatRendererError.failedToCreateRenderEncoder
         }
-        
-        renderEncoder.label = "Bindless Splat Render"
-        
-        // *** CRITICAL: Bind resources ONCE for entire render pass ***
-        // No per-draw binding needed!
-        bindless.bindToRenderEncoder(renderEncoder)
-        
-        // Update residency for visible resources
-        let visibleHandles = getVisibleResourceHandles(viewports: viewports)
-        bindless.updateResidency(visibleHandles: visibleHandles, commandBuffer: commandBuffer)
-        
-        // Configure render state
-        renderEncoder.setViewports(viewports.map(\.viewport))
-        
-        // Use appropriate pipeline state based on multi-stage configuration
-        if useMultiStagePipeline {
-            guard let drawSplatPipelineState = drawSplatPipelineState,
-                  let drawSplatDepthState = drawSplatDepthState else {
-                throw SplatRendererError.failedToCreateRenderPipelineState(label: "DrawSplat", underlying: NSError(domain: "MetalSplatter", code: 1, userInfo: [NSLocalizedDescriptionKey: "Pipeline state not initialized for bindless rendering"]))
-            }
-            renderEncoder.setRenderPipelineState(drawSplatPipelineState)
-            renderEncoder.setDepthStencilState(drawSplatDepthState)
-        } else {
-            guard let singleStagePipelineState = singleStagePipelineState,
-                  let singleStageDepthState = singleStageDepthState else {
-                throw SplatRendererError.failedToCreateRenderPipelineState(label: "SingleStage", underlying: NSError(domain: "MetalSplatter", code: 1, userInfo: [NSLocalizedDescriptionKey: "Pipeline state not initialized for bindless rendering"]))
-            }
-            renderEncoder.setRenderPipelineState(singleStagePipelineState)
-            renderEncoder.setDepthStencilState(singleStageDepthState)
+
+        renderEncoder.label = "Bindless Splat Render (metal4_splatVertex/Fragment)"
+
+        // *** USE BINDLESS PIPELINE - metal4_splatVertex/Fragment ***
+        renderEncoder.setRenderPipelineState(bindlessPipeline)
+
+        // Set depth state (reuse existing depth state)
+        if let depthState = singleStageDepthState {
+            renderEncoder.setDepthStencilState(depthState)
         }
         renderEncoder.setCullMode(.none)
-        
-        // *** Draw WITHOUT any setBuffer calls! ***
-        // All resources are accessed through the bindless argument buffer
-        
-        // Use indexed rendering like the main SplatRenderer
+
+        // Configure render state
+        renderEncoder.setViewports(viewports.map(\.viewport))
+
+        // *** BIND ARGUMENT BUFFER ONCE - matches SplatArgumentBuffer structure ***
+        // The argument buffer contains splatBuffer and uniformsArray
+        renderEncoder.setVertexBuffer(argumentBuffer, offset: 0, index: 0)
+
+        // Mark resources as used (required for argument buffer resources)
+        renderEncoder.useResource(splatBuffer.buffer, usage: .read, stages: .vertex)
+        renderEncoder.useResource(dynamicUniformBuffers, usage: .read, stages: .vertex)
+
+        // Update residency for visible resources (for the generic bindless architecture)
+        let visibleHandles = getVisibleResourceHandles(viewports: viewports)
+        bindless.updateResidency(visibleHandles: visibleHandles, commandBuffer: commandBuffer)
+
+        // *** Draw - shader accesses resources through argument buffer ***
         let indexCount = min(indexedSplatCount * 6, indexBuffer.count)
         renderEncoder.drawIndexedPrimitives(
             type: .triangle,
@@ -170,11 +252,23 @@ extension SplatRenderer {
             indexBufferOffset: 0,
             instanceCount: instanceCount
         )
-        
+
         renderEncoder.endEncoding()
-        
+
         // Log performance improvement
         logBindlessPerformance(bindless)
+    }
+
+    /// Get associated bindless pipeline state
+    @available(iOS 18.0, macOS 15.0, visionOS 2.0, *)
+    private func getBindlessPipelineState() -> MTLRenderPipelineState? {
+        return objc_getAssociatedObject(self, &bindlessPipelineStateKey) as? MTLRenderPipelineState
+    }
+
+    /// Get associated bindless argument buffer
+    @available(iOS 18.0, macOS 15.0, visionOS 2.0, *)
+    private func getBindlessArgumentBuffer() -> MTLBuffer? {
+        return objc_getAssociatedObject(self, &bindlessArgumentBufferKey) as? MTLBuffer
     }
     
     /// Get visible resource handles for residency management
@@ -243,52 +337,48 @@ extension SplatRenderer {
 // Associated object key for storing bindless architecture
 private nonisolated(unsafe) var bindlessArchitectureKey: UInt8 = 0
 
-// MARK: - Shader Integration Support
+// MARK: - Shader Integration Support (Demo Code - Not Production)
+//
+// NOTE: The actual production bindless shaders are in Metal4ArgumentBuffer.metal:
+//   - metal4_splatVertex: Uses SplatArgumentBuffer at buffer(0)
+//   - metal4_splatFragment: Standard fragment processing
+//
+// The code below is a demo/placeholder showing an alternative resource table approach.
+// It is NOT used in production rendering.
 
 extension SplatRenderer {
-    
-    /// Create Metal shaders that support bindless resource access
+
+    /// Demo: Illustrative bindless shader patterns (NOT USED IN PRODUCTION)
+    ///
+    /// Production bindless rendering uses:
+    /// - Metal4ArgumentBuffer.metal: metal4_splatVertex / metal4_splatFragment
+    /// - SplatArgumentBuffer struct with splatBuffer and uniformsArray
+    ///
+    /// This method is kept for documentation purposes only.
     @available(iOS 18.0, macOS 15.0, visionOS 2.0, *)
     internal func createBindlessShaders() throws {
-        // This would compile shaders with bindless support
-        // The shaders would access resources through argument buffer indices
-        // rather than traditional buffer bindings
-        
+        // DEMO ONLY - Shows alternative resource table pattern
+        // The actual shaders used are in Metal4ArgumentBuffer.metal
         let _ = """
-        #include <metal_stdlib>
-        using namespace metal;
-        
-        // Bindless resource table
+        // DEMO CODE - NOT USED IN PRODUCTION
+        // See Metal4ArgumentBuffer.metal for actual implementation
+        //
+        // Alternative pattern using resource table (not currently implemented):
         struct ResourceTable {
             device void* resources[4096];
         };
-        
-        // Access splat data through bindless handle
-        struct Splat {
-            float3 position;
-            float3 color;
-            float4 cov3d0;
-            float2 cov3d1;
-            float opacity;
-        };
-        
-        vertex VertexOut bindlessSplatVertex(
+
+        vertex VertexOut demoBindlessVertex(
             uint vertexID [[vertex_id]],
             uint instanceID [[instance_id]],
-            constant void* argumentBuffer [[buffer(30)]],
             constant ResourceTable& resourceTable [[buffer(31)]]
         ) {
-            // Access resources through bindless handles
-            // No direct buffer binding needed!
-            
-            uint splatHandle = instanceID; // Resource handle from table
-            device Splat* splats = (device Splat*)resourceTable.resources[splatHandle];
-            
-            // Rest of vertex shader logic...
+            // Demo: Access resources through handles
+            // Production uses SplatArgumentBuffer instead
         }
         """
-        
-        Self.log.info("Bindless shaders ready for compilation")
+
+        Self.log.info("Note: Production bindless uses metal4_splatVertex/Fragment from Metal4ArgumentBuffer.metal")
     }
 }
 
