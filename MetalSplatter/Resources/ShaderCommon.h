@@ -7,6 +7,9 @@ constant const int kMaxViewCount = 2;
 constant static const half kBoundsRadius = 3;
 constant static const half kBoundsRadiusSquared = kBoundsRadius*kBoundsRadius;
 
+// Small epsilon to prevent division by zero in projection calculations
+constant static const float kDivisionEpsilon = 1e-6f;
+
 enum BufferIndex: int32_t
 {
     BufferIndexUniforms      = 0,

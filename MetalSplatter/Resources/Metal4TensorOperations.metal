@@ -39,8 +39,7 @@ struct PrecomputedSplat {
 // MARK: - Helper Functions
 // -----------------------------------------------------------------------------
 
-// Small epsilon to prevent division by zero
-constant constexpr float kDivisionEpsilon = 1e-6f;
+// kDivisionEpsilon is defined in ShaderCommon.h
 
 // Compute 2D covariance from 3D covariance and view parameters
 inline float3 computeCovariance2D(float3 viewPos,

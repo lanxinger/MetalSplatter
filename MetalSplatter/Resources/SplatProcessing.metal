@@ -1,9 +1,7 @@
 #import "SplatProcessing.h"
 
 // Debug flags moved to SplatProcessing.h
-
-// Small epsilon to prevent division by zero
-constant constexpr float kDivisionEpsilon = 1e-6f;
+// kDivisionEpsilon is defined in ShaderCommon.h (via SplatProcessing.h)
 
 float3 calcCovariance2D(float3 viewPos,
                         packed_half3 cov3Da,

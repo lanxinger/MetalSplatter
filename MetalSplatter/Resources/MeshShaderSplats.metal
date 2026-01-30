@@ -56,8 +56,7 @@ using SplatMeshType = metal::mesh<MeshVertexOutput, void, MAX_VERTICES, MAX_PRIM
 // MARK: - Helper Functions
 // =============================================================================
 
-// Small epsilon to prevent division by zero
-constant constexpr float kDivisionEpsilon = 1e-6f;
+// kDivisionEpsilon is defined in ShaderCommon.h
 
 inline float3 meshCalcCovariance2D(float3 viewPos,
                                     packed_half3 cov3Da,
