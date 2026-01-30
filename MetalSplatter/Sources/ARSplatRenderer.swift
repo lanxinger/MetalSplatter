@@ -151,6 +151,14 @@ public class ARSplatRenderer: NSObject, @unchecked Sendable {
         set { splatRenderer.usePackedColors = newValue }
     }
 
+    /// Enable/disable high-quality depth (multi-stage pipeline)
+    /// When false, enables mesh shaders for 2-4x faster geometry generation
+    /// High-quality depth is mainly beneficial for visionOS reprojection
+    public var highQualityDepth: Bool {
+        get { splatRenderer.highQualityDepth }
+        set { splatRenderer.highQualityDepth = newValue }
+    }
+
     /// Enable/disable Fast SH evaluation (if FastSHSplatRenderer is in use)
     public var fastSHEnabled: Bool {
         get { fastSHRenderer?.fastSHConfig.enabled ?? false }
