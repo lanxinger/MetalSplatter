@@ -136,7 +136,21 @@ public class ARSplatRenderer: NSObject, @unchecked Sendable {
         get { splatRenderer.frustumCullingEnabled }
         set { splatRenderer.frustumCullingEnabled = newValue }
     }
-    
+
+    /// Enable/disable Metal 4 GPU radix sorting
+    /// Uses advanced atomics for GPU-accelerated stable radix sort (best for >100K splats)
+    public var useMetal4Sorting: Bool {
+        get { splatRenderer.useMetal4Sorting }
+        set { splatRenderer.useMetal4Sorting = newValue }
+    }
+
+    /// Enable/disable snorm10a2 packed colors for bandwidth optimization
+    /// Packs RGBA into 4 bytes instead of 8 bytes (half4)
+    public var usePackedColors: Bool {
+        get { splatRenderer.usePackedColors }
+        set { splatRenderer.usePackedColors = newValue }
+    }
+
     /// Enable/disable Fast SH evaluation (if FastSHSplatRenderer is in use)
     public var fastSHEnabled: Bool {
         get { fastSHRenderer?.fastSHConfig.enabled ?? false }
