@@ -1,4 +1,4 @@
-// swift-tools-version: 6.0
+// swift-tools-version: 6.2
 
 import PackageDescription
 
@@ -39,28 +39,32 @@ let package = Package(
         .target(
             name: "PLYIO",
             path: "PLYIO",
+            exclude: [ "Tests", "TestData" ],
             sources: [ "Sources" ]
         ),
         .testTarget(
             name: "PLYIOTests",
             dependencies: [ "PLYIO" ],
             path: "PLYIO",
+            exclude: [ "Sources" ],
             sources: [ "Tests" ],
             resources: [ .copy("TestData") ]
         ),
         .target(
             name: "SplatIO",
-            dependencies: [ 
+            dependencies: [
                 "PLYIO",
                 .product(name: "ZIPFoundation", package: "ZIPFoundation")
             ],
             path: "SplatIO",
+            exclude: [ "Tests", "TestData" ],
             sources: [ "Sources" ]
         ),
         .testTarget(
             name: "SplatIOTests",
             dependencies: [ "SplatIO" ],
             path: "SplatIO",
+            exclude: [ "Sources" ],
             sources: [ "Tests" ],
             resources: [ .copy("TestData") ]
         ),
@@ -68,6 +72,7 @@ let package = Package(
             name: "MetalSplatter",
             dependencies: [ "PLYIO", "SplatIO" ],
             path: "MetalSplatter",
+            exclude: [ "Tests" ],
             sources: [ "Sources" ],
             resources: [ .process("Resources") ]
         ),
@@ -75,6 +80,7 @@ let package = Package(
             name: "MetalSplatterTests",
             dependencies: [ "MetalSplatter" ],
             path: "MetalSplatter",
+            exclude: [ "Sources", "Resources" ],
             sources: [ "Tests" ]
         ),
         .target(
