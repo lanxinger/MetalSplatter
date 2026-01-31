@@ -112,8 +112,14 @@ public class MetalBufferPool<T> {
     )
     
     // MARK: - Memory Pressure Monitoring
-    
+
     private var memoryPressureSource: DispatchSourceMemoryPressure?
+
+    // MARK: - Notification Observers (must be removed in deinit to avoid leaks)
+
+    #if canImport(UIKit)
+    private var notificationObservers: [NSObjectProtocol] = []
+    #endif
     
     // MARK: - Initialization
     
@@ -134,27 +140,38 @@ public class MetalBufferPool<T> {
         }
         
         // Setup app lifecycle notifications for cleanup
+        // Store observer tokens to remove in deinit (fixes observer leak)
         #if canImport(UIKit)
-        NotificationCenter.default.addObserver(
+        let memoryWarningObserver = NotificationCenter.default.addObserver(
             forName: UIApplication.didReceiveMemoryWarningNotification,
             object: nil,
             queue: .main
         ) { [weak self] _ in
             self?.handleMemoryPressure(.critical)
         }
-        
-        NotificationCenter.default.addObserver(
+        notificationObservers.append(memoryWarningObserver)
+
+        let backgroundObserver = NotificationCenter.default.addObserver(
             forName: UIApplication.didEnterBackgroundNotification,
             object: nil,
             queue: .main
         ) { [weak self] _ in
             self?.trimToMemoryPressure()
         }
+        notificationObservers.append(backgroundObserver)
         #endif
     }
-    
+
     deinit {
         memoryPressureSource?.cancel()
+
+        // Remove notification observers to prevent leaks
+        #if canImport(UIKit)
+        for observer in notificationObservers {
+            NotificationCenter.default.removeObserver(observer)
+        }
+        #endif
+
         clearAll()
     }
     

@@ -453,6 +453,24 @@ public class SplatRenderer: @unchecked Sendable {
     /// Revision counter for color-only updates (allows skipping sort on color changes)
     private var colorRevision: UInt64 = 0
 
+    // MARK: - Staged Color Updates (GPU Race Prevention)
+    // Color updates are staged and applied at render start to avoid CPU/GPU data races.
+    // Direct writes to splatBuffer while GPU is reading cause undefined behavior.
+    // Updates are applied in FIFO order to preserve "last write wins" semantics.
+
+    /// Staged color update types - applied in order to preserve call semantics
+    private enum PendingColorUpdate {
+        case full([SIMD4<Float>])
+        case range([SIMD4<Float>], Range<Int>)
+        case single(SIMD4<Float>, Int)
+    }
+
+    /// Ordered queue of pending color updates (FIFO)
+    private var pendingColorUpdates: [PendingColorUpdate] = []
+
+    /// Lock protecting pending color update queue
+    private var pendingColorUpdateLock = os_unfair_lock()
+
     typealias IndexType = UInt32
     
     // Buffer pools for efficient memory management
@@ -504,6 +522,11 @@ public class SplatRenderer: @unchecked Sendable {
 
     // O(n) Counting Sort - faster than MPS argSort for large splat counts
     private var countingSorter: CountingSorter?
+
+    // Cached MPS ArgSort - avoids graph recompilation per frame (perf fix)
+    private lazy var cachedMPSArgSort: MPSArgSort = {
+        MPSArgSort(dataType: .float32, descending: true)
+    }()
 
     /// When true, uses O(n) counting sort instead of O(n log n) MPS argSort.
     /// Counting sort is faster for large splat counts (>50K) and provides
@@ -1357,6 +1380,9 @@ public class SplatRenderer: @unchecked Sendable {
     /// - Skips bounds recalculation
     /// - Only updates the color portion of the GPU buffer
     ///
+    /// Thread-safe: Updates are staged and applied at the start of the next render
+    /// to avoid CPU/GPU data races on shared buffers. Call order is preserved.
+    ///
     /// - Parameter colors: Array of new colors (RGBA), must match current splat count
     public func updateColorsOnly(_ colors: [SIMD4<Float>]) {
         let count = splatCount
@@ -1365,13 +1391,12 @@ public class SplatRenderer: @unchecked Sendable {
             return
         }
 
-        // Update colors in the splat buffer without touching geometry
-        for i in 0..<count {
-            let c = colors[i]
-            splatBuffer.values[i].color = PackedRGBHalf4(
-                r: Float16(c.x), g: Float16(c.y), b: Float16(c.z), a: Float16(c.w)
-            )
-        }
+        // Stage the update to avoid CPU/GPU race on shared buffer.
+        // Full update clears pending queue since it overwrites everything.
+        os_unfair_lock_lock(&pendingColorUpdateLock)
+        pendingColorUpdates.removeAll()
+        pendingColorUpdates.append(.full(colors))
+        os_unfair_lock_unlock(&pendingColorUpdateLock)
 
         // Mark only colors as dirty, NOT geometry
         colorsDirty = true
@@ -1384,6 +1409,7 @@ public class SplatRenderer: @unchecked Sendable {
     }
 
     /// Updates colors for a range of splats without triggering re-sorting.
+    /// Thread-safe: Updates are staged and applied at render start. Call order is preserved.
     /// - Parameters:
     ///   - colors: Array of new colors (RGBA)
     ///   - range: Index range to update
@@ -1398,18 +1424,16 @@ public class SplatRenderer: @unchecked Sendable {
             return
         }
 
-        for (i, colorIndex) in range.enumerated() {
-            let c = colors[i]
-            splatBuffer.values[colorIndex].color = PackedRGBHalf4(
-                r: Float16(c.x), g: Float16(c.y), b: Float16(c.z), a: Float16(c.w)
-            )
-        }
+        os_unfair_lock_lock(&pendingColorUpdateLock)
+        pendingColorUpdates.append(.range(colors, range))
+        os_unfair_lock_unlock(&pendingColorUpdateLock)
 
         colorsDirty = true
         colorRevision &+= 1
     }
 
     /// Updates a single splat's color without triggering re-sorting.
+    /// Thread-safe: Updates are staged and applied at render start. Call order is preserved.
     /// - Parameters:
     ///   - color: New color value (RGBA)
     ///   - index: Splat index to update
@@ -1420,11 +1444,50 @@ public class SplatRenderer: @unchecked Sendable {
             return
         }
 
-        splatBuffer.values[index].color = PackedRGBHalf4(
-            r: Float16(color.x), g: Float16(color.y), b: Float16(color.z), a: Float16(color.w)
-        )
+        os_unfair_lock_lock(&pendingColorUpdateLock)
+        pendingColorUpdates.append(.single(color, index))
+        os_unfair_lock_unlock(&pendingColorUpdateLock)
+
         colorsDirty = true
         colorRevision &+= 1
+    }
+
+    /// Applies any pending color updates to the splat buffer in FIFO order.
+    /// Must be called at render start, before any GPU work that reads from splatBuffer.
+    /// This ensures CPU writes complete before GPU reads begin.
+    private func applyPendingColorUpdates() {
+        os_unfair_lock_lock(&pendingColorUpdateLock)
+        let updates = pendingColorUpdates
+        pendingColorUpdates.removeAll()
+        os_unfair_lock_unlock(&pendingColorUpdateLock)
+
+        guard !updates.isEmpty else { return }
+
+        // Apply updates in order to preserve "last write wins" semantics
+        for update in updates {
+            switch update {
+            case .full(let colors):
+                for i in 0..<min(colors.count, splatBuffer.count) {
+                    let c = colors[i]
+                    splatBuffer.values[i].color = PackedRGBHalf4(
+                        r: Float16(c.x), g: Float16(c.y), b: Float16(c.z), a: Float16(c.w)
+                    )
+                }
+            case .range(let colors, let range):
+                for (i, colorIndex) in range.enumerated() where colorIndex < splatBuffer.count {
+                    let c = colors[i]
+                    splatBuffer.values[colorIndex].color = PackedRGBHalf4(
+                        r: Float16(c.x), g: Float16(c.y), b: Float16(c.z), a: Float16(c.w)
+                    )
+                }
+            case .single(let color, let index):
+                guard index < splatBuffer.count else { continue }
+                splatBuffer.values[index].color = PackedRGBHalf4(
+                    r: Float16(color.x), g: Float16(color.y),
+                    b: Float16(color.z), a: Float16(color.w)
+                )
+            }
+        }
     }
 
     /// Marks that geometry has changed and requires re-sorting and bounds update.
@@ -2028,7 +2091,8 @@ public class SplatRenderer: @unchecked Sendable {
     internal func updateUniforms(forViewports viewports: [ViewportDescriptor],
                                 splatCount: UInt32,
                                 indexedSplatCount: UInt32) {
-        for (i, viewport) in viewports.enumerated() where i <= maxViewCount {
+        // Clamp to maxViewCount to avoid buffer overrun (off-by-one fix: use < not <=)
+        for (i, viewport) in viewports.prefix(maxViewCount).enumerated() {
             let debugFlags = debugOptions.rawValue
             let uniforms = Uniforms(projectionMatrix: viewport.projectionMatrix,
                                     viewMatrix: viewport.viewMatrix,
@@ -2110,17 +2174,21 @@ public class SplatRenderer: @unchecked Sendable {
 
         renderEncoder.label = "Primary Render Encoder"
 
-        renderEncoder.setViewports(viewports.map(\.viewport))
+        // Clamp viewports to pipeline's maxVertexAmplificationCount to avoid Metal validation errors
+        let clampedViewportCount = min(viewports.count, maxViewCount)
+        let activeViewports = Array(viewports.prefix(clampedViewportCount))
 
-        if viewports.count > 1 {
+        renderEncoder.setViewports(activeViewports.map(\.viewport))
+
+        if clampedViewportCount > 1 {
             // Use cached view mappings to avoid per-frame allocations
-            if viewMappingsTemp.count != viewports.count {
-                viewMappingsTemp = (0..<viewports.count).map {
+            if viewMappingsTemp.count != clampedViewportCount {
+                viewMappingsTemp = (0..<clampedViewportCount).map {
                     MTLVertexAmplificationViewMapping(viewportArrayIndexOffset: UInt32($0),
                                                       renderTargetArrayIndexOffset: UInt32($0))
                 }
             }
-            renderEncoder.setVertexAmplificationCount(viewports.count, viewMappings: &viewMappingsTemp)
+            renderEncoder.setVertexAmplificationCount(clampedViewportCount, viewMappings: &viewMappingsTemp)
         }
 
         return renderEncoder
@@ -2138,6 +2206,10 @@ public class SplatRenderer: @unchecked Sendable {
         onRenderStart?()
         frameStartTime = CFAbsoluteTimeGetCurrent()
         frameBufferUploads = 0
+
+        // Apply any pending color updates before GPU work begins.
+        // This prevents CPU/GPU data races on the shared splatBuffer.
+        applyPendingColorUpdates()
 
         let splatCount = splatBuffer.count
         guard splatBuffer.count != 0 else { return }
@@ -2557,7 +2629,10 @@ public class SplatRenderer: @unchecked Sendable {
             // Swap buffers atomically - rendering continues with old buffer
             // until this completes, then switches to new buffer
             if let oldBuffer = self.swapSortedIndicesBuffer(newBuffer: indexOutputBuffer) {
-                self.sortIndexBufferPool.release(oldBuffer)
+                // IMPORTANT: Defer release until next frame to avoid use-after-free.
+                // The old buffer may still be referenced by in-flight render command buffers.
+                // releasePendingBuffers() is called at the start of the next render.
+                self.deferredBufferRelease(oldBuffer)
             }
 
             let elapsed = CFAbsoluteTimeGetCurrent() - sortStartTime
@@ -2802,10 +2877,9 @@ public class SplatRenderer: @unchecked Sendable {
                         }
 
                         // Run argsort (synchronous, but we're in a completion handler so not blocking main thread)
-                        // MPSArgSort's callAsFunction is synchronous but fast
-                        let argSort = MPSArgSort(dataType: .float32, descending: true)
+                        // Uses cached MPSArgSort to avoid graph recompilation overhead per frame
                         do {
-                            try argSort(commandQueue: sortQueue,
+                            try self.cachedMPSArgSort(commandQueue: sortQueue,
                                     input: distanceBuffer.buffer,
                                     output: indexOutputBuffer.buffer,
                                     count: splatCount)

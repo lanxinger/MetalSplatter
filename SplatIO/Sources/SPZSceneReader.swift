@@ -288,7 +288,7 @@ public class SPZSceneReader: SplatSceneReader {
     
     // Process a chunk of points using SIMD operations for better performance
     // Uses C++ reference coordinate conversion: RUB (SPZ internal) -> target coordinate system
-    private func processPointChunk(packedGaussians: PackedGaussians, 
+    private func processPointChunk(packedGaussians: PackedGaussians,
                                  range: Range<Int>,
                                  positionStride: Int,
                                  rotationStride: Int,
@@ -296,167 +296,173 @@ public class SPZSceneReader: SplatSceneReader {
                                  shStride: Int) -> [SplatScenePoint] {
         var chunkResults = [SplatScenePoint]()
         chunkResults.reserveCapacity(range.count)
-        
+
         // SPZ uses RUB coordinate system internally, convert to target system
         // For now, assume we want RDF (PLY) coordinate system for compatibility
         let coordinateConverter = CoordinateConverter.converter(from: .rub, to: .rdf)
-        
+
         // Color scale factor from original C++ implementation
         let colorScale: Float = 0.15
-        
-        for i in range {
-            // Calculate offsets
-            let posOffset = i * positionStride
-            let colorOffset = i * 3
-            let scaleOffset = i * 3
-            let rotOffset = i * rotationStride
-            let shOffset = i * shDim * shStride
-            
-            // Check if all essential components are in bounds
-            guard i < packedGaussians.alphas.count &&
-                  colorOffset + 2 < packedGaussians.colors.count &&
-                  scaleOffset + 2 < packedGaussians.scales.count &&
-                  rotOffset + (rotationStride - 1) < packedGaussians.rotations.count &&
-                  posOffset + (positionStride - 1) < packedGaussians.positions.count else {
-                continue
-            }
-            
-            // Extract position using proper decoding based on the format
-            var position = SIMD3<Float>(0, 0, 0)
 
-            if packedGaussians.usesFloat16 {
-                // Decode float16 positions using zero-allocation withUnsafeBytes
-                if posOffset + 5 < packedGaussians.positions.count {
-                    packedGaussians.positions.withUnsafeBytes { buffer in
-                        let base = buffer.baseAddress!.advanced(by: posOffset)
-                        // Use loadUnaligned to safely read potentially misaligned UInt16 values
-                        let x = float16ToFloat32(base.loadUnaligned(as: UInt16.self))
-                        let y = float16ToFloat32(base.advanced(by: 2).loadUnaligned(as: UInt16.self))
-                        let z = float16ToFloat32(base.advanced(by: 4).loadUnaligned(as: UInt16.self))
-                        position = SIMD3<Float>(
-                            x * coordinateConverter.flipP[0],
-                            y * coordinateConverter.flipP[1],
-                            z * coordinateConverter.flipP[2]
-                        )
+        // Fixed-point scale for non-float16 positions
+        let fixedPointScale = 1.0 / Float(1 << packedGaussians.fractionalBits)
+
+        // PERF: Hoist withUnsafeBytes outside the loop to avoid per-point closure overhead.
+        // Get raw pointers once, use them for all points in the chunk.
+        packedGaussians.positions.withUnsafeBytes { positionsBuffer in
+            packedGaussians.rotations.withUnsafeBytes { rotationsBuffer in
+                let positionsBase = positionsBuffer.baseAddress
+                let rotationsBase = rotationsBuffer.baseAddress
+                let positionsCount = packedGaussians.positions.count
+                let rotationsCount = packedGaussians.rotations.count
+
+                for i in range {
+                    // Calculate offsets
+                    let posOffset = i * positionStride
+                    let colorOffset = i * 3
+                    let scaleOffset = i * 3
+                    let rotOffset = i * rotationStride
+                    let shOffset = i * shDim * shStride
+
+                    // Check if all essential components are in bounds
+                    guard i < packedGaussians.alphas.count &&
+                          colorOffset + 2 < packedGaussians.colors.count &&
+                          scaleOffset + 2 < packedGaussians.scales.count &&
+                          rotOffset + (rotationStride - 1) < rotationsCount &&
+                          posOffset + (positionStride - 1) < positionsCount else {
+                        continue
                     }
-                }
-            } else {
-                // Decode fixed-point positions
-                let scale = 1.0 / Float(1 << packedGaussians.fractionalBits)
-                
-                if posOffset + 8 < packedGaussians.positions.count {
-                    // Process all three position components
-                    for j in 0..<3 {
-                        let byteOffset = posOffset + j * 3
-                        var fixed32: Int32 = Int32(packedGaussians.positions[byteOffset])
-                        fixed32 |= Int32(packedGaussians.positions[byteOffset + 1]) << 8
-                        fixed32 |= Int32(packedGaussians.positions[byteOffset + 2]) << 16
-                        
-                        // Apply sign extension for negative values
-                        if (fixed32 & 0x800000) != 0 {
-                            fixed32 |= Int32(bitPattern: 0xFF000000)
+
+                    // Extract position using proper decoding based on the format
+                    var position = SIMD3<Float>(0, 0, 0)
+
+                    if packedGaussians.usesFloat16 {
+                        // Decode float16 positions using hoisted raw pointer
+                        if posOffset + 5 < positionsCount, let base = positionsBase?.advanced(by: posOffset) {
+                            // Use loadUnaligned to safely read potentially misaligned UInt16 values
+                            let x = float16ToFloat32(base.loadUnaligned(as: UInt16.self))
+                            let y = float16ToFloat32(base.advanced(by: 2).loadUnaligned(as: UInt16.self))
+                            let z = float16ToFloat32(base.advanced(by: 4).loadUnaligned(as: UInt16.self))
+                            position = SIMD3<Float>(
+                                x * coordinateConverter.flipP[0],
+                                y * coordinateConverter.flipP[1],
+                                z * coordinateConverter.flipP[2]
+                            )
                         }
-                        
-                        position[j] = Float(fixed32) * scale * coordinateConverter.flipP[j]
-                    }
-                } else {
-                    // Use a fallback position if we can't decode properly
-                    position = SIMD3<Float>(
-                        Float(i % 100) * 0.1,
-                        Float(i / 100 % 100) * 0.1,
-                        Float(i / 10000) * 0.1
-                    )
-                }
-            }
-            
-            // Extract scale using SIMD operations
-            var scale = SIMD3<Float>(-5, -5, -5) // Default to a small scale
-            if scaleOffset + 2 < packedGaussians.scales.count {
-                // Convert all scale values in one operation
-                let scaleBytes = SIMD3<Float>(
-                    Float(packedGaussians.scales[scaleOffset]),
-                    Float(packedGaussians.scales[scaleOffset + 1]),
-                    Float(packedGaussians.scales[scaleOffset + 2])
-                )
-                scale = scaleBytes / 16.0 - 10.0
-            }
-            
-            // Extract rotation using appropriate decoding method (zero-allocation)
-            var rotation = simd_quatf(ix: 0, iy: 0, iz: 0, r: 1) // Default identity quaternion
-            if rotOffset + (rotationStride - 1) < packedGaussians.rotations.count {
-                // Use withUnsafeBytes to avoid Array allocation per point
-                packedGaussians.rotations.withUnsafeBytes { buffer in
-                    let base = buffer.baseAddress!.advanced(by: rotOffset)
-                    // Use appropriate unpacking function based on format
-                    if packedGaussians.usesQuaternionSmallestThree {
-                        unpackQuaternionSmallestThreeUnsafe(&rotation, base, coordinateConverter)
                     } else {
-                        unpackQuaternionFirstThreeUnsafe(&rotation, base, coordinateConverter)
+                        // Decode fixed-point positions
+                        if posOffset + 8 < positionsCount {
+                            // Process all three position components
+                            for j in 0..<3 {
+                                let byteOffset = posOffset + j * 3
+                                var fixed32: Int32 = Int32(packedGaussians.positions[byteOffset])
+                                fixed32 |= Int32(packedGaussians.positions[byteOffset + 1]) << 8
+                                fixed32 |= Int32(packedGaussians.positions[byteOffset + 2]) << 16
+
+                                // Apply sign extension for negative values
+                                if (fixed32 & 0x800000) != 0 {
+                                    fixed32 |= Int32(bitPattern: 0xFF000000)
+                                }
+
+                                position[j] = Float(fixed32) * fixedPointScale * coordinateConverter.flipP[j]
+                            }
+                        } else {
+                            // Use a fallback position if we can't decode properly
+                            position = SIMD3<Float>(
+                                Float(i % 100) * 0.1,
+                                Float(i / 100 % 100) * 0.1,
+                                Float(i / 10000) * 0.1
+                            )
+                        }
                     }
-                }
-            }
-            
-            // Extract alpha (apply logit transformation)
-            let alpha: Float
-            if i < packedGaussians.alphas.count {
-                alpha = logit(Float(packedGaussians.alphas[i]) / 255.0)
-            } else {
-                alpha = 0.0 // Default fully transparent
-            }
-            
-            // Extract colors and SH coefficients using SIMD operations
-            var sphericalHarmonics = [SIMD3<Float>()]
-            
-            // First extract the DC term (from colors or first SH coefficient)
-            if colorOffset + 2 < packedGaussians.colors.count {
-                // Extract all color components at once
-                let colorBytes = SIMD3<Float>(
-                    Float(packedGaussians.colors[colorOffset]),
-                    Float(packedGaussians.colors[colorOffset + 1]),
-                    Float(packedGaussians.colors[colorOffset + 2])
-                )
-                
-                // Apply the full transformation in one SIMD operation
-                let colorVector = (colorBytes / 255.0 - 0.5) / colorScale
-                sphericalHarmonics[0] = colorVector
-            }
-            
-            // Extract additional SH coefficients if present and needed
-            // SH data is organized with color channel as inner axis, coefficient as outer axis
-            // For degree 1: sh1n1_r, sh1n1_g, sh1n1_b, sh10_r, sh10_g, sh10_b, sh1p1_r, sh1p1_g, sh1p1_b
-            if shDim > 1 && shOffset + (shDim-1)*3 < packedGaussians.sh.count {
-                // We already have the DC term (first coefficient), so start from the second
-                for j in 1..<min(shDim, 15) { // Limit to 15 max coefficients per channel
-                    let idx = shOffset + j * 3
-                    if idx + 2 < packedGaussians.sh.count {
-                        // Process all three SH components at once (R, G, B for coefficient j)
-                        let shBytes = SIMD3<Float>(
-                            Float(packedGaussians.sh[idx]),     // R component
-                            Float(packedGaussians.sh[idx + 1]), // G component
-                            Float(packedGaussians.sh[idx + 2])  // B component
+
+                    // Extract scale using SIMD operations
+                    var scale = SIMD3<Float>(-5, -5, -5) // Default to a small scale
+                    if scaleOffset + 2 < packedGaussians.scales.count {
+                        // Convert all scale values in one operation
+                        let scaleBytes = SIMD3<Float>(
+                            Float(packedGaussians.scales[scaleOffset]),
+                            Float(packedGaussians.scales[scaleOffset + 1]),
+                            Float(packedGaussians.scales[scaleOffset + 2])
                         )
-                        
-                        // Use SIMD to unquantize all components at once and apply coordinate conversion
-                        let shCoeffs = (shBytes - 128.0) / 128.0
-                        let flip = coordinateConverter.flipSh[j]
-                        sphericalHarmonics.append(shCoeffs * flip)
+                        scale = scaleBytes / 16.0 - 10.0
                     }
-                }
-            }
-            
-            // Create the point with properly decoded values
-            let point = SplatScenePoint(
-                position: position,
-                color: .sphericalHarmonic(sphericalHarmonics),
-                opacity: .logitFloat(alpha),
-                scale: .exponent(scale),
-                rotation: rotation
-            )
-            
-            // Add to results
-            chunkResults.append(point)
-        }
-        
+
+                    // Extract rotation using hoisted raw pointer (zero-allocation)
+                    var rotation = simd_quatf(ix: 0, iy: 0, iz: 0, r: 1) // Default identity quaternion
+                    if rotOffset + (rotationStride - 1) < rotationsCount,
+                       let base = rotationsBase?.advanced(by: rotOffset) {
+                        // Use appropriate unpacking function based on format
+                        if packedGaussians.usesQuaternionSmallestThree {
+                            unpackQuaternionSmallestThreeUnsafe(&rotation, base, coordinateConverter)
+                        } else {
+                            unpackQuaternionFirstThreeUnsafe(&rotation, base, coordinateConverter)
+                        }
+                    }
+
+                    // Extract alpha (apply logit transformation)
+                    let alpha: Float
+                    if i < packedGaussians.alphas.count {
+                        alpha = logit(Float(packedGaussians.alphas[i]) / 255.0)
+                    } else {
+                        alpha = 0.0 // Default fully transparent
+                    }
+
+                    // Extract colors and SH coefficients using SIMD operations
+                    var sphericalHarmonics = [SIMD3<Float>()]
+
+                    // First extract the DC term (from colors or first SH coefficient)
+                    if colorOffset + 2 < packedGaussians.colors.count {
+                        // Extract all color components at once
+                        let colorBytes = SIMD3<Float>(
+                            Float(packedGaussians.colors[colorOffset]),
+                            Float(packedGaussians.colors[colorOffset + 1]),
+                            Float(packedGaussians.colors[colorOffset + 2])
+                        )
+
+                        // Apply the full transformation in one SIMD operation
+                        let colorVector = (colorBytes / 255.0 - 0.5) / colorScale
+                        sphericalHarmonics[0] = colorVector
+                    }
+
+                    // Extract additional SH coefficients if present and needed
+                    // SH data is organized with color channel as inner axis, coefficient as outer axis
+                    // For degree 1: sh1n1_r, sh1n1_g, sh1n1_b, sh10_r, sh10_g, sh10_b, sh1p1_r, sh1p1_g, sh1p1_b
+                    if shDim > 1 && shOffset + (shDim-1)*3 < packedGaussians.sh.count {
+                        // We already have the DC term (first coefficient), so start from the second
+                        for j in 1..<min(shDim, 15) { // Limit to 15 max coefficients per channel
+                            let idx = shOffset + j * 3
+                            if idx + 2 < packedGaussians.sh.count {
+                                // Process all three SH components at once (R, G, B for coefficient j)
+                                let shBytes = SIMD3<Float>(
+                                    Float(packedGaussians.sh[idx]),     // R component
+                                    Float(packedGaussians.sh[idx + 1]), // G component
+                                    Float(packedGaussians.sh[idx + 2])  // B component
+                                )
+
+                                // Use SIMD to unquantize all components at once and apply coordinate conversion
+                                let shCoeffs = (shBytes - 128.0) / 128.0
+                                let flip = coordinateConverter.flipSh[j]
+                                sphericalHarmonics.append(shCoeffs * flip)
+                            }
+                        }
+                    }
+
+                    // Create the point with properly decoded values
+                    let point = SplatScenePoint(
+                        position: position,
+                        color: .sphericalHarmonic(sphericalHarmonics),
+                        opacity: .logitFloat(alpha),
+                        scale: .exponent(scale),
+                        rotation: rotation
+                    )
+
+                    // Add to results
+                    chunkResults.append(point)
+                } // end for i in range
+            } // end rotations.withUnsafeBytes
+        } // end positions.withUnsafeBytes
+
         return chunkResults
     }
     
