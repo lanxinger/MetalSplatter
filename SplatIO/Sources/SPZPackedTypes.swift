@@ -280,14 +280,19 @@ struct PackedGaussians {
             spzTypesLog.debug("at: Index \(index) out of bounds (numPoints: \(numPoints))")
             return result
         }
-        
-        // Additional safety checks for array bounds
-        if start3 + 2 >= colors.count || start3 + 2 >= scales.count || 
-           start3 + 2 >= rotations.count || index >= alphas.count {
+
+        // Calculate required sizes for each array
+        let rotationBytes = usesQuaternionSmallestThree ? 4 : 3
+        let rotStart = index * rotationBytes
+
+        // Additional safety checks for array bounds using correct sizes
+        // Use < for array bounds (need indices 0..<N to be valid)
+        if start3 + 3 > colors.count || start3 + 3 > scales.count ||
+           rotStart + rotationBytes > rotations.count || index >= alphas.count {
             spzTypesLog.debug("at: Array bounds issue for index \(index)")
             spzTypesLog.debug("  Colors: \(colors.count), needed: \(start3 + 3)")
             spzTypesLog.debug("  Scales: \(scales.count), needed: \(start3 + 3)")
-            spzTypesLog.debug("  Rotations: \(rotations.count), needed: \(start3 + 3)")
+            spzTypesLog.debug("  Rotations: \(rotations.count), needed: \(rotStart + rotationBytes)")
             spzTypesLog.debug("  Alphas: \(alphas.count), needed: \(index + 1)")
             // Return empty result rather than crashing
             return result
@@ -305,9 +310,7 @@ struct PackedGaussians {
             result.scale = Array(scales[scaleStart..<scaleStart + 3])
         }
         
-        // Copy rotation bytes (size depends on encoding type)
-        let rotationBytes = usesQuaternionSmallestThree ? 4 : 3
-        let rotStart = index * rotationBytes
+        // Copy rotation bytes (size depends on encoding type, rotationBytes/rotStart calculated above)
         if rotStart + rotationBytes <= rotations.count {
             result.rotation = Array(rotations[rotStart..<rotStart + rotationBytes])
         }

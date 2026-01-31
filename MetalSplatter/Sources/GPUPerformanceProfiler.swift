@@ -98,11 +98,24 @@ public class GPUPerformanceProfiler {
     
     // MARK: - Profiling Methods
     
-    /// Profile the performance of distance computation kernels
+    /// Profile the performance of distance computation kernels.
+    ///
+    /// - Warning: This method blocks waiting for GPU completion. Avoid calling from the main thread
+    ///   to prevent UI hangs. Consider running on a background queue.
+    /// - Parameters:
+    ///   - splatCount: Number of splats to test with
+    ///   - useOptimizedKernel: Whether to use the optimized kernel variant
+    ///   - iterations: Number of iterations for averaging
+    /// - Returns: Performance metrics for the profiled operation
     public func profileDistanceComputation(splatCount: Int,
                                           useOptimizedKernel: Bool = true,
                                           iterations: Int = 10) throws -> PerformanceMetrics {
-        
+
+        // Warn if called from main thread as this will block
+        if Thread.isMainThread {
+            log.warning("profileDistanceComputation called from main thread - this may cause UI hangs")
+        }
+
         log.info("Profiling distance computation - optimized: \(useOptimizedKernel), iterations: \(iterations)")
         
         // Create test data
@@ -165,8 +178,16 @@ public class GPUPerformanceProfiler {
         )
     }
     
-    /// Compare baseline vs optimized GPU memory access patterns
+    /// Compare baseline vs optimized GPU memory access patterns.
+    ///
+    /// - Warning: This method blocks waiting for GPU completion. Avoid calling from the main thread
+    ///   to prevent UI hangs. Consider running on a background queue.
     public func compareOptimizations(splatCount: Int, iterations: Int = 10) throws -> OptimizationComparison {
+        // Warn if called from main thread as this will block
+        if Thread.isMainThread {
+            log.warning("compareOptimizations called from main thread - this may cause UI hangs")
+        }
+
         log.info("Comparing baseline vs optimized GPU memory access patterns")
         
         let baselineMetrics = try profileDistanceComputation(

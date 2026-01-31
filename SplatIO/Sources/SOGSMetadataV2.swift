@@ -355,33 +355,53 @@ public struct SOGSIteratorV2 {
     private func readScale(x: Int, y: Int) -> SplatScenePoint.Scale {
         // NEW v2: Use codebook lookup with separate indices per component
         let scalePixel = WebPDecoder.getPixelUInt8(from: data.scales, x: x, y: y)
-        
+
         // According to spec: RGB channels contain separate indices for [scale_0, scale_1, scale_2]
         let scaleXIndex = Int(scalePixel.x)
         let scaleYIndex = Int(scalePixel.y)
         let scaleZIndex = Int(scalePixel.z)
-        
+
+        // Bounds-safe lookup: codebook should have 256 entries but verify to prevent crashes
+        let codebookCount = scalesCodebook.count
+        guard scaleXIndex < codebookCount,
+              scaleYIndex < codebookCount,
+              scaleZIndex < codebookCount else {
+            // Return zero scale for malformed data rather than crashing
+            return .exponent(SIMD3<Float>.zero)
+        }
+
         // Look up individual scale components from codebook
         let scaleX = scalesCodebook[scaleXIndex]
         let scaleY = scalesCodebook[scaleYIndex]
         let scaleZ = scalesCodebook[scaleZIndex]
-        
+
         return .exponent(SIMD3<Float>(scaleX, scaleY, scaleZ))
     }
     
     private func readColorAndOpacity(x: Int, y: Int) -> (SplatScenePoint.Color, SplatScenePoint.Opacity) {
         // NEW v2: Use codebook lookup with separate indices per component
         let sh0Pixel = WebPDecoder.getPixelUInt8(from: data.sh0, x: x, y: y)
-        
+
         // According to spec: RGB channels contain separate indices for [f_dc_0, f_dc_1, f_dc_2]
         let colorRIndex = Int(sh0Pixel.x)
         let colorGIndex = Int(sh0Pixel.y)
         let colorBIndex = Int(sh0Pixel.z)
-        
-        // Look up individual color components from codebook
-        let colorR = sh0Codebook[colorRIndex]
-        let colorG = sh0Codebook[colorGIndex]
-        let colorB = sh0Codebook[colorBIndex]
+
+        // Bounds-safe lookup: codebook should have 256 entries but verify to prevent crashes
+        let codebookCount = sh0Codebook.count
+        let colorR: Float
+        let colorG: Float
+        let colorB: Float
+        if colorRIndex < codebookCount && colorGIndex < codebookCount && colorBIndex < codebookCount {
+            colorR = sh0Codebook[colorRIndex]
+            colorG = sh0Codebook[colorGIndex]
+            colorB = sh0Codebook[colorBIndex]
+        } else {
+            // Return neutral color for malformed data rather than crashing
+            colorR = 0.0
+            colorG = 0.0
+            colorB = 0.0
+        }
         
         // Extract opacity directly from alpha channel (sigmoid mapped)
         let opacityValue = Float(sh0Pixel.w) / 255.0

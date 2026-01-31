@@ -46,7 +46,9 @@ public class FastSHExample {
         
         // Example render loop
         // In a real application, this would be called from your render loop
-        let commandQueue = device.makeCommandQueue()!
+        guard let commandQueue = device.makeCommandQueue() else {
+            throw SplatRendererError.failedToCreateBuffer(length: 0)
+        }
         
         // Create viewport using SplatRenderer's ViewportDescriptor
         let viewport = SplatRenderer.ViewportDescriptor(
@@ -58,7 +60,7 @@ public class FastSHExample {
         
         // Render with fast SH (using SplatRenderer's internal render method)
         if let commandBuffer = commandQueue.makeCommandBuffer() {
-            let colorTexture = createDummyTexture(device: device)
+            let colorTexture = try createDummyTexture(device: device)
             
             try renderer.render(
                 viewports: [viewport],
@@ -84,7 +86,7 @@ public class FastSHExample {
         renderer.fastSHConfig.enabled = false
     }
     
-    private static func createDummyTexture(device: MTLDevice) -> MTLTexture {
+    private static func createDummyTexture(device: MTLDevice) throws -> MTLTexture {
         let descriptor = MTLTextureDescriptor.texture2DDescriptor(
             pixelFormat: .bgra8Unorm,
             width: 1920,
@@ -92,7 +94,10 @@ public class FastSHExample {
             mipmapped: false
         )
         descriptor.usage = [.renderTarget, .shaderRead]
-        return device.makeTexture(descriptor: descriptor)!
+        guard let texture = device.makeTexture(descriptor: descriptor) else {
+            throw SplatRendererError.failedToCreateBuffer(length: 1920 * 1080 * 4)
+        }
+        return texture
     }
 }
 

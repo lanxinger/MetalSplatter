@@ -23,6 +23,7 @@ public enum SplatRendererError: LocalizedError {
     case unsupportedArchitecture
     case failedToCreateRenderEncoder
     case failedToCreateComputeEncoder
+    case internalPipelineMismatch(expected: String, actual: String)
 
     public var errorDescription: String? {
         switch self {
@@ -48,6 +49,8 @@ public enum SplatRendererError: LocalizedError {
             return "Failed to create Metal render command encoder"
         case .failedToCreateComputeEncoder:
             return "Failed to create Metal compute command encoder"
+        case .internalPipelineMismatch(let expected, let actual):
+            return "Internal pipeline mismatch: expected \(expected), but useMultiStagePipeline=\(actual)"
         }
     }
 }
@@ -804,12 +807,22 @@ public class SplatRenderer: @unchecked Sendable {
                 resetVisibleCountPipelineState = try device.makeComputePipelineState(function: resetCountFunction)
             }
             // Create frustum culling buffers (will be resized as needed)
+            // Log failures - these are optional features that degrade gracefully
             frustumCullDataBuffer = device.makeBuffer(length: MemoryLayout<FrustumCullData>.stride, options: .storageModeShared)
+            if frustumCullDataBuffer == nil {
+                Self.log.warning("Failed to create frustum cull data buffer - frustum culling disabled")
+            }
             frustumCullDataBuffer?.label = "Frustum Cull Data"
             visibleCountBuffer = device.makeBuffer(length: MemoryLayout<UInt32>.stride, options: .storageModeShared)
+            if visibleCountBuffer == nil {
+                Self.log.warning("Failed to create visible count buffer - frustum culling disabled")
+            }
             visibleCountBuffer?.label = "Visible Count"
             // Indirect draw arguments buffer (MTLDrawIndexedPrimitivesIndirectArguments = 5 * uint32)
             indirectDrawArgsBuffer = device.makeBuffer(length: 5 * MemoryLayout<UInt32>.stride, options: .storageModePrivate)
+            if indirectDrawArgsBuffer == nil {
+                Self.log.warning("Failed to create indirect draw args buffer - frustum culling disabled")
+            }
             indirectDrawArgsBuffer?.label = "Indirect Draw Arguments"
         } catch {
             Self.log.error("Failed to create frustum culling pipeline state: \(error)")
@@ -824,8 +837,12 @@ public class SplatRenderer: @unchecked Sendable {
                 resetBoundsPipelineState = try device.makeComputePipelineState(function: resetFunction)
             }
             // Create buffers for atomic bounds (3 floats each for x, y, z)
+            // Log failures - GPU bounds computation will fall back to CPU
             boundsMinBuffer = device.makeBuffer(length: MemoryLayout<Float>.stride * 3, options: .storageModeShared)
             boundsMaxBuffer = device.makeBuffer(length: MemoryLayout<Float>.stride * 3, options: .storageModeShared)
+            if boundsMinBuffer == nil || boundsMaxBuffer == nil {
+                Self.log.warning("Failed to create bounds buffers - GPU bounds computation disabled")
+            }
             boundsMinBuffer?.label = "Bounds Min Atomics"
             boundsMaxBuffer?.label = "Bounds Max Atomics"
         } catch {
@@ -1052,7 +1069,9 @@ public class SplatRenderer: @unchecked Sendable {
     }
 
     private func buildSingleStagePipelineState() throws -> MTLRenderPipelineState {
-        assert(!useMultiStagePipeline)
+        guard !useMultiStagePipeline else {
+            throw SplatRendererError.internalPipelineMismatch(expected: "single-stage", actual: "multi-stage")
+        }
 
         let pipelineDescriptor = MTLRenderPipelineDescriptor()
 
@@ -1088,7 +1107,9 @@ public class SplatRenderer: @unchecked Sendable {
     }
 
     private func buildSingleStageDepthState() throws -> MTLDepthStencilState {
-        assert(!useMultiStagePipeline)
+        guard !useMultiStagePipeline else {
+            throw SplatRendererError.internalPipelineMismatch(expected: "single-stage", actual: "multi-stage")
+        }
 
         let depthStateDescriptor = MTLDepthStencilDescriptor()
         depthStateDescriptor.depthCompareFunction = MTLCompareFunction.always
@@ -1149,7 +1170,9 @@ public class SplatRenderer: @unchecked Sendable {
     }
 
     private func buildInitializePipelineState() throws -> MTLRenderPipelineState {
-        assert(useMultiStagePipeline)
+        guard useMultiStagePipeline else {
+            throw SplatRendererError.internalPipelineMismatch(expected: "multi-stage", actual: "single-stage")
+        }
 
         let pipelineDescriptor = MTLTileRenderPipelineDescriptor()
 
@@ -1162,7 +1185,9 @@ public class SplatRenderer: @unchecked Sendable {
     }
 
     private func buildDrawSplatPipelineState() throws -> MTLRenderPipelineState {
-        assert(useMultiStagePipeline)
+        guard useMultiStagePipeline else {
+            throw SplatRendererError.internalPipelineMismatch(expected: "multi-stage", actual: "single-stage")
+        }
 
         let pipelineDescriptor = MTLRenderPipelineDescriptor()
 
@@ -1189,7 +1214,9 @@ public class SplatRenderer: @unchecked Sendable {
     }
 
     private func buildDrawSplatDepthState() throws -> MTLDepthStencilState {
-        assert(useMultiStagePipeline)
+        guard useMultiStagePipeline else {
+            throw SplatRendererError.internalPipelineMismatch(expected: "multi-stage", actual: "single-stage")
+        }
 
         let depthStateDescriptor = MTLDepthStencilDescriptor()
         depthStateDescriptor.depthCompareFunction = MTLCompareFunction.always
@@ -1201,7 +1228,9 @@ public class SplatRenderer: @unchecked Sendable {
     }
 
     private func buildPostprocessPipelineState() throws -> MTLRenderPipelineState {
-        assert(useMultiStagePipeline)
+        guard useMultiStagePipeline else {
+            throw SplatRendererError.internalPipelineMismatch(expected: "multi-stage", actual: "single-stage")
+        }
 
         let pipelineDescriptor = MTLRenderPipelineDescriptor()
 
@@ -1222,7 +1251,9 @@ public class SplatRenderer: @unchecked Sendable {
     }
 
     private func buildPostprocessDepthState() throws -> MTLDepthStencilState {
-        assert(useMultiStagePipeline)
+        guard useMultiStagePipeline else {
+            throw SplatRendererError.internalPipelineMismatch(expected: "multi-stage", actual: "single-stage")
+        }
 
         let depthStateDescriptor = MTLDepthStencilDescriptor()
         depthStateDescriptor.depthCompareFunction = MTLCompareFunction.always
@@ -1464,28 +1495,31 @@ public class SplatRenderer: @unchecked Sendable {
         guard !updates.isEmpty else { return }
 
         // Apply updates in order to preserve "last write wins" semantics
-        for update in updates {
-            switch update {
-            case .full(let colors):
-                for i in 0..<min(colors.count, splatBuffer.count) {
-                    let c = colors[i]
-                    splatBuffer.values[i].color = PackedRGBHalf4(
-                        r: Float16(c.x), g: Float16(c.y), b: Float16(c.z), a: Float16(c.w)
+        // Use withLockedValues to safely access buffer during potential resize operations
+        splatBuffer.withLockedValues { values, bufferCount in
+            for update in updates {
+                switch update {
+                case .full(let colors):
+                    for i in 0..<min(colors.count, bufferCount) {
+                        let c = colors[i]
+                        values[i].color = PackedRGBHalf4(
+                            r: Float16(c.x), g: Float16(c.y), b: Float16(c.z), a: Float16(c.w)
+                        )
+                    }
+                case .range(let colors, let range):
+                    for (i, colorIndex) in range.enumerated() where colorIndex < bufferCount {
+                        let c = colors[i]
+                        values[colorIndex].color = PackedRGBHalf4(
+                            r: Float16(c.x), g: Float16(c.y), b: Float16(c.z), a: Float16(c.w)
+                        )
+                    }
+                case .single(let color, let index):
+                    guard index < bufferCount else { continue }
+                    values[index].color = PackedRGBHalf4(
+                        r: Float16(color.x), g: Float16(color.y),
+                        b: Float16(color.z), a: Float16(color.w)
                     )
                 }
-            case .range(let colors, let range):
-                for (i, colorIndex) in range.enumerated() where colorIndex < splatBuffer.count {
-                    let c = colors[i]
-                    splatBuffer.values[colorIndex].color = PackedRGBHalf4(
-                        r: Float16(c.x), g: Float16(c.y), b: Float16(c.z), a: Float16(c.w)
-                    )
-                }
-            case .single(let color, let index):
-                guard index < splatBuffer.count else { continue }
-                splatBuffer.values[index].color = PackedRGBHalf4(
-                    r: Float16(color.x), g: Float16(color.y),
-                    b: Float16(color.z), a: Float16(color.w)
-                )
             }
         }
     }
@@ -1717,12 +1751,15 @@ public class SplatRenderer: @unchecked Sendable {
         }
         
         // Ensure precomputed buffer has correct size
+        // Use local capture to avoid TOCTOU race (buffer could be nil'd between check and use)
         let requiredSize = splatCount * Self.precomputedSplatStride
-        if precomputedSplatBuffer == nil || precomputedSplatBuffer!.length < requiredSize {
-            precomputedSplatBuffer = device.makeBuffer(length: requiredSize, options: .storageModePrivate)
-            precomputedSplatBuffer?.label = "Precomputed Splats"
+        var currentBuffer = precomputedSplatBuffer
+        if currentBuffer == nil || currentBuffer!.length < requiredSize {
+            currentBuffer = device.makeBuffer(length: requiredSize, options: .storageModePrivate)
+            currentBuffer?.label = "Precomputed Splats"
+            precomputedSplatBuffer = currentBuffer
         }
-        guard let precomputedBuffer = precomputedSplatBuffer else { return }
+        guard let precomputedBuffer = currentBuffer else { return }
         
         // Create uniform buffer for this computation
         var uniforms = Uniforms(
@@ -1780,13 +1817,16 @@ public class SplatRenderer: @unchecked Sendable {
         }
 
         // Each packed color is 4 bytes (uint)
+        // Use local capture to avoid TOCTOU race (buffer could be nil'd between check and use)
         let bufferSize = splatBuffer.count * MemoryLayout<UInt32>.stride
-        if packedColorBuffer == nil || packedColorBuffer!.length < bufferSize {
-            packedColorBuffer = device.makeBuffer(length: bufferSize, options: .storageModeShared)
-            packedColorBuffer?.label = "Packed Colors (snorm10a2)"
+        var currentBuffer = packedColorBuffer
+        if currentBuffer == nil || currentBuffer!.length < bufferSize {
+            currentBuffer = device.makeBuffer(length: bufferSize, options: .storageModeShared)
+            currentBuffer?.label = "Packed Colors (snorm10a2)"
+            packedColorBuffer = currentBuffer
         }
 
-        guard let buffer = packedColorBuffer else {
+        guard let buffer = currentBuffer else {
             Self.log.error("Failed to create packed color buffer")
             return
         }
@@ -1845,12 +1885,15 @@ public class SplatRenderer: @unchecked Sendable {
         }
         
         // Ensure visible indices buffer is large enough
+        // Use local capture to avoid TOCTOU race (buffer could be nil'd between check and use)
         let requiredSize = splatCount * MemoryLayout<UInt32>.stride
-        if visibleIndicesBuffer == nil || visibleIndicesBuffer!.length < requiredSize {
-            visibleIndicesBuffer = device.makeBuffer(length: requiredSize, options: .storageModePrivate)
-            visibleIndicesBuffer?.label = "Visible Indices"
+        var currentIndicesBuffer = visibleIndicesBuffer
+        if currentIndicesBuffer == nil || currentIndicesBuffer!.length < requiredSize {
+            currentIndicesBuffer = device.makeBuffer(length: requiredSize, options: .storageModePrivate)
+            currentIndicesBuffer?.label = "Visible Indices"
+            visibleIndicesBuffer = currentIndicesBuffer
         }
-        guard let indicesBuffer = visibleIndicesBuffer else { return }
+        guard let indicesBuffer = currentIndicesBuffer else { return }
         
         // Prepare view-projection matrix for NDC-based culling
         let viewProjection = viewport.projectionMatrix * viewport.viewMatrix
