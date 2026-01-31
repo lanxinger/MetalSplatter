@@ -181,10 +181,11 @@ namespace advanced_atomics {
         uint merge_count = end - left_start;
         const uint MAX_MERGE_SIZE = 256;
 
-        // If merge is too large, skip (data stays as-is for this segment)
-        // A production implementation should use a proper large-merge algorithm
+        // If merge is too large, signal failure and fall back to identity mapping
+        // This prevents silent data corruption from partial merges
         if (merge_count > MAX_MERGE_SIZE) {
-            return true;  // Not a failure, just a limitation
+            atomic_store_explicit(&sorting_state.sync_failed, 1, MEM_ORDER_RELEASE);
+            return false;  // Signal failure - caller will output identity mapping
         }
 
         // Check for prior failure before doing work
@@ -635,8 +636,10 @@ kernel void atomic_insertion_sort(
         atomic_store_explicit(&sorting_state.completed_phases, 0, MEM_ORDER_RELEASE);
     }
 
-    // Ensure all threads see the reset state before proceeding
-    threadgroup_barrier(mem_flags::mem_device);
+    // Ensure all threads within threadgroup see the reset state before proceeding
+    // Note: mem_threadgroup is used because threadgroup_barrier only syncs within a threadgroup.
+    // Cross-threadgroup synchronization is handled via atomic operations on sync_failed/completed_phases.
+    threadgroup_barrier(mem_flags::mem_threadgroup);
 
     // Each thread processes a chunk of the array
     uint chunk_size = (count + total_threads - 1) / total_threads;
@@ -697,8 +700,8 @@ kernel void atomic_insertion_sort(
 
     // If synchronization failed, abort - don't proceed with merge on partially sorted data
     if (!sync_succeeded || atomic_load_explicit(&sorting_state.sync_failed, MEM_ORDER_ACQUIRE) != 0) {
-        // Ensure all threads see the failure before any writes
-        threadgroup_barrier(mem_flags::mem_device);
+        // Ensure all threads within threadgroup see the failure before any writes
+        threadgroup_barrier(mem_flags::mem_threadgroup);
         // Only thread 0 writes the identity mapping fallback to avoid races
         if (thread_id == 0) {
             for (uint i = 0; i < count; ++i) {
@@ -713,13 +716,15 @@ kernel void atomic_insertion_sort(
         atomic_store_explicit(&sorting_state.completed_phases, 0, MEM_ORDER_RELEASE);
     }
 
-    // Ensure reset is visible before merge starts
+    // Ensure reset is visible and all device memory writes from per-chunk sorting
+    // are visible before merge starts. mem_device is required because keys[] and
+    // sorted_indices[] are in device address space.
     threadgroup_barrier(mem_flags::mem_device);
 
     // Parallel merge of sorted chunks
     bool merge_success = parallel_merge_chunks(keys, sorted_indices, sorting_state, count, thread_id, total_threads);
 
-    // Ensure all threads agree on merge success/failure
+    // Ensure all device memory writes from merge are visible before checking success
     threadgroup_barrier(mem_flags::mem_device);
 
     // If merge failed, only thread 0 writes identity mapping fallback
@@ -756,6 +761,8 @@ kernel void atomic_radix_sort(
         atomic_store_explicit(&sorting_state.bin_counts[thread_id], 0, memory_order_relaxed);
     }
 
+    // Sync before counting phase - mem_device required because bin_counts
+    // is in device memory (part of AtomicSortingState device buffer)
     threadgroup_barrier(mem_flags::mem_device);
 
     // Count phase - each thread counts elements in its range
@@ -780,6 +787,8 @@ kernel void atomic_radix_sort(
         }
     }
 
+    // Sync before prefix sum - mem_device required because bin_counts atomic adds
+    // are to device memory; thread 0 must see all updates before computing offsets
     threadgroup_barrier(mem_flags::mem_device);
 
     // Prefix sum to get bin offsets (single thread)
@@ -792,6 +801,8 @@ kernel void atomic_radix_sort(
         }
     }
 
+    // Sync before scatter - mem_device required so all threads see the prefix sum
+    // offsets written to device memory by thread 0
     threadgroup_barrier(mem_flags::mem_device);
 
     // Scatter phase - place elements in sorted order

@@ -32,7 +32,9 @@ where Self: DataConvertible, Self: EndianConvertible {
         var value: Self = .zero
         withUnsafeMutableBytes(of: &value) {
             let bytesCopied = data.copyBytes(to: $0, from: offset...)
-            assert(bytesCopied == MemoryLayout<Self>.size)
+            // Use precondition instead of assert to catch truncated data in Release builds
+            precondition(bytesCopied == MemoryLayout<Self>.size,
+                        "DataConvertible: insufficient data (expected \(MemoryLayout<Self>.size) bytes, got \(bytesCopied))")
         }
         self = (bigEndian == DataConvertibleConstants.isBigEndian) ? value : value.byteSwapped
     }
@@ -41,16 +43,21 @@ where Self: DataConvertible, Self: EndianConvertible {
         var value: Self = .zero
         withUnsafeMutableBytes(of: &value) {
             let bytesCopied = data.copyBytes(to: $0)
-            assert(bytesCopied == MemoryLayout<Self>.size)
+            // Use precondition instead of assert to catch truncated data in Release builds
+            precondition(bytesCopied == MemoryLayout<Self>.size,
+                        "DataConvertible: insufficient data (expected \(MemoryLayout<Self>.size) bytes, got \(bytesCopied))")
         }
         self = (bigEndian == DataConvertibleConstants.isBigEndian) ? value : value.byteSwapped
     }
 
     static func array<D: DataProtocol>(_ data: D, from offset: D.Index, count: Int, bigEndian: Bool) -> [Self] {
         var values: [Self] = Array(repeating: .zero, count: count)
+        let expectedBytes = MemoryLayout<Self>.size * count
         values.withUnsafeMutableBytes {
             let bytesCopied = data.copyBytes(to: $0, from: offset...)
-            assert(bytesCopied == MemoryLayout<Self>.size * count)
+            // Use precondition instead of assert to catch truncated data in Release builds
+            precondition(bytesCopied == expectedBytes,
+                        "DataConvertible: insufficient data (expected \(expectedBytes) bytes, got \(bytesCopied))")
         }
         if bigEndian != DataConvertibleConstants.isBigEndian {
             for i in 0..<count {
@@ -62,9 +69,12 @@ where Self: DataConvertible, Self: EndianConvertible {
 
     static func array<D: DataProtocol>(_ data: D, count: Int, bigEndian: Bool) -> [Self] {
         var values: [Self] = Array(repeating: .zero, count: count)
+        let expectedBytes = MemoryLayout<Self>.size * count
         values.withUnsafeMutableBytes {
             let bytesCopied = data.copyBytes(to: $0)
-            assert(bytesCopied == MemoryLayout<Self>.size * count)
+            // Use precondition instead of assert to catch truncated data in Release builds
+            precondition(bytesCopied == expectedBytes,
+                        "DataConvertible: insufficient data (expected \(expectedBytes) bytes, got \(bytesCopied))")
         }
         if bigEndian != DataConvertibleConstants.isBigEndian {
             for i in 0..<count {
@@ -108,40 +118,51 @@ where Self: DataConvertible, Self: BitPatternConvertible, Self.BitPattern: ZeroP
             self = .zero
             withUnsafeMutableBytes(of: &self) {
                 let bytesCopied = data.copyBytes(to: $0, from: offset...)
-                assert(bytesCopied == MemoryLayout<Self>.size)
+                // Use precondition instead of assert to catch truncated data in Release builds
+                precondition(bytesCopied == MemoryLayout<Self>.size,
+                            "DataConvertible: insufficient data (expected \(MemoryLayout<Self>.size) bytes, got \(bytesCopied))")
             }
         } else {
             var value: BitPattern = .zero
             withUnsafeMutableBytes(of: &value) {
                 let bytesCopied = data.copyBytes(to: $0, from: offset...)
-                assert(bytesCopied == MemoryLayout<BitPattern>.size)
+                // Use precondition instead of assert to catch truncated data in Release builds
+                precondition(bytesCopied == MemoryLayout<BitPattern>.size,
+                            "DataConvertible: insufficient data (expected \(MemoryLayout<BitPattern>.size) bytes, got \(bytesCopied))")
             }
             self = Self(bitPattern: value.byteSwapped)
         }
     }
-    
+
     init<D: DataProtocol>(_ data: D, bigEndian: Bool) {
         if bigEndian == DataConvertibleConstants.isBigEndian {
             self = .zero
             withUnsafeMutableBytes(of: &self) {
                 let bytesCopied = data.copyBytes(to: $0)
-                assert(bytesCopied == MemoryLayout<Self>.size)
+                // Use precondition instead of assert to catch truncated data in Release builds
+                precondition(bytesCopied == MemoryLayout<Self>.size,
+                            "DataConvertible: insufficient data (expected \(MemoryLayout<Self>.size) bytes, got \(bytesCopied))")
             }
         } else {
             var value: BitPattern = .zero
             withUnsafeMutableBytes(of: &value) {
                 let bytesCopied = data.copyBytes(to: $0)
-                assert(bytesCopied == MemoryLayout<BitPattern>.size)
+                // Use precondition instead of assert to catch truncated data in Release builds
+                precondition(bytesCopied == MemoryLayout<BitPattern>.size,
+                            "DataConvertible: insufficient data (expected \(MemoryLayout<BitPattern>.size) bytes, got \(bytesCopied))")
             }
             self = Self(bitPattern: value.byteSwapped)
         }
     }
-    
+
     static func array<D: DataProtocol>(_ data: D, from offset: D.Index, count: Int, bigEndian: Bool) -> [Self] {
         var values: [Self] = Array(repeating: .zero, count: count)
+        let expectedBytes = MemoryLayout<Self>.size * count
         values.withUnsafeMutableBytes {
             let bytesCopied = data.copyBytes(to: $0, from: offset...)
-            assert(bytesCopied == MemoryLayout<Self>.size * count)
+            // Use precondition instead of assert to catch truncated data in Release builds
+            precondition(bytesCopied == expectedBytes,
+                        "DataConvertible: insufficient data (expected \(expectedBytes) bytes, got \(bytesCopied))")
         }
         if bigEndian != DataConvertibleConstants.isBigEndian {
             for i in 0..<count {
@@ -150,12 +171,15 @@ where Self: DataConvertible, Self: BitPatternConvertible, Self.BitPattern: ZeroP
         }
         return values
     }
-    
+
     static func array<D: DataProtocol>(_ data: D, count: Int, bigEndian: Bool) -> [Self] {
         var values: [Self] = Array(repeating: .zero, count: count)
+        let expectedBytes = MemoryLayout<Self>.size * count
         values.withUnsafeMutableBytes {
             let bytesCopied = data.copyBytes(to: $0)
-            assert(bytesCopied == MemoryLayout<Self>.size * count)
+            // Use precondition instead of assert to catch truncated data in Release builds
+            precondition(bytesCopied == expectedBytes,
+                        "DataConvertible: insufficient data (expected \(expectedBytes) bytes, got \(bytesCopied))")
         }
         if bigEndian != DataConvertibleConstants.isBigEndian {
             for i in 0..<count {

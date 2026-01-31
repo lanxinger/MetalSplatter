@@ -2650,9 +2650,11 @@ public class SplatRenderer: @unchecked Sendable {
                             return
                         }
 
-                        commandBuffer.addCompletedHandler { [weak self] _ in
+                        // Capture pool before weak self check to ensure buffer release even if self is deallocated
+                        commandBuffer.addCompletedHandler { [weak self, sortIndexBufferPool] _ in
                             guard let self = self else {
-                                self?.sortIndexBufferPool.release(indexOutputBuffer)
+                                // Self deallocated during async sort - release buffer via captured pool
+                                sortIndexBufferPool.release(indexOutputBuffer)
                                 return
                             }
                             self.finishSort(
@@ -2716,9 +2718,11 @@ public class SplatRenderer: @unchecked Sendable {
 
                     // Use completion handler instead of blocking waitUntilCompleted
                     // This allows the Task to return while GPU continues sorting
-                    commandBuffer.addCompletedHandler { [weak self] _ in
+                    // Capture pool before weak self check to ensure buffer release even if self is deallocated
+                    commandBuffer.addCompletedHandler { [weak self, sortIndexBufferPool] _ in
                         guard let self = self else {
-                            self?.sortIndexBufferPool.release(indexOutputBuffer)
+                            // Self deallocated during async sort - release buffer via captured pool
+                            sortIndexBufferPool.release(indexOutputBuffer)
                             return
                         }
                         self.finishSort(

@@ -584,34 +584,27 @@ struct ARMetalKitView: UIViewRepresentable {
         weak var metalView: MTKView?
         
         @objc func handleTap(_ gesture: UITapGestureRecognizer) {
-            guard let view = metalView else {
-                print("AR: No metal view for tap gesture")
-                return
-            }
+            guard let view = metalView else { return }
             let location = gesture.location(in: view)
-            print("AR: Coordinator handleTap at \(location)")
             renderer?.handleTap(at: location)
         }
-        
+
         @objc func handlePinch(_ gesture: UIPinchGestureRecognizer) {
             let scale = Float(gesture.scale)
-            print("AR: Coordinator handlePinch scale: \(scale)")
             renderer?.handlePinch(scale: CGFloat(scale), velocity: 0)
             gesture.scale = 1.0 // Reset for next gesture
         }
-        
+
         @objc func handleRotation(_ gesture: UIRotationGestureRecognizer) {
             let rotation = Float(gesture.rotation)
-            print("AR: Coordinator handleRotation rotation: \(rotation)")
             renderer?.handleRotation(rotation: CGFloat(rotation), velocity: 0)
             gesture.rotation = 0.0 // Reset for next gesture
         }
-        
+
         @objc func handlePan(_ gesture: UIPanGestureRecognizer) {
             guard let view = metalView else { return }
             let translation = gesture.translation(in: view)
             let velocity = gesture.velocity(in: view)
-            print("AR: Coordinator handlePan translation: \(translation), velocity: \(velocity)")
             renderer?.handlePan(translation: translation, velocity: velocity)
             gesture.setTranslation(.zero, in: view) // Reset for next gesture
         }

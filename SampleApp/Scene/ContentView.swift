@@ -92,15 +92,31 @@ struct ContentView: View {
                 isPickingFile = false
                 switch $0 {
                 case .success(let url):
-                    _ = url.startAccessingSecurityScopedResource()
-                    Task {
-                        // This is a sample app. In a real app, this should be more tightly scoped, not using a silly timer.
-                        try await Task.sleep(for: .seconds(10))
-                        url.stopAccessingSecurityScopedResource()
-                    }
+                    // Start security-scoped access - ModelCache will manage the lifecycle
+                    let hasAccess = url.startAccessingSecurityScopedResource()
                     let model = ModelIdentifier.gaussianSplat(url)
-                    lastLoadedModel = model
-                    openWindow(value: model)
+
+                    // Pre-load model into cache with security-scoped access tracking
+                    // This ensures the access is released when the model is evicted
+                    Task {
+                        do {
+                            _ = try await ModelCache.shared.getModel(
+                                model,
+                                securityScopedURL: url,
+                                hasSecurityScopedAccess: hasAccess
+                            )
+                            await MainActor.run {
+                                lastLoadedModel = model
+                                openWindow(value: model)
+                            }
+                        } catch {
+                            // Release access on failure
+                            if hasAccess {
+                                url.stopAccessingSecurityScopedResource()
+                            }
+                            print("Failed to load model: \(error)")
+                        }
+                    }
                 case .failure:
                     break
                 }
@@ -192,17 +208,27 @@ struct ContentView: View {
     
     private func handleSOGSSuccess(_ metaURL: URL, folderURL: URL, hasAccess: Bool) {
         // For SOGS, we need to maintain folder access until the model is loaded
-        // Store the folder URL with the model identifier so the renderer can access it
         let model = ModelIdentifier.gaussianSplat(metaURL)
-        lastLoadedModel = model
-        openWindow(value: model)
-        
-        // Keep folder access for much longer since SOGS loading happens asynchronously
+
+        // Pre-load model into cache with security-scoped access tracking
+        // ModelCache will manage the folder access lifecycle
         Task {
-            try await Task.sleep(for: .seconds(300)) // 5 minutes timeout for SOGS loading
-            if hasAccess {
-                print("Stopping security scoped access for folder after timeout")
-                folderURL.stopAccessingSecurityScopedResource()
+            do {
+                _ = try await ModelCache.shared.getModel(
+                    model,
+                    securityScopedURL: folderURL,  // Track folder URL, not meta.json
+                    hasSecurityScopedAccess: hasAccess
+                )
+                await MainActor.run {
+                    lastLoadedModel = model
+                    openWindow(value: model)
+                }
+            } catch {
+                // Release access on failure
+                if hasAccess {
+                    folderURL.stopAccessingSecurityScopedResource()
+                }
+                print("Failed to load SOGS model: \(error)")
             }
         }
     }

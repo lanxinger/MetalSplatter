@@ -38,24 +38,33 @@ public struct WebPDecoder {
         guard let ciImage = CIImage(data: webpData) else {
             throw WebPError.decodingFailed
         }
-        
+
         let context = CIContext()
         let width = Int(ciImage.extent.width)
         let height = Int(ciImage.extent.height)
-        
+
+        // Validate image dimensions to prevent excessive memory allocation
+        guard width > 0 && height > 0 else {
+            throw WebPError.invalidImageData
+        }
+        guard width <= 16384 && height <= 16384 else {
+            throw WebPError.invalidImageData  // Reject unreasonably large images
+        }
+
         // Create a bitmap context for RGBA8 pixel data
         let bytesPerPixel = 4
         let bytesPerRow = width * bytesPerPixel
         let totalBytes = height * bytesPerRow
-        
+
         var pixels = Data(count: totalBytes)
-        
+        var decodingSucceeded = false
+
         pixels.withUnsafeMutableBytes { ptr in
             guard let baseAddress = ptr.baseAddress else { return }
-            
+
             let colorSpace = CGColorSpaceCreateDeviceRGB()
             let bitmapInfo = CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedLast.rawValue)
-            
+
             guard let cgContext = CGContext(
                 data: baseAddress,
                 width: width,
@@ -65,12 +74,17 @@ public struct WebPDecoder {
                 space: colorSpace,
                 bitmapInfo: bitmapInfo.rawValue
             ) else { return }
-            
+
             // Render the CIImage to a CGImage first, then draw to the context
             guard let cgImage = context.createCGImage(ciImage, from: ciImage.extent) else { return }
             cgContext.draw(cgImage, in: CGRect(x: 0, y: 0, width: width, height: height))
+            decodingSucceeded = true
         }
-        
+
+        guard decodingSucceeded else {
+            throw WebPError.decodingFailed
+        }
+
         return DecodedImage(
             pixels: pixels,
             width: width,
@@ -85,21 +99,31 @@ public struct WebPDecoder {
               let cgImage = CGImageSourceCreateImageAtIndex(source, 0, nil) else {
             throw WebPError.decodingFailed
         }
-        
+
         let width = cgImage.width
         let height = cgImage.height
+
+        // Validate image dimensions
+        guard width > 0 && height > 0 else {
+            throw WebPError.invalidImageData
+        }
+        guard width <= 16384 && height <= 16384 else {
+            throw WebPError.invalidImageData  // Reject unreasonably large images
+        }
+
         let bytesPerPixel = 4
         let bytesPerRow = width * bytesPerPixel
         let totalBytes = height * bytesPerRow
-        
+
         var pixels = Data(count: totalBytes)
-        
+        var decodingSucceeded = false
+
         pixels.withUnsafeMutableBytes { ptr in
             guard let baseAddress = ptr.baseAddress else { return }
-            
+
             let colorSpace = CGColorSpaceCreateDeviceRGB()
             let bitmapInfo = CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedLast.rawValue)
-            
+
             guard let context = CGContext(
                 data: baseAddress,
                 width: width,
@@ -109,10 +133,15 @@ public struct WebPDecoder {
                 space: colorSpace,
                 bitmapInfo: bitmapInfo.rawValue
             ) else { return }
-            
+
             context.draw(cgImage, in: CGRect(x: 0, y: 0, width: width, height: height))
+            decodingSucceeded = true
         }
-        
+
+        guard decodingSucceeded else {
+            throw WebPError.decodingFailed
+        }
+
         return DecodedImage(
             pixels: pixels,
             width: width,
