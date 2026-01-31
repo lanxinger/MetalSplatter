@@ -430,7 +430,10 @@ struct ARMetalKitView: UIViewRepresentable {
         metalKitView.device = MTLCreateSystemDefaultDevice()
         metalKitView.backgroundColor = UIColor.clear
         metalKitView.isOpaque = false
-        
+#if os(iOS)
+        applyPreferredFrameRate(to: metalKitView)
+#endif
+
         print("AR: Metal device: \(metalKitView.device?.name ?? "nil")")
         
         // Create fresh renderer each time view is made
@@ -454,12 +457,21 @@ struct ARMetalKitView: UIViewRepresentable {
         DispatchQueue.main.async {
             self.setupGestureRecognizers(for: metalKitView, renderer: renderer, context: context)
         }
+
+#if os(iOS)
+        DispatchQueue.main.async {
+            self.applyPreferredFrameRate(to: metalKitView)
+        }
+#endif
         
         return metalKitView
     }
     
     func updateUIView(_ uiView: MTKView, context: Context) {
         print("AR: updateUIView called - renderer: \(renderer != nil ? "exists" : "nil")")
+#if os(iOS)
+        applyPreferredFrameRate(to: uiView)
+#endif
         
         // Only proceed if renderer exists and AR is not already active
         guard let renderer = renderer, !isARActive else { 
@@ -608,6 +620,24 @@ struct ARMetalKitView: UIViewRepresentable {
             return true
         }
     }
+
+#if os(iOS)
+    private func applyPreferredFrameRate(to view: MTKView) {
+        struct LogState {
+            static var didLog = false
+        }
+        let desiredMax = 120
+        if let screen = view.window?.windowScene?.screen {
+            view.preferredFramesPerSecond = min(screen.maximumFramesPerSecond, desiredMax)
+            if !LogState.didLog {
+                LogState.didLog = true
+                print("ARMetalKitView: screen max \(screen.maximumFramesPerSecond)fps, preferred \(view.preferredFramesPerSecond)fps")
+            }
+        } else {
+            view.preferredFramesPerSecond = desiredMax
+        }
+    }
+#endif
 }
 
 // MARK: - UIGestureRecognizer Extensions

@@ -365,6 +365,7 @@ struct MetalKitRendererView: ViewRepresentable {
     }
     
     func updateUIView(_ view: MTKView, context: UIViewRepresentableContext<MetalKitRendererView>) {
+        applyPreferredFrameRate(to: view)
         updateView(context.coordinator)
     }
 #endif
@@ -375,6 +376,12 @@ struct MetalKitRendererView: ViewRepresentable {
         if let metalDevice = MTLCreateSystemDefaultDevice() {
             metalKitView.device = metalDevice
         }
+#if os(iOS)
+        applyPreferredFrameRate(to: metalKitView)
+        DispatchQueue.main.async {
+            self.applyPreferredFrameRate(to: metalKitView)
+        }
+#endif
 
         let renderer = MetalKitSceneRenderer(metalKitView)
         coordinator.renderer = renderer
@@ -450,6 +457,24 @@ struct MetalKitRendererView: ViewRepresentable {
             }
         }
     }
+
+#if os(iOS)
+    private func applyPreferredFrameRate(to view: MTKView) {
+        struct LogState {
+            static var didLog = false
+        }
+        let desiredMax = 120
+        if let screen = view.window?.windowScene?.screen {
+            view.preferredFramesPerSecond = min(screen.maximumFramesPerSecond, desiredMax)
+            if !LogState.didLog {
+                LogState.didLog = true
+                print("MetalKitSceneView: screen max \(screen.maximumFramesPerSecond)fps, preferred \(view.preferredFramesPerSecond)fps")
+            }
+        } else {
+            view.preferredFramesPerSecond = desiredMax
+        }
+    }
+#endif
 }
 
 #if os(iOS)

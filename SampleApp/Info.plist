@@ -2,6 +2,8 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
+	<key>CADisableMinimumFrameDurationOnPhone</key>
+	<true/>
 	<key>NSCameraUsageDescription</key>
 	<string>This app needs camera access to provide AR functionality for viewing 3D Gaussian splats in augmented reality.</string>
 	<key>UIApplicationSceneManifest</key>
