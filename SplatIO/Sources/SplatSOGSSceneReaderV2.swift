@@ -105,17 +105,29 @@ public class SplatSOGSSceneReaderV2: SplatSceneReader {
     }
     
     public func read(to delegate: SplatSceneReaderDelegate) {
+        // Capture self weakly for the outer closure, but use a local strong reference
+        // for the duration of the read operation to ensure consistency
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self = self else { return }
+
+            // Perform the potentially long-running read operation
+            let result: Result<[SplatScenePoint], Error>
             do {
                 let points = try self.readScene()
-                DispatchQueue.main.async {
+                result = .success(points)
+            } catch {
+                result = .failure(error)
+            }
+
+            // Dispatch results to main queue
+            // By this point, the read is complete and delegate calls are safe
+            DispatchQueue.main.async {
+                switch result {
+                case .success(let points):
                     delegate.didStartReading(withPointCount: UInt32(points.count))
                     delegate.didRead(points: points)
                     delegate.didFinishReading()
-                }
-            } catch {
-                DispatchQueue.main.async {
+                case .failure(let error):
                     delegate.didFailReading(withError: error)
                 }
             }

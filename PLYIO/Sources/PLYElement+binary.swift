@@ -36,15 +36,28 @@ extension PLYElement {
                 guard remainingBytes >= countType.byteWidth else {
                     return nil
                 }
-                let count = Int(PLYElement.Property.decodeBinaryPrimitive(type: countType, from: body, at: offset, bigEndian: bigEndian).uint64Value!)
-                guard remainingBytes >= countType.byteWidth + count * valueType.byteWidth else {
+                // Safely extract count - return nil if countType is not an integer type
+                guard let countValue = PLYElement.Property.decodeBinaryPrimitive(type: countType, from: body, at: offset, bigEndian: bigEndian).uint64Value else {
+                    return nil
+                }
+                // Validate count is reasonable (max 100M elements to prevent DoS)
+                guard countValue <= 100_000_000 else {
+                    return nil
+                }
+                let count = Int(countValue)
+
+                // Use checked arithmetic to prevent integer overflow
+                let valueByteWidth = valueType.byteWidth
+                guard let listDataSize = count.multipliedReportingOverflow(by: valueByteWidth).overflow ? nil : count * valueByteWidth,
+                      let totalSize = listDataSize.addingReportingOverflow(countType.byteWidth).overflow ? nil : listDataSize + countType.byteWidth,
+                      remainingBytes >= totalSize else {
                     return nil
                 }
 
                 offset += countType.byteWidth
                 let value = PLYElement.Property.decodeBinaryList(valueType: valueType, from: body, at: offset, count: count, bigEndian: bigEndian)
                 properties[i] = value
-                offset += count * valueType.byteWidth
+                offset += listDataSize
             }
         }
 

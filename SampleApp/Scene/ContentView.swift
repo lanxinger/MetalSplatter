@@ -99,26 +99,41 @@ struct ContentView: View {
                     // Pre-load model into cache with security-scoped access tracking
                     // This ensures the access is released when the model is evicted
                     Task {
+                        var accessReleased = false
+                        defer {
+                            // Ensure security scope is released if we didn't hand it off to cache
+                            // This handles both errors and task cancellation
+                            if !accessReleased && hasAccess {
+                                url.stopAccessingSecurityScopedResource()
+                            }
+                        }
+
                         do {
+                            // Check for cancellation before expensive operation
+                            try Task.checkCancellation()
+
                             _ = try await ModelCache.shared.getModel(
                                 model,
                                 securityScopedURL: url,
                                 hasSecurityScopedAccess: hasAccess
                             )
+                            // Access successfully handed off to cache
+                            accessReleased = true
+
                             await MainActor.run {
                                 lastLoadedModel = model
                                 openWindow(value: model)
                             }
+                        } catch is CancellationError {
+                            print("Model loading cancelled for: \(url.lastPathComponent)")
+                            // accessReleased is false, defer will clean up
                         } catch {
-                            // Release access on failure
-                            if hasAccess {
-                                url.stopAccessingSecurityScopedResource()
-                            }
                             print("Failed to load model: \(error)")
+                            // accessReleased is false, defer will clean up
                         }
                     }
-                case .failure:
-                    break
+                case .failure(let error):
+                    print("File picker failed: \(error.localizedDescription)")
                 }
             }
             
@@ -213,22 +228,37 @@ struct ContentView: View {
         // Pre-load model into cache with security-scoped access tracking
         // ModelCache will manage the folder access lifecycle
         Task {
+            var accessReleased = false
+            defer {
+                // Ensure security scope is released if we didn't hand it off to cache
+                // This handles both errors and task cancellation
+                if !accessReleased && hasAccess {
+                    folderURL.stopAccessingSecurityScopedResource()
+                }
+            }
+
             do {
+                // Check for cancellation before expensive operation
+                try Task.checkCancellation()
+
                 _ = try await ModelCache.shared.getModel(
                     model,
                     securityScopedURL: folderURL,  // Track folder URL, not meta.json
                     hasSecurityScopedAccess: hasAccess
                 )
+                // Access successfully handed off to cache
+                accessReleased = true
+
                 await MainActor.run {
                     lastLoadedModel = model
                     openWindow(value: model)
                 }
+            } catch is CancellationError {
+                print("SOGS model loading cancelled for: \(folderURL.lastPathComponent)")
+                // accessReleased is false, defer will clean up
             } catch {
-                // Release access on failure
-                if hasAccess {
-                    folderURL.stopAccessingSecurityScopedResource()
-                }
                 print("Failed to load SOGS model: \(error)")
+                // accessReleased is false, defer will clean up
             }
         }
     }

@@ -170,7 +170,10 @@ private struct ElementInputMapping {
                 let individualSphericalHarmonicsPropertyIndices: [Int] = try (0..<sphericalHarmonicsCount).map {
                     try headerElement.index(forFloat32PropertyNamed: [ "\(SplatPLYConstants.PropertyName.sphericalHarmonicsPrefix)\($0)" ])
                 }
-                let sphericalHarmonicsPropertyIndices: [SIMD3<Int>] = stride(from: 0, to: individualSphericalHarmonicsPropertyIndices.count, by: 3).map {
+                // Spherical harmonics come in RGB triplets, so count must be divisible by 3
+                // Truncate to nearest multiple of 3 to prevent out-of-bounds access
+                let validCount = (individualSphericalHarmonicsPropertyIndices.count / 3) * 3
+                let sphericalHarmonicsPropertyIndices: [SIMD3<Int>] = stride(from: 0, to: validCount, by: 3).map {
                     SIMD3<Int>(individualSphericalHarmonicsPropertyIndices[$0],
                                individualSphericalHarmonicsPropertyIndices[$0 + 1],
                                individualSphericalHarmonicsPropertyIndices[$0 + 2])

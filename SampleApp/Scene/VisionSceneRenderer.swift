@@ -48,7 +48,7 @@ class VisionSceneRenderer {
 
     var model: ModelIdentifier?
     var modelRenderer: (any ModelRenderer)?
-    
+
     // Metal 4 Bindless Support
     var useMetal4Bindless: Bool = true // Default to enabled
 
@@ -59,6 +59,11 @@ class VisionSceneRenderer {
 
     let arSession: ARKitSession
     let worldTracking: WorldTrackingProvider
+
+    // Render loop control
+    private var renderThread: Thread?
+    private var shouldStopRenderLoop = false
+    private let renderLoopLock = NSLock()
 
     init(_ layerRenderer: LayerRenderer) throws {
         self.layerRenderer = layerRenderer
@@ -132,12 +137,33 @@ class VisionSceneRenderer {
                 return
             }
 
-            let renderThread = Thread {
-                self.renderLoop()
+            let thread = Thread { [weak self] in
+                self?.renderLoop()
             }
-            renderThread.name = "Render Thread"
-            renderThread.start()
+            thread.name = "Render Thread"
+
+            renderLoopLock.lock()
+            self.renderThread = thread
+            self.shouldStopRenderLoop = false
+            renderLoopLock.unlock()
+
+            thread.start()
         }
+    }
+
+    /// Stop the render loop and cleanup resources. Call this when the view is dismissed.
+    func stopRenderLoop() {
+        renderLoopLock.lock()
+        shouldStopRenderLoop = true
+        renderLoopLock.unlock()
+
+        // The render thread will exit on its next iteration
+        // We don't block waiting for it since it may be waiting on layerRenderer.waitUntilRunning()
+        Self.log.info("Signaled render loop to stop")
+    }
+
+    deinit {
+        stopRenderLoop()
     }
 
     private func viewports(drawable: LayerRenderer.Drawable, deviceAnchor: DeviceAnchor?) -> [ModelRendererViewportDescriptor] {
@@ -255,11 +281,36 @@ class VisionSceneRenderer {
 
     func renderLoop() {
         while true {
+            // Check stop flag
+            renderLoopLock.lock()
+            let shouldStop = shouldStopRenderLoop
+            renderLoopLock.unlock()
+
+            if shouldStop {
+                Self.log.info("Render loop stopped by request")
+                return
+            }
+
             if layerRenderer.state == .invalidated {
                 Self.log.warning("Layer is invalidated")
                 return
             } else if layerRenderer.state == .paused {
-                layerRenderer.waitUntilRunning()
+                // Use a timeout to periodically check stop flag instead of blocking forever
+                // waitUntilRunning() doesn't support timeout, so use a polling approach
+                var waitCount = 0
+                while layerRenderer.state == .paused && waitCount < 100 {
+                    Thread.sleep(forTimeInterval: 0.05) // 50ms polling interval
+                    waitCount += 1
+
+                    // Check stop flag during wait
+                    renderLoopLock.lock()
+                    let shouldStopNow = shouldStopRenderLoop
+                    renderLoopLock.unlock()
+                    if shouldStopNow {
+                        Self.log.info("Render loop stopped while paused")
+                        return
+                    }
+                }
                 continue
             } else {
                 autoreleasepool {

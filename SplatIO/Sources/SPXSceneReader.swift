@@ -484,6 +484,11 @@ public class SPXSceneReader: SplatSceneReader {
             pointSHCoeffs.reserveCapacity(coeffsPerPoint)
 
             for _ in 0..<coeffsPerPoint {
+                // Bounds check: ensure we have 3 bytes available at current index
+                guard shDataByteIndex + 2 < data.count else {
+                    print("SPXSceneReader: SH data bounds exceeded at byte \(shDataByteIndex)")
+                    break
+                }
                 let r = (Float(data[shDataByteIndex    ]) - 128.0) / 128.0
                 let g = (Float(data[shDataByteIndex + 1]) - 128.0) / 128.0
                 let b = (Float(data[shDataByteIndex + 2]) - 128.0) / 128.0
@@ -606,7 +611,13 @@ extension Array {
 
 // MARK: - Format-specific Parsers
 private extension SPXSceneReader {
+    /// Decode a 24-bit position value from 3 bytes at the given offset
+    /// Returns 0 if bounds check fails (defensive programming)
     func decodeSpxPosition(from data: Data, at offset: Int) -> Float {
+        // Bounds check: ensure we have 3 bytes available at offset
+        guard offset >= 0, offset + 2 < data.count else {
+            return 0.0
+        }
         let b1 = data[offset]
         let b2 = data[offset + 1]
         let b3 = data[offset + 2]

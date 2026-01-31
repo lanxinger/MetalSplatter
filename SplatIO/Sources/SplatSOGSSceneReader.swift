@@ -8,6 +8,7 @@ public class SplatSOGSSceneReader: SplatSceneReader {
         case missingFile(String)
         case webpDecodingFailed(String)
         case invalidTextureData
+        case missingRequiredTextureFile(String, Int, Int)  // texture name, required count, actual count
     }
     
     private let metaURL: URL
@@ -119,11 +120,25 @@ public class SplatSOGSSceneReader: SplatSceneReader {
     
     private func loadCompressedData(metadata: SOGSMetadata) throws -> SOGSCompressedData {
         print("SplatSOGSSceneReader: Loading WebP texture files...")
-        
+
+        // Validate required texture file counts before loading
+        guard metadata.means.files.count >= 2 else {
+            throw SOGSError.missingRequiredTextureFile("means", 2, metadata.means.files.count)
+        }
+        guard metadata.quats.files.count >= 1 else {
+            throw SOGSError.missingRequiredTextureFile("quats", 1, metadata.quats.files.count)
+        }
+        guard metadata.scales.files.count >= 1 else {
+            throw SOGSError.missingRequiredTextureFile("scales", 1, metadata.scales.files.count)
+        }
+        guard metadata.sh0.files.count >= 1 else {
+            throw SOGSError.missingRequiredTextureFile("sh0", 1, metadata.sh0.files.count)
+        }
+
         // Load means textures
         let means_l = try loadAndDecodeWebP(metadata.means.files[0])
         let means_u = try loadAndDecodeWebP(metadata.means.files[1])
-        
+
         // Load other required textures
         let quats = try loadAndDecodeWebP(metadata.quats.files[0])
         let scales = try loadAndDecodeWebP(metadata.scales.files[0])

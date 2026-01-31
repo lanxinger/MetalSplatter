@@ -63,57 +63,122 @@ kernel void computeMortonCodes(
     output[index].originalIndex = index;
 }
 
-// Compute bounds (min/max) for all splats using parallel reduction
-// Phase 1: Compute threadgroup-local bounds
-struct BoundsReduction {
-    float3 minBounds;
-    float padding1;
-    float3 maxBounds;
-    float padding2;
-};
+// Compute bounds (min/max) for all splats using hierarchical parallel reduction
+// Optimized: SIMD reduction -> Threadgroup reduction -> Single global atomic update
+// Uses CAS-based float atomics that correctly handle negative values
+
+// Atomic float min using compare-and-swap (handles negative floats correctly)
+inline void atomicMinFloatMorton(device atomic_uint* addr, float val) {
+    if (isnan(val)) return;
+    uint newVal = as_type<uint>(val);
+    uint prevVal = atomic_load_explicit(addr, memory_order_relaxed);
+    while (val < as_type<float>(prevVal)) {
+        if (atomic_compare_exchange_weak_explicit(addr, &prevVal, newVal,
+                                                   memory_order_relaxed,
+                                                   memory_order_relaxed)) {
+            break;
+        }
+    }
+}
+
+// Atomic float max using compare-and-swap (handles negative floats correctly)
+inline void atomicMaxFloatMorton(device atomic_uint* addr, float val) {
+    if (isnan(val)) return;
+    uint newVal = as_type<uint>(val);
+    uint prevVal = atomic_load_explicit(addr, memory_order_relaxed);
+    while (val > as_type<float>(prevVal)) {
+        if (atomic_compare_exchange_weak_explicit(addr, &prevVal, newVal,
+                                                   memory_order_relaxed,
+                                                   memory_order_relaxed)) {
+            break;
+        }
+    }
+}
 
 [[kernel, max_total_threads_per_threadgroup(256)]]
 kernel void computeBoundsForMorton(
     constant Splat* splats [[buffer(0)]],
-    device atomic_uint* atomicMinX [[buffer(1)]],
-    device atomic_uint* atomicMinY [[buffer(2)]],
-    device atomic_uint* atomicMinZ [[buffer(3)]],
-    device atomic_uint* atomicMaxX [[buffer(4)]],
-    device atomic_uint* atomicMaxY [[buffer(5)]],
-    device atomic_uint* atomicMaxZ [[buffer(6)]],
-    constant uint& splatCount [[buffer(7)]],
+    device atomic_uint* bounds [[buffer(1)]],  // Consolidated: [minX, minY, minZ, maxX, maxY, maxZ]
+    constant uint& splatCount [[buffer(2)]],
     uint index [[thread_position_in_grid]],
     uint localIndex [[thread_position_in_threadgroup]],
-    uint simdLaneId [[thread_index_in_simdgroup]]
+    uint simdLaneId [[thread_index_in_simdgroup]],
+    uint simdGroupId [[simdgroup_index_in_threadgroup]]
 ) {
-    if (index >= splatCount) return;
+    // Threadgroup storage for SIMD-group results (8 SIMD groups of 32 threads = 256 threads)
+    threadgroup float3 tgMin[8];
+    threadgroup float3 tgMax[8];
 
-    float3 pos = float3(splats[index].position);
+    // Initialize thread-local bounds
+    float3 threadMin = float3(INFINITY);
+    float3 threadMax = float3(-INFINITY);
 
-    // Use SIMD reduction within each SIMD group
-    float3 localMin = pos;
-    float3 localMax = pos;
-
-    localMin.x = simd_min(localMin.x);
-    localMin.y = simd_min(localMin.y);
-    localMin.z = simd_min(localMin.z);
-
-    localMax.x = simd_max(localMax.x);
-    localMax.y = simd_max(localMax.y);
-    localMax.z = simd_max(localMax.z);
-
-    // Only first lane of each SIMD group updates atomics
-    if (simdLaneId == 0) {
-        // Use atomic_fetch_min/max with floats encoded as uints
-        // Note: This works correctly for positive floats; for negative floats,
-        // we'd need a different approach. Most splat scenes have positive bounds.
-        atomic_fetch_min_explicit(atomicMinX, as_type<uint>(localMin.x), memory_order_relaxed);
-        atomic_fetch_min_explicit(atomicMinY, as_type<uint>(localMin.y), memory_order_relaxed);
-        atomic_fetch_min_explicit(atomicMinZ, as_type<uint>(localMin.z), memory_order_relaxed);
-        atomic_fetch_max_explicit(atomicMaxX, as_type<uint>(localMax.x), memory_order_relaxed);
-        atomic_fetch_max_explicit(atomicMaxY, as_type<uint>(localMax.y), memory_order_relaxed);
-        atomic_fetch_max_explicit(atomicMaxZ, as_type<uint>(localMax.z), memory_order_relaxed);
+    if (index < splatCount) {
+        float3 pos = float3(splats[index].position);
+        threadMin = pos;
+        threadMax = pos;
     }
+
+    // Phase 1: SIMD-group reduction (32 threads -> 1 value)
+    float3 simdMin = float3(
+        simd_min(threadMin.x),
+        simd_min(threadMin.y),
+        simd_min(threadMin.z)
+    );
+    float3 simdMax = float3(
+        simd_max(threadMax.x),
+        simd_max(threadMax.y),
+        simd_max(threadMax.z)
+    );
+
+    // First lane of each SIMD group writes to threadgroup memory
+    if (simdLaneId == 0) {
+        tgMin[simdGroupId] = simdMin;
+        tgMax[simdGroupId] = simdMax;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    // Phase 2: Threadgroup reduction (8 SIMD groups -> 1 value)
+    // All lanes in SIMD group 0 must participate uniformly in simd_min/simd_max
+    // to avoid undefined behavior from divergent control flow.
+    // Lanes >= 8 use neutral values that don't affect the reduction result.
+    if (simdGroupId == 0) {
+        // Lanes 0-7 load from threadgroup memory, lanes 8-31 use neutral values
+        float3 tMin = (simdLaneId < 8) ? tgMin[simdLaneId] : float3(INFINITY);
+        float3 tMax = (simdLaneId < 8) ? tgMax[simdLaneId] : float3(-INFINITY);
+
+        // All 32 lanes participate uniformly in SIMD reduction
+        tMin.x = simd_min(tMin.x);
+        tMin.y = simd_min(tMin.y);
+        tMin.z = simd_min(tMin.z);
+        tMax.x = simd_max(tMax.x);
+        tMax.y = simd_max(tMax.y);
+        tMax.z = simd_max(tMax.z);
+
+        // Only thread 0 updates global atomics (one update per threadgroup)
+        if (simdLaneId == 0) {
+            atomicMinFloatMorton(&bounds[0], tMin.x);
+            atomicMinFloatMorton(&bounds[1], tMin.y);
+            atomicMinFloatMorton(&bounds[2], tMin.z);
+            atomicMaxFloatMorton(&bounds[3], tMax.x);
+            atomicMaxFloatMorton(&bounds[4], tMax.y);
+            atomicMaxFloatMorton(&bounds[5], tMax.z);
+        }
+    }
+}
+
+// Reset bounds buffer before computation
+[[kernel]]
+kernel void resetBoundsForMorton(device atomic_uint* bounds [[buffer(0)]]) {
+    uint posInf = as_type<uint>(INFINITY);
+    uint negInf = as_type<uint>(-INFINITY);
+
+    atomic_store_explicit(&bounds[0], posInf, memory_order_relaxed);  // minX
+    atomic_store_explicit(&bounds[1], posInf, memory_order_relaxed);  // minY
+    atomic_store_explicit(&bounds[2], posInf, memory_order_relaxed);  // minZ
+    atomic_store_explicit(&bounds[3], negInf, memory_order_relaxed);  // maxX
+    atomic_store_explicit(&bounds[4], negInf, memory_order_relaxed);  // maxY
+    atomic_store_explicit(&bounds[5], negInf, memory_order_relaxed);  // maxZ
 }
 
 // Reorder splats based on sorted Morton indices

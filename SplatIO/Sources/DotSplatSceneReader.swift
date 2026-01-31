@@ -33,7 +33,15 @@ public class DotSplatSceneReader: SplatSceneReader {
 
         var bytesInBuffer = 0
         while true {
-            let readResult = inputStream.read(buffer + bytesInBuffer, maxLength: bufferSize - bytesInBuffer)
+            // Calculate available space, ensuring we don't overflow
+            let availableSpace = bufferSize - bytesInBuffer
+            guard availableSpace > 0 else {
+                // Buffer is full but we couldn't parse any points - corrupt data
+                delegate.didFailReading(withError: Error.readError)
+                return
+            }
+
+            let readResult = inputStream.read(buffer + bytesInBuffer, maxLength: availableSpace)
             switch readResult {
             case -1:
                 delegate.didFailReading(withError: Error.readError)
@@ -46,11 +54,22 @@ public class DotSplatSceneReader: SplatSceneReader {
                 delegate.didFinishReading()
                 return
             default:
+                // Defensive bounds check: ensure stream honored maxLength contract
+                guard readResult <= availableSpace else {
+                    delegate.didFailReading(withError: Error.readError)
+                    return
+                }
                 bytesInBuffer += readResult
             }
 
             let encodedPointCount = bytesInBuffer / DotSplatEncodedPoint.byteWidth
             guard encodedPointCount > 0 else { continue }
+
+            // Validate bounds before creating buffer pointer
+            guard bytesInBuffer <= bufferSize else {
+                delegate.didFailReading(withError: Error.readError)
+                return
+            }
 
             let bufferPointer = UnsafeBufferPointer(start: buffer, count: bytesInBuffer)
             let splatPoints = (0..<encodedPointCount).map {
@@ -60,6 +79,12 @@ public class DotSplatSceneReader: SplatSceneReader {
             delegate.didRead(points: splatPoints)
 
             let usedBytesInBuffer = encodedPointCount * DotSplatEncodedPoint.byteWidth
+            // Defensive check: ensure usedBytesInBuffer is valid
+            guard usedBytesInBuffer <= bytesInBuffer else {
+                delegate.didFailReading(withError: Error.readError)
+                return
+            }
+
             if usedBytesInBuffer < bytesInBuffer {
                 memmove(buffer, buffer+usedBytesInBuffer, bytesInBuffer - usedBytesInBuffer)
             }

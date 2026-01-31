@@ -181,8 +181,9 @@ void countingSortPrefixSum(
     }
 }
 
-// Optimized parallel prefix sum using threadgroup memory and Hillis-Steele algorithm
-// More efficient for larger bin counts
+// Optimized parallel prefix sum using Blelloch algorithm (work-efficient)
+// Two phases: up-sweep (reduce) and down-sweep
+// More efficient for larger bin counts and correctly handles in-place updates
 [[kernel]]
 void countingSortPrefixSumParallel(
     device uint* histogram [[buffer(0)]],
@@ -193,33 +194,41 @@ void countingSortPrefixSumParallel(
     uint tgSize [[threads_per_threadgroup]]
 ) {
     // Load into threadgroup memory
-    uint index = tid;
-    while (index < binCount) {
+    for (uint index = tid; index < binCount; index += tgSize) {
         temp[index] = histogram[index];
-        index += tgSize;
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
 
-    // Hillis-Steele prefix sum
+    // Up-sweep (reduce) phase - build sum tree
+    // Each iteration combines pairs of elements with increasing stride
     for (uint stride = 1; stride < binCount; stride *= 2) {
-        index = tid;
-        while (index < binCount) {
-            uint val = temp[index];
-            if (index >= stride) {
-                val += temp[index - stride];
-            }
-            threadgroup_barrier(mem_flags::mem_threadgroup);
-            temp[index] = val;
-            index += tgSize;
+        uint strideDouble = stride * 2;
+        for (uint index = tid * strideDouble + strideDouble - 1; index < binCount; index += tgSize * strideDouble) {
+            temp[index] += temp[index - stride];
         }
         threadgroup_barrier(mem_flags::mem_threadgroup);
     }
 
-    // Convert inclusive sum to exclusive sum and write back
-    index = tid;
-    while (index < binCount) {
-        prefixSum[index] = (index == 0) ? 0 : temp[index - 1];
-        index += tgSize;
+    // Clear the last element (root of tree) for exclusive scan
+    if (tid == 0) {
+        temp[binCount - 1] = 0;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    // Down-sweep phase - propagate partial sums down the tree
+    for (uint stride = binCount / 2; stride >= 1; stride /= 2) {
+        uint strideDouble = stride * 2;
+        for (uint index = tid * strideDouble + strideDouble - 1; index < binCount; index += tgSize * strideDouble) {
+            uint t = temp[index - stride];
+            temp[index - stride] = temp[index];
+            temp[index] += t;
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+
+    // Write back to global memory
+    for (uint index = tid; index < binCount; index += tgSize) {
+        prefixSum[index] = temp[index];
     }
 }
 

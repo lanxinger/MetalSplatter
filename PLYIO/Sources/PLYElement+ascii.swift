@@ -35,18 +35,14 @@ extension PLYElement {
         for (i, propertyHeader) in elementHeader.properties.enumerated() {
             switch propertyHeader.type {
             case .primitive(let primitiveType):
-                guard let string = stringParser.nextStringSeparatedByWhitespace() else {
-                    throw ASCIIDecodeError.bodyMissingPropertyValuesInElement(elementHeader, elementIndex, propertyHeader)
-                }
-                guard let value = Property.tryDecodeASCIIPrimitive(type: primitiveType, from: string) else {
+                // Use direct parsing to avoid String allocation
+                guard let value = Property.tryDecodeASCIIPrimitive(type: primitiveType, from: &stringParser) else {
                     throw ASCIIDecodeError.bodyInvalidStringForPropertyType(elementHeader, elementIndex, propertyHeader)
                 }
                 properties[i] = value
             case .list(countType: let countType, valueType: let valueType):
-                guard let countString = stringParser.nextStringSeparatedByWhitespace() else {
-                    throw ASCIIDecodeError.bodyMissingPropertyValuesInElement(elementHeader, elementIndex, propertyHeader)
-                }
-                guard let count = Property.tryDecodeASCIIPrimitive(type: countType, from: countString)?.uint64Value else {
+                // Use direct parsing for list count to avoid String allocation
+                guard let count = Property.tryDecodeASCIIPrimitive(type: countType, from: &stringParser)?.uint64Value else {
                     throw ASCIIDecodeError.bodyInvalidStringForPropertyType(elementHeader, elementIndex, propertyHeader)
                 }
 
@@ -66,6 +62,38 @@ extension PLYElement {
 }
 
 fileprivate extension PLYElement.Property {
+    // Direct parsing from UnsafeStringParser (zero allocation for common types)
+    static func tryDecodeASCIIPrimitive(type: PLYHeader.PrimitivePropertyType,
+                                        from parser: inout UnsafeStringParser) -> PLYElement.Property? {
+        switch type {
+        case .int8:
+            guard let value = parser.nextInt64(), value >= Int8.min && value <= Int8.max else { return nil }
+            return .int8(Int8(value))
+        case .uint8:
+            guard let value = parser.nextUInt64(), value <= UInt8.max else { return nil }
+            return .uint8(UInt8(value))
+        case .int16:
+            guard let value = parser.nextInt64(), value >= Int16.min && value <= Int16.max else { return nil }
+            return .int16(Int16(value))
+        case .uint16:
+            guard let value = parser.nextUInt64(), value <= UInt16.max else { return nil }
+            return .uint16(UInt16(value))
+        case .int32:
+            guard let value = parser.nextInt64(), value >= Int32.min && value <= Int32.max else { return nil }
+            return .int32(Int32(value))
+        case .uint32:
+            guard let value = parser.nextUInt64(), value <= UInt32.max else { return nil }
+            return .uint32(UInt32(value))
+        case .float32:
+            guard let value = parser.nextFloat32() else { return nil }
+            return .float32(value)
+        case .float64:
+            guard let value = parser.nextFloat64() else { return nil }
+            return .float64(value)
+        }
+    }
+
+    // String-based parsing (legacy, for compatibility)
     static func tryDecodeASCIIPrimitive(type: PLYHeader.PrimitivePropertyType,
                                         from string: String) -> PLYElement.Property? {
         switch type {
@@ -186,36 +214,131 @@ fileprivate struct UnsafeStringParser {
     var size: Int
     var currentPosition = 0
 
-    mutating func nextStringSeparatedByWhitespace() -> String? {
+    // Find the next token boundaries without allocating
+    private mutating func findNextTokenBounds() -> (start: Int, end: Int)? {
         var start = currentPosition
         var end = start
-        while true {
-            if end == size {
-                guard start < end else { return nil }
-                let s = String(data: Data(bytes: data + offset + start, count: end - start), encoding: .utf8)
-                currentPosition = size
-                return s
-            }
 
+        // Skip leading whitespace
+        while start < size {
+            let byte = (data + offset + start).pointee
+            if byte != PLYReader.Constants.space && byte != 0 {
+                break
+            }
+            start += 1
+        }
+
+        guard start < size else { return nil }
+        end = start
+
+        // Find end of token
+        while end < size {
             let byte = (data + offset + end).pointee
             if byte == PLYReader.Constants.space || byte == 0 {
-                if start == end {
-                    // Starts with a space -- ignore it; strings may be separated by multiple spaces
-                    end += 1
-                    start = end
-                } else {
-                    // Temporarily make this into a null-terminated string for String()'s benefit
-                    let oldEndValue = (data + offset + end).pointee
-                    (data + offset + end).pointee = 0
-                    let s = String(cString: data + offset + start)
-                    (data + offset + end).pointee = oldEndValue
-                    currentPosition = end+1
-                    return s
+                break
+            }
+            end += 1
+        }
+
+        return start < end ? (start, end) : nil
+    }
+
+    // Temporarily null-terminate and execute closure
+    // Handles edge case where end == size (last token without trailing delimiter)
+    private func withNullTerminatedToken<T>(start: Int, end: Int, _ body: (UnsafePointer<CChar>) -> T) -> T {
+        // When end < size, we can safely do in-place null termination
+        if end < size {
+            let savedByte = (data + offset + end).pointee
+            (data + offset + end).pointee = 0
+            defer { (data + offset + end).pointee = savedByte }
+
+            return (data + offset + start).withMemoryRebound(to: CChar.self, capacity: end - start + 1) { charPtr in
+                body(charPtr)
+            }
+        } else {
+            // end == size: we're at the buffer boundary, must copy to temporary buffer
+            let tokenLength = end - start
+            return withUnsafeTemporaryAllocation(of: CChar.self, capacity: tokenLength + 1) { tempBuffer in
+                // Copy token bytes
+                for i in 0..<tokenLength {
+                    tempBuffer[i] = CChar(bitPattern: (data + offset + start + i).pointee)
                 }
-            } else {
-                end += 1
+                tempBuffer[tokenLength] = 0  // Null terminate
+                return body(tempBuffer.baseAddress!)
             }
         }
+    }
+
+    // MARK: - Direct numeric parsing (zero allocation)
+
+    mutating func nextFloat32() -> Float? {
+        guard let (start, end) = findNextTokenBounds() else { return nil }
+
+        let result = withNullTerminatedToken(start: start, end: end) { charPtr -> Float? in
+            var endPtr: UnsafeMutablePointer<CChar>?
+            let value = strtof(charPtr, &endPtr)
+            // Verify entire token was consumed (endPtr should point to null terminator)
+            guard let endPtr, endPtr.pointee == 0 else { return nil }
+            return value
+        }
+
+        currentPosition = end + 1
+        return result
+    }
+
+    mutating func nextFloat64() -> Double? {
+        guard let (start, end) = findNextTokenBounds() else { return nil }
+
+        let result = withNullTerminatedToken(start: start, end: end) { charPtr -> Double? in
+            var endPtr: UnsafeMutablePointer<CChar>?
+            let value = strtod(charPtr, &endPtr)
+            guard let endPtr, endPtr.pointee == 0 else { return nil }
+            return value
+        }
+
+        currentPosition = end + 1
+        return result
+    }
+
+    mutating func nextInt64() -> Int64? {
+        guard let (start, end) = findNextTokenBounds() else { return nil }
+
+        let result = withNullTerminatedToken(start: start, end: end) { charPtr -> Int64? in
+            var endPtr: UnsafeMutablePointer<CChar>?
+            let value = strtoll(charPtr, &endPtr, 10)
+            guard let endPtr, endPtr.pointee == 0 else { return nil }
+            return value
+        }
+
+        currentPosition = end + 1
+        return result
+    }
+
+    mutating func nextUInt64() -> UInt64? {
+        guard let (start, end) = findNextTokenBounds() else { return nil }
+
+        let result = withNullTerminatedToken(start: start, end: end) { charPtr -> UInt64? in
+            var endPtr: UnsafeMutablePointer<CChar>?
+            let value = strtoull(charPtr, &endPtr, 10)
+            guard let endPtr, endPtr.pointee == 0 else { return nil }
+            return value
+        }
+
+        currentPosition = end + 1
+        return result
+    }
+
+    // MARK: - String-based parsing (fallback, allocates)
+
+    mutating func nextStringSeparatedByWhitespace() -> String? {
+        guard let (start, end) = findNextTokenBounds() else { return nil }
+
+        let result = withNullTerminatedToken(start: start, end: end) { charPtr in
+            String(cString: charPtr)
+        }
+
+        currentPosition = end + 1
+        return result
     }
 
     mutating func nextElementSeparatedByWhitespace<T: LosslessStringConvertible>() throws -> T? {

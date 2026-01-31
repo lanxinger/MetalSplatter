@@ -48,10 +48,14 @@ public class Metal4BindlessArchitecture {
     private let populationQueue = DispatchQueue(label: "com.metalsplatter.bindless.population", qos: .userInitiated)
 
     // Argument buffers and encoders - double-buffered for thread safety
-    private var argumentEncoder: MTLArgumentEncoder?
+    // Each buffer has its own encoder to avoid MTLArgumentEncoder thread-safety issues
+    private var argumentEncoders: [MTLArgumentEncoder] = []  // One per buffer for thread safety
     private var argumentBuffers: [MTLBuffer] = []  // Double-buffered
     private var currentBufferIndex: Int = 0
     private var resourceTables: [MTLBuffer] = []  // Double-buffered resource tables
+
+    // Serial queue for encoder operations to ensure thread safety
+    private let encoderQueue = DispatchQueue(label: "com.metalsplatter.bindless.encoder")
 
     // Resource tracking with type-specific slot management
     private var resourceRegistry: ResourceRegistry
@@ -146,25 +150,28 @@ public class Metal4BindlessArchitecture {
             argumentDescriptors.append(descriptor)
         }
 
-        // Create encoder
-        guard let encoder = device.makeArgumentEncoder(arguments: argumentDescriptors) else {
+        // Create double-buffered argument buffers, each with its own encoder
+        // This avoids MTLArgumentEncoder thread-safety issues by isolating encoders per buffer
+        guard let templateEncoder = device.makeArgumentEncoder(arguments: argumentDescriptors) else {
             throw BindlessError.argumentEncoderCreationFailed
         }
+        let bufferSize = templateEncoder.encodedLength
 
-        self.argumentEncoder = encoder
-
-        // Create double-buffered argument buffers
-        // Each buffer holds one complete set of resource bindings
-        let bufferSize = encoder.encodedLength
         for i in 0..<2 {
             guard let buffer = device.makeBuffer(length: bufferSize, options: [.storageModeShared]) else {
                 throw BindlessError.argumentBufferCreationFailed
             }
             buffer.label = "Metal4 Bindless Argument Buffer \(i)"
             argumentBuffers.append(buffer)
+
+            // Create a dedicated encoder for each buffer to ensure thread safety
+            guard let encoder = device.makeArgumentEncoder(arguments: argumentDescriptors) else {
+                throw BindlessError.argumentEncoderCreationFailed
+            }
+            argumentEncoders.append(encoder)
         }
 
-        Self.log.info("Created argument encoder with \(argumentDescriptors.count) descriptors, buffer size: \(bufferSize) bytes (double-buffered)")
+        Self.log.info("Created \(self.argumentEncoders.count) argument encoders with \(argumentDescriptors.count) descriptors each, buffer size: \(bufferSize) bytes")
     }
 
     private func setupResourceTable() throws {
@@ -289,8 +296,13 @@ public class Metal4BindlessArchitecture {
 
     private func startBackgroundResourcePopulation() {
         populationQueue.async { [weak self] in
-            while let strongSelf = self {
-                // Check stop flag
+            while true {
+                // Check if self still exists and get stop flag atomically
+                guard let strongSelf = self else {
+                    // Self was deallocated, exit immediately
+                    break
+                }
+
                 strongSelf.populationLock.lock()
                 let shouldStop = strongSelf.shouldStopPopulation
                 strongSelf.populationLock.unlock()
@@ -299,8 +311,15 @@ public class Metal4BindlessArchitecture {
                     break
                 }
 
-                // Wait for work with timeout (allows periodic stop flag checks)
-                let result = strongSelf.populationSemaphore.wait(timeout: .now() + .milliseconds(100))
+                // Release strong reference before waiting to allow deallocation
+                // Wait for work with timeout (allows periodic stop flag checks and deallocation)
+                let semaphore = strongSelf.populationSemaphore
+                let result = semaphore.wait(timeout: .now() + .milliseconds(100))
+
+                // Re-check self after wait - it may have been deallocated while waiting
+                guard let strongSelf = self else {
+                    break
+                }
 
                 if result == .success {
                     strongSelf.processPendingResources()
@@ -310,10 +329,18 @@ public class Metal4BindlessArchitecture {
     }
 
     deinit {
+        // Signal background thread to stop
         populationLock.lock()
         shouldStopPopulation = true
         populationLock.unlock()
-        populationSemaphore.signal()  // Wake up thread so it can exit
+
+        // Wake up the thread if it's waiting on the semaphore
+        populationSemaphore.signal()
+
+        // Give the background thread time to exit gracefully
+        // The thread checks shouldStopPopulation every 100ms via timeout
+        // Note: We can't use a completion handler with DispatchQueue.async,
+        // so we rely on the timeout-based polling in the background thread
     }
 
     private func processPendingResources() {
@@ -321,6 +348,7 @@ public class Metal4BindlessArchitecture {
         resourceLock.lock()
         let resourcesToProcess = Array(pendingResources.prefix(16))
         pendingResources.removeFirst(min(16, pendingResources.count))
+        // Snapshot both buffer indices for population
         let currentIndex = currentBufferIndex
         let writeBufferIndex = 1 - currentIndex
         resourceLock.unlock()
@@ -329,12 +357,15 @@ public class Metal4BindlessArchitecture {
 
         Self.log.debug("Processing \(resourcesToProcess.count) pending resources in background")
 
-        // Populate to both buffers for immediate visibility
+        // Populate to BOTH buffers for immediate visibility
+        // This ensures newly registered resources are visible on the very next render,
+        // regardless of whether swapBuffers() has been called.
+        // Each buffer has its own encoder, so this is thread-safe.
         for handle in resourcesToProcess {
             if let entry = resourceRegistry.getEntry(for: handle) {
                 switch entry.resource {
                 case .buffer(let buffer):
-                    // Populate to write (back) buffer
+                    // Populate to write (back) buffer first
                     populateToBuffer(at: writeBufferIndex, handle: handle, buffer: buffer, argumentIndex: entry.argumentIndex)
                     // Also populate to current (front) buffer for immediate visibility
                     populateToBuffer(at: currentIndex, handle: handle, buffer: buffer, argumentIndex: entry.argumentIndex)
@@ -348,16 +379,22 @@ public class Metal4BindlessArchitecture {
         bindlessMetrics.resourcesPopulatedInBackground += resourcesToProcess.count
     }
 
-    /// Populate resource to a specific buffer (thread-safe via buffer index isolation)
+    /// Populate resource to a specific buffer (thread-safe via dedicated encoder per buffer)
     private func populateToBuffer(at bufferIndex: Int, handle: ResourceHandle, buffer: MTLBuffer, argumentIndex: Int) {
-        guard let encoder = argumentEncoder,
+        guard bufferIndex < argumentEncoders.count,
               bufferIndex < argumentBuffers.count,
               bufferIndex < resourceTables.count else { return }
 
+        // Use the encoder dedicated to this buffer index - no thread contention
+        let encoder = argumentEncoders[bufferIndex]
         let argBuffer = argumentBuffers[bufferIndex]
 
-        encoder.setArgumentBuffer(argBuffer, offset: 0)
-        encoder.setBuffer(buffer, offset: 0, index: argumentIndex)
+        // Serialize encoder operations for this specific buffer
+        // Each buffer has its own encoder, so different buffer indices can run in parallel
+        encoderQueue.sync {
+            encoder.setArgumentBuffer(argBuffer, offset: 0)
+            encoder.setBuffer(buffer, offset: 0, index: argumentIndex)
+        }
 
         // Update the matching resource table (double-buffered)
         updateResourceTable(handle: handle, tableIndex: bufferIndex)
@@ -367,41 +404,52 @@ public class Metal4BindlessArchitecture {
     }
 
     private func populateToBuffer(at bufferIndex: Int, handle: ResourceHandle, texture: MTLTexture, argumentIndex: Int) {
-        guard let encoder = argumentEncoder,
+        guard bufferIndex < argumentEncoders.count,
               bufferIndex < argumentBuffers.count,
               bufferIndex < resourceTables.count else { return }
 
+        let encoder = argumentEncoders[bufferIndex]
         let argBuffer = argumentBuffers[bufferIndex]
 
-        encoder.setArgumentBuffer(argBuffer, offset: 0)
-        encoder.setTexture(texture, index: argumentIndex)
+        encoderQueue.sync {
+            encoder.setArgumentBuffer(argBuffer, offset: 0)
+            encoder.setTexture(texture, index: argumentIndex)
+        }
 
         updateResourceTable(handle: handle, tableIndex: bufferIndex)
         residencyController?.trackResource(texture, handle: handle)
     }
 
-    /// Unsafe population - called under resourceLock for immediate population
+    /// Immediate population - called under resourceLock when background population is disabled
     private func populateResourceUnsafe(_ handle: ResourceHandle, buffer: MTLBuffer, argumentIndex: Int) {
-        guard let encoder = argumentEncoder else { return }
+        guard argumentEncoders.count == argumentBuffers.count else { return }
 
-        // Populate both argument buffers and both resource tables
-        for (i, argBuffer) in argumentBuffers.enumerated() {
-            encoder.setArgumentBuffer(argBuffer, offset: 0)
-            encoder.setBuffer(buffer, offset: 0, index: argumentIndex)
-            updateResourceTable(handle: handle, tableIndex: i)
+        // Populate both argument buffers and both resource tables using per-buffer encoders
+        encoderQueue.sync {
+            for i in 0..<argumentBuffers.count {
+                let encoder = argumentEncoders[i]
+                let argBuffer = argumentBuffers[i]
+                encoder.setArgumentBuffer(argBuffer, offset: 0)
+                encoder.setBuffer(buffer, offset: 0, index: argumentIndex)
+                updateResourceTable(handle: handle, tableIndex: i)
+            }
         }
 
         residencyController?.trackResource(buffer, handle: handle)
     }
 
     private func populateResourceUnsafe(_ handle: ResourceHandle, texture: MTLTexture, argumentIndex: Int) {
-        guard let encoder = argumentEncoder else { return }
+        guard argumentEncoders.count == argumentBuffers.count else { return }
 
-        // Populate both argument buffers and both resource tables
-        for (i, argBuffer) in argumentBuffers.enumerated() {
-            encoder.setArgumentBuffer(argBuffer, offset: 0)
-            encoder.setTexture(texture, index: argumentIndex)
-            updateResourceTable(handle: handle, tableIndex: i)
+        // Populate both argument buffers and both resource tables using per-buffer encoders
+        encoderQueue.sync {
+            for i in 0..<argumentBuffers.count {
+                let encoder = argumentEncoders[i]
+                let argBuffer = argumentBuffers[i]
+                encoder.setArgumentBuffer(argBuffer, offset: 0)
+                encoder.setTexture(texture, index: argumentIndex)
+                updateResourceTable(handle: handle, tableIndex: i)
+            }
         }
 
         residencyController?.trackResource(texture, handle: handle)

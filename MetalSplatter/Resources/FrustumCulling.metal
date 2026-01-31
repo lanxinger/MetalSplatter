@@ -18,78 +18,92 @@ kernel void frustumCullSplats(uint index [[thread_position_in_grid]],
                              device atomic_uint* visibleCount [[ buffer(2) ]],
                              constant FrustumCullData& cullData [[ buffer(3) ]],
                              constant uint& splatCount [[ buffer(4) ]]) {
-    
+    // Note: visibleIndices buffer must be at least splatCount elements (all could be visible)
+
     // Threadgroup memory for visible indices batching
     threadgroup uint localVisibleIndices[256];
     threadgroup atomic_uint localVisibleCount;
-    
-    // Initialize threadgroup counter
+
+    // Initialize threadgroup counter - thread 0 always does this even if index >= splatCount
     if (tid == 0) {
         atomic_store_explicit(&localVisibleCount, 0, memory_order_relaxed);
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
-    
-    if (index >= splatCount) return;
-    
-    // Load splat position
-    float3 splatPos = float3(inputSplats[index].position);
-    
-    // Distance culling (optional, skip if maxDistance is very large)
-    if (cullData.maxDistance < 10000.0) {
-        float3 toCam = splatPos - cullData.cameraPosition;
-        float distanceSquared = dot(toCam, toCam);
-        float maxDistanceSquared = cullData.maxDistance * cullData.maxDistance;
-        
-        if (distanceSquared > maxDistanceSquared) {
-            return;
+
+    // Early exit for out-of-bounds threads, but after barrier to ensure initialization
+    bool inBounds = index < splatCount;
+
+    bool visible = false;
+
+    if (inBounds) {
+        // Load splat position
+        float3 splatPos = float3(inputSplats[index].position);
+
+        visible = true;
+
+        // Distance culling (optional, skip if maxDistance is very large)
+        if (cullData.maxDistance < 10000.0) {
+            float3 toCam = splatPos - cullData.cameraPosition;
+            float distanceSquared = dot(toCam, toCam);
+            float maxDistanceSquared = cullData.maxDistance * cullData.maxDistance;
+
+            if (distanceSquared > maxDistanceSquared) {
+                visible = false;
+            }
+        }
+
+        if (visible) {
+            // === NDC-based frustum culling ===
+            // Transform splat position to clip space
+            float4 clipPos = cullData.viewProjectionMatrix * float4(splatPos, 1.0);
+
+            // Only cull if clearly behind camera (conservative)
+            // Use a negative threshold to allow splats that are very close
+            if (clipPos.w < -0.1) {
+                visible = false;
+            }
+
+            // For splats in front of camera, check X/Y bounds only
+            // Skip near/far plane culling - it's too aggressive for gaussian splats
+            if (visible && clipPos.w > 0.001) {
+                // Perspective divide for X/Y only
+                float invW = 1.0 / clipPos.w;
+                float ndcX = clipPos.x * invW;
+                float ndcY = clipPos.y * invW;
+
+                // Very conservative margin - splats can be quite large
+                float margin = 1.5;
+
+                // Only cull if clearly outside left/right/top/bottom
+                visible = (ndcX >= -1.0 - margin) && (ndcX <= 1.0 + margin) &&
+                          (ndcY >= -1.0 - margin) && (ndcY <= 1.0 + margin);
+            }
         }
     }
-    
-    // === NDC-based frustum culling ===
-    // Transform splat position to clip space
-    float4 clipPos = cullData.viewProjectionMatrix * float4(splatPos, 1.0);
-    
-    bool visible = true;
-    
-    // Only cull if clearly behind camera (conservative)
-    // Use a negative threshold to allow splats that are very close
-    if (clipPos.w < -0.1) {
-        visible = false;
-    }
-    
-    // For splats in front of camera, check X/Y bounds only
-    // Skip near/far plane culling - it's too aggressive for gaussian splats
-    if (visible && clipPos.w > 0.001) {
-        // Perspective divide for X/Y only
-        float invW = 1.0 / clipPos.w;
-        float ndcX = clipPos.x * invW;
-        float ndcY = clipPos.y * invW;
-        
-        // Very conservative margin - splats can be quite large
-        float margin = 1.5;
-        
-        // Only cull if clearly outside left/right/top/bottom
-        visible = (ndcX >= -1.0 - margin) && (ndcX <= 1.0 + margin) &&
-                  (ndcY >= -1.0 - margin) && (ndcY <= 1.0 + margin);
-    }
-    
-    // Store visible indices
+
+    // Store visible indices in threadgroup memory
     if (visible) {
         uint localIdx = atomic_fetch_add_explicit(&localVisibleCount, 1, memory_order_relaxed);
         if (localIdx < 256) {
             localVisibleIndices[localIdx] = index;
         }
     }
-    
+
     threadgroup_barrier(mem_flags::mem_threadgroup);
-    
-    // Flush visible indices to global memory
+
+    // Flush visible indices to global memory with bounds checking
     if (tid == 0) {
         uint localCount = min(atomic_load_explicit(&localVisibleCount, memory_order_relaxed), 256u);
-        uint globalStartIdx = atomic_fetch_add_explicit(visibleCount, localCount, memory_order_relaxed);
-        
-        for (uint i = 0; i < localCount; i++) {
-            visibleIndices[globalStartIdx + i] = localVisibleIndices[i];
+        if (localCount > 0) {
+            uint globalStartIdx = atomic_fetch_add_explicit(visibleCount, localCount, memory_order_relaxed);
+
+            // Bounds check against splatCount (buffer must be at least this size)
+            for (uint i = 0; i < localCount; i++) {
+                uint globalIdx = globalStartIdx + i;
+                if (globalIdx < splatCount) {
+                    visibleIndices[globalIdx] = localVisibleIndices[i];
+                }
+            }
         }
     }
 }

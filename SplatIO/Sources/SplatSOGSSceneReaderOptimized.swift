@@ -9,6 +9,7 @@ public class SplatSOGSSceneReaderOptimized: SplatSceneReader {
         case missingFile(String)
         case webpDecodingFailed(String)
         case invalidTextureData
+        case missingRequiredTextureFile(String, Int, Int)  // texture name, required count, actual count
     }
     
     private let metaURL: URL
@@ -112,7 +113,21 @@ public class SplatSOGSSceneReaderOptimized: SplatSceneReader {
     /// Sequential loading (original implementation)
     private func loadCompressedDataSequential(metadata: SOGSMetadata) throws -> SOGSCompressedData {
         print("SplatSOGSSceneReaderOptimized: Loading WebP textures sequentially...")
-        
+
+        // Validate required texture file counts before loading
+        guard metadata.means.files.count >= 2 else {
+            throw SOGSError.missingRequiredTextureFile("means", 2, metadata.means.files.count)
+        }
+        guard metadata.quats.files.count >= 1 else {
+            throw SOGSError.missingRequiredTextureFile("quats", 1, metadata.quats.files.count)
+        }
+        guard metadata.scales.files.count >= 1 else {
+            throw SOGSError.missingRequiredTextureFile("scales", 1, metadata.scales.files.count)
+        }
+        guard metadata.sh0.files.count >= 1 else {
+            throw SOGSError.missingRequiredTextureFile("sh0", 1, metadata.sh0.files.count)
+        }
+
         let means_l = try loadAndDecodeWebP(metadata.means.files[0])
         let means_u = try loadAndDecodeWebP(metadata.means.files[1])
         let quats = try loadAndDecodeWebP(metadata.quats.files[0])
@@ -148,10 +163,27 @@ public class SplatSOGSSceneReaderOptimized: SplatSceneReader {
     /// Parallel loading for better performance
     private func loadCompressedDataParallel(metadata: SOGSMetadata) throws -> SOGSCompressedData {
         print("SplatSOGSSceneReaderOptimized: Loading WebP textures in parallel...")
-        
+
+        // Validate required texture file counts before loading
+        guard metadata.means.files.count >= 2 else {
+            throw SOGSError.missingRequiredTextureFile("means", 2, metadata.means.files.count)
+        }
+        guard metadata.quats.files.count >= 1 else {
+            throw SOGSError.missingRequiredTextureFile("quats", 1, metadata.quats.files.count)
+        }
+        guard metadata.scales.files.count >= 1 else {
+            throw SOGSError.missingRequiredTextureFile("scales", 1, metadata.scales.files.count)
+        }
+        guard metadata.sh0.files.count >= 1 else {
+            throw SOGSError.missingRequiredTextureFile("sh0", 1, metadata.sh0.files.count)
+        }
+
         let queue = DispatchQueue(label: "sogs.webp.loading", attributes: .concurrent)
         let group = DispatchGroup()
-        
+
+        // Use a lock to protect results instead of dispatching to main queue
+        // This ensures results are available immediately after group.wait()
+        let resultsLock = NSLock()
         var means_l: WebPDecoder.DecodedImage?
         var means_u: WebPDecoder.DecodedImage?
         var quats: WebPDecoder.DecodedImage?
@@ -159,10 +191,10 @@ public class SplatSOGSSceneReaderOptimized: SplatSceneReader {
         var sh0: WebPDecoder.DecodedImage?
         var sh_centroids: WebPDecoder.DecodedImage?
         var sh_labels: WebPDecoder.DecodedImage?
-        
+
         var loadingErrors: [Error] = []
         let errorLock = NSLock()
-        
+
         // Load all textures in parallel
         let loadTasks: [(String)] = [
             metadata.means.files[0],
@@ -171,24 +203,24 @@ public class SplatSOGSSceneReaderOptimized: SplatSceneReader {
             metadata.scales.files[0],
             metadata.sh0.files[0]
         ]
-        
+
         for i in 0..<loadTasks.count {
             group.enter()
             queue.async {
                 defer { group.leave() }
                 do {
                     let decoded = try self.loadAndDecodeWebP(loadTasks[i])
-                    // Use a more thread-safe approach
-                    DispatchQueue.main.async {
-                        switch i {
-                        case 0: means_l = decoded
-                        case 1: means_u = decoded
-                        case 2: quats = decoded
-                        case 3: scales = decoded
-                        case 4: sh0 = decoded
-                        default: break
-                        }
+                    // Use lock-protected writes for thread safety
+                    resultsLock.lock()
+                    switch i {
+                    case 0: means_l = decoded
+                    case 1: means_u = decoded
+                    case 2: quats = decoded
+                    case 3: scales = decoded
+                    case 4: sh0 = decoded
+                    default: break
                     }
+                    resultsLock.unlock()
                 } catch {
                     errorLock.lock()
                     loadingErrors.append(error)
@@ -196,7 +228,7 @@ public class SplatSOGSSceneReaderOptimized: SplatSceneReader {
                 }
             }
         }
-        
+
         // Load optional SH textures
         if let shN = metadata.shN, shN.files.count >= 2 {
             group.enter()
@@ -206,8 +238,14 @@ public class SplatSOGSSceneReaderOptimized: SplatSceneReader {
                     let tempCentroids = try self.loadAndDecodeWebP(shN.files[0])
                     let shBands = self.calculateSHBands(width: tempCentroids.width)
                     if shBands > 0 {
+                        resultsLock.lock()
                         sh_centroids = tempCentroids
-                        sh_labels = try self.loadAndDecodeWebP(shN.files[1])
+                        resultsLock.unlock()
+
+                        let labels = try self.loadAndDecodeWebP(shN.files[1])
+                        resultsLock.lock()
+                        sh_labels = labels
+                        resultsLock.unlock()
                     }
                 } catch {
                     errorLock.lock()
@@ -216,9 +254,9 @@ public class SplatSOGSSceneReaderOptimized: SplatSceneReader {
                 }
             }
         }
-        
+
         group.wait()
-        
+
         if !loadingErrors.isEmpty {
             throw loadingErrors.first!
         }

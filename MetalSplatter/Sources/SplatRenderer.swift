@@ -655,10 +655,23 @@ public class SplatRenderer: @unchecked Sendable {
     // Deferred buffer release - wait for GPU to finish before releasing
     private var pendingReleaseBuffers: [MetalBuffer<Int32>] = []
     private var pendingReleaseLock = os_unfair_lock()
+    // Max pending buffers before force-release (prevents memory exhaustion if rendering is paused)
+    private static let maxPendingReleaseBuffers = 16
 
     /// Queue a buffer for deferred release (call when swapping sorted indices)
     private func deferredBufferRelease(_ buffer: MetalBuffer<Int32>) {
         os_unfair_lock_lock(&pendingReleaseLock)
+
+        // If we've accumulated too many pending buffers (e.g., rendering paused),
+        // force-release the oldest ones to prevent memory exhaustion
+        while pendingReleaseBuffers.count >= Self.maxPendingReleaseBuffers {
+            let oldBuffer = pendingReleaseBuffers.removeFirst()
+            // Release without lock to avoid holding lock during pool operations
+            os_unfair_lock_unlock(&pendingReleaseLock)
+            sortIndexBufferPool.release(oldBuffer)
+            os_unfair_lock_lock(&pendingReleaseLock)
+        }
+
         pendingReleaseBuffers.append(buffer)
         os_unfair_lock_unlock(&pendingReleaseLock)
     }

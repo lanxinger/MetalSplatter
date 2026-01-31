@@ -69,29 +69,44 @@ kernel void computeSplatDistancesWithCaching(uint index [[thread_position_in_gri
 // Each SIMD-group (32 threads) reduces to a single value before atomic update
 
 // Helper: Atomic float min using compare-and-swap
-// Metal doesn't have native atomic_fetch_min for floats, so we implement it with CAS
+// Metal doesn't have native atomic_fetch_min for floats, so we implement it with CAS.
+// Note: Comparison uses float space (as_type<float>) which correctly handles negatives.
+// NaN values are ignored (NaN < x is always false, so loop exits without update).
 inline void atomicMinFloat(device atomic_uint* addr, float val) {
+    // Skip NaN values (they can't participate in min comparisons)
+    if (isnan(val)) return;
+
     uint newVal = as_type<uint>(val);
     uint prevVal = atomic_load_explicit(addr, memory_order_relaxed);
+
+    // Loop until we successfully write OR our value is no longer competitive
     while (val < as_type<float>(prevVal)) {
         if (atomic_compare_exchange_weak_explicit(addr, &prevVal, newVal,
                                                    memory_order_relaxed,
                                                    memory_order_relaxed)) {
             break;
         }
+        // CAS failed - prevVal was updated, loop will re-check if val is still smaller
     }
 }
 
 // Helper: Atomic float max using compare-and-swap
+// Same approach as atomicMinFloat but for maximum values.
 inline void atomicMaxFloat(device atomic_uint* addr, float val) {
+    // Skip NaN values (they can't participate in max comparisons)
+    if (isnan(val)) return;
+
     uint newVal = as_type<uint>(val);
     uint prevVal = atomic_load_explicit(addr, memory_order_relaxed);
+
+    // Loop until we successfully write OR our value is no longer competitive
     while (val > as_type<float>(prevVal)) {
         if (atomic_compare_exchange_weak_explicit(addr, &prevVal, newVal,
                                                    memory_order_relaxed,
                                                    memory_order_relaxed)) {
             break;
         }
+        // CAS failed - prevVal was updated, loop will re-check if val is still larger
     }
 }
 

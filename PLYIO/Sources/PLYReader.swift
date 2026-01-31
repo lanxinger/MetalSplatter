@@ -13,6 +13,7 @@ public class PLYReader {
         case readError
         case headerStartMissing
         case headerEndMissing
+        case headerTooLarge
         case unexpectedEndOfFile
         case internalConsistency
 
@@ -26,6 +27,8 @@ public class PLYReader {
                 "Header start missing"
             case .headerEndMissing:
                 "Header end missing"
+            case .headerTooLarge:
+                "PLY header exceeds maximum allowed size (1 MB)"
             case .unexpectedEndOfFile:
                 "Unexpected end-of-file while reading input"
             case .internalConsistency:
@@ -39,6 +42,8 @@ public class PLYReader {
         static let headerEndToken = "\(PLYHeader.Keyword.endHeader.rawValue)\n".data(using: .utf8)!
         // Hold up to 16k of data at once before reclaiming. Higher numbers will use more data, but lower numbers will result in more frequent, somewhat expensive "move bytes" operations.
         static let bodySizeForReclaim = 16*1024
+        // Maximum header size to prevent memory exhaustion from malicious files (1 MB is very generous)
+        static let maxHeaderSize = 1024 * 1024
 
         static let cr = UInt8(ascii: "\r")
         static let lf = UInt8(ascii: "\n")
@@ -152,6 +157,11 @@ public class PLYReader {
                         }
                     }
                 case .header:
+                    // Check header size limit to prevent memory exhaustion
+                    if headerData.count >= Constants.maxHeaderSize {
+                        delegate.didFailReading(withError: Error.headerTooLarge)
+                        return
+                    }
                     headerData.append(buffer[bufferIndex])
                     bufferIndex += 1
                     if headerData.hasSuffix(Constants.headerEndToken) {
@@ -195,9 +205,21 @@ public class PLYReader {
 
     // Maybe remove already-processed bytes from body, to reclaim memory
     private func reclaimBodyIfNeeded() {
-        // Removing bytes is an O(N) operation, where N = number of remaining bytes. Fortunately we only reset
-        // when we've already consumed as many bytes as we can, so there are < 1 element's worth of bytes remaining
-        guard bodyOffset > 0 && body.count >= Constants.bodySizeForReclaim else { return }
+        // Amortized O(1) reclamation strategy:
+        // removeSubrange(0..<N) is O(M) where M = remaining bytes.
+        // By only compacting when consumed bytes >= remaining bytes,
+        // we ensure each byte is copied at most once per "doubling",
+        // giving O(N) total copy operations instead of O(N²).
+        guard bodyOffset > 0 else { return }
+
+        let remaining = body.count - bodyOffset
+
+        // Reclaim when:
+        // 1. Buffer is large enough to be worth compacting
+        // 2. Consumed portion >= remaining (amortization condition)
+        guard body.count >= Constants.bodySizeForReclaim,
+              bodyOffset >= remaining else { return }
+
         body.removeSubrange(0..<bodyOffset)
         bodyOffset = body.startIndex
     }

@@ -107,29 +107,29 @@ private struct ElementOutputMapping {
         let appendProperty = { (name: String, type: PLYHeader.PrimitivePropertyType) in
             properties.append(.init(name: name, type: .primitive(type)))
         }
-        appendProperty(SplatPLYConstants.PropertyName.positionX.first!, .float32)
-        appendProperty(SplatPLYConstants.PropertyName.positionY.first!, .float32)
-        appendProperty(SplatPLYConstants.PropertyName.positionZ.first!, .float32)
+        appendProperty(SplatPLYConstants.PropertyName.positionXName, .float32)
+        appendProperty(SplatPLYConstants.PropertyName.positionYName, .float32)
+        appendProperty(SplatPLYConstants.PropertyName.positionZName, .float32)
 
-        appendProperty(SplatPLYConstants.PropertyName.normalX.first!, .float32)
-        appendProperty(SplatPLYConstants.PropertyName.normalY.first!, .float32)
-        appendProperty(SplatPLYConstants.PropertyName.normalZ.first!, .float32)
+        appendProperty(SplatPLYConstants.PropertyName.normalXName, .float32)
+        appendProperty(SplatPLYConstants.PropertyName.normalYName, .float32)
+        appendProperty(SplatPLYConstants.PropertyName.normalZName, .float32)
 
-        appendProperty(SplatPLYConstants.PropertyName.sh0_r.first!, .float32)
-        appendProperty(SplatPLYConstants.PropertyName.sh0_g.first!, .float32)
-        appendProperty(SplatPLYConstants.PropertyName.sh0_b.first!, .float32)
+        appendProperty(SplatPLYConstants.PropertyName.sh0_rName, .float32)
+        appendProperty(SplatPLYConstants.PropertyName.sh0_gName, .float32)
+        appendProperty(SplatPLYConstants.PropertyName.sh0_bName, .float32)
 
         for i in 0..<(indirectColorCount*3) {
             appendProperty("\(SplatPLYConstants.PropertyName.sphericalHarmonicsPrefix)\(i)", .float32)
         }
-        appendProperty(SplatPLYConstants.PropertyName.opacity.first!, .float32)
-        appendProperty(SplatPLYConstants.PropertyName.scaleX.first!, .float32)
-        appendProperty(SplatPLYConstants.PropertyName.scaleY.first!, .float32)
-        appendProperty(SplatPLYConstants.PropertyName.scaleZ.first!, .float32)
-        appendProperty(SplatPLYConstants.PropertyName.rotation0.first!, .float32)
-        appendProperty(SplatPLYConstants.PropertyName.rotation1.first!, .float32)
-        appendProperty(SplatPLYConstants.PropertyName.rotation2.first!, .float32)
-        appendProperty(SplatPLYConstants.PropertyName.rotation3.first!, .float32)
+        appendProperty(SplatPLYConstants.PropertyName.opacityName, .float32)
+        appendProperty(SplatPLYConstants.PropertyName.scaleXName, .float32)
+        appendProperty(SplatPLYConstants.PropertyName.scaleYName, .float32)
+        appendProperty(SplatPLYConstants.PropertyName.scaleZName, .float32)
+        appendProperty(SplatPLYConstants.PropertyName.rotation0Name, .float32)
+        appendProperty(SplatPLYConstants.PropertyName.rotation1Name, .float32)
+        appendProperty(SplatPLYConstants.PropertyName.rotation2Name, .float32)
+        appendProperty(SplatPLYConstants.PropertyName.rotation3Name, .float32)
 
         let element = PLYHeader.Element(name: SplatPLYConstants.ElementName.point.rawValue,
                                         count: UInt32(pointCount),

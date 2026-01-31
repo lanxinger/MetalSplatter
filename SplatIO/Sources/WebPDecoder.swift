@@ -155,13 +155,27 @@ public struct WebPDecoder {
         guard x >= 0 && x < image.width && y >= 0 && y < image.height else {
             return SIMD4<UInt8>(0, 0, 0, 0)
         }
-        
-        let index = (y * image.width + x) * image.bytesPerPixel
-        let r = image.pixels[index]
-        let g = image.pixels[index + 1]
-        let b = image.pixels[index + 2]
-        let a = image.pixels[index + 3]
-        
+
+        // Use checked arithmetic to prevent integer overflow
+        let rowOffset = y.multipliedReportingOverflow(by: image.width)
+        guard !rowOffset.overflow else { return SIMD4<UInt8>(0, 0, 0, 0) }
+
+        let pixelOffset = rowOffset.partialValue.addingReportingOverflow(x)
+        guard !pixelOffset.overflow else { return SIMD4<UInt8>(0, 0, 0, 0) }
+
+        let index = pixelOffset.partialValue.multipliedReportingOverflow(by: image.bytesPerPixel)
+        guard !index.overflow else { return SIMD4<UInt8>(0, 0, 0, 0) }
+
+        // Bounds check: ensure we have 4 bytes available at index (RGBA)
+        guard index.partialValue >= 0, index.partialValue + 3 < image.pixels.count else {
+            return SIMD4<UInt8>(0, 0, 0, 0)
+        }
+
+        let r = image.pixels[index.partialValue]
+        let g = image.pixels[index.partialValue + 1]
+        let b = image.pixels[index.partialValue + 2]
+        let a = image.pixels[index.partialValue + 3]
+
         // Un-premultiply alpha to get original color values
         // Since CGContext uses premultiplied alpha, we need to divide by alpha to get original colors
         if a > 0 {

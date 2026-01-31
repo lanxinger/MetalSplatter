@@ -1,5 +1,8 @@
 import SwiftUI
 import Metal
+import os
+
+private let renderSettingsLog = Logger(subsystem: "com.metalsplatter.sampleapp", category: "RenderSettings")
 
 // Metal 4.0 Capabilities Status
 struct Metal4Capabilities {
@@ -450,7 +453,8 @@ struct MetalKitRendererViewEnhanced: ViewRepresentable {
             do {
                 try await renderer?.load(modelIdentifier)
             } catch {
-                print("Error loading model: \(error.localizedDescription)")
+                let modelDescription = modelIdentifier?.description ?? "unknown"
+                renderSettingsLog.error("Failed to load model '\(modelDescription)': \(error.localizedDescription)")
             }
         }
         
@@ -462,20 +466,84 @@ struct MetalKitRendererViewEnhanced: ViewRepresentable {
 
 #if os(iOS)
 extension MetalKitRendererViewEnhanced.Coordinator {
-    @objc func handlePan(_ gesture: UIPanGestureRecognizer) {
-        // Implementation would be copied from original MetalKitSceneView
+    @MainActor @objc func handlePan(_ gesture: UIPanGestureRecognizer) {
+        guard let renderer = renderer else { return }
+        let location = gesture.location(in: gesture.view)
+
+        if gesture.state == .ended || gesture.state == .cancelled {
+            renderer.endUserInteraction()
+            lastPanLocation = nil
+            return
+        }
+
+        switch gesture.state {
+        case .began:
+            lastPanLocation = location
+            lastRotation = renderer.rotation
+        case .changed:
+            guard let lastLocation = lastPanLocation else { return }
+            let deltaX = Float(location.x - lastLocation.x)
+            let newRotation = lastRotation + Angle(degrees: Double(deltaX) * 0.2)
+            renderer.setUserRotation(newRotation, vertical: 0)
+        default:
+            break
+        }
     }
-    
-    @objc func handlePinch(_ gesture: UIPinchGestureRecognizer) {
-        // Implementation would be copied from original MetalKitSceneView
+
+    @MainActor @objc func handlePinch(_ gesture: UIPinchGestureRecognizer) {
+        guard let renderer = renderer else { return }
+
+        if gesture.state == .ended || gesture.state == .cancelled {
+            renderer.endUserInteraction()
+            return
+        }
+
+        switch gesture.state {
+        case .began:
+            zoom = renderer.zoom
+        case .changed:
+            let newZoom = zoom * Float(gesture.scale)
+            let clampedZoom = max(0.1, min(10.0, newZoom))
+            renderer.setUserZoom(clampedZoom)
+        default:
+            break
+        }
     }
-    
-    @objc func handleRotation(_ gesture: UIRotationGestureRecognizer) {
-        // Implementation would be copied from original MetalKitSceneView
+
+    @MainActor @objc func handleRotation(_ gesture: UIRotationGestureRecognizer) {
+        guard let renderer = renderer else { return }
+
+        if gesture.state == .ended || gesture.state == .cancelled {
+            renderer.endUserInteraction()
+            lastRollRotation = 0
+            return
+        }
+
+        switch gesture.state {
+        case .began:
+            lastRollRotation = renderer.rollRotation
+        case .changed:
+            let newRoll = lastRollRotation + Float(gesture.rotation)
+            renderer.setUserRollRotation(newRoll)
+        default:
+            break
+        }
     }
-    
-    @objc func handleDoubleTap(_ gesture: UITapGestureRecognizer) {
-        // Implementation would be copied from original MetalKitSceneView
+
+    @MainActor @objc func handleDoubleTap(_ gesture: UITapGestureRecognizer) {
+        guard let renderer = renderer else { return }
+
+        // Reset view to default state
+        renderer.setUserRotation(.zero, vertical: 0)
+        renderer.setUserZoom(1.0)
+        renderer.setUserRollRotation(0)
+        renderer.setUserTranslation(.zero)
+    }
+
+    func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer,
+                           shouldRecognizeSimultaneouslyWith otherGestureRecognizer: UIGestureRecognizer) -> Bool {
+        // Allow simultaneous pinch and rotation
+        return true
     }
 }
 #endif

@@ -1,5 +1,8 @@
 import Foundation
+import os
 import simd
+
+private let spxLog = Logger(subsystem: "com.metalsplatter.splatio", category: "SPXPackedTypes")
 
 /**
  * Represents the 128-byte header structure for SPX format files
@@ -68,7 +71,10 @@ struct SPXHeader {
         try SplatDataValidator.validateFinite(self.minZ, name: "minZ")
         try SplatDataValidator.validateFinite(self.maxZ, name: "maxZ")
         
-        print("SPXHeader.init: Parsed BBox - minX: \(self.minX), maxX: \(self.maxX), minY: \(self.minY), maxY: \(self.maxY), minZ: \(self.minZ), maxZ: \(self.maxZ)")
+        let (logMinX, logMaxX) = (self.minX, self.maxX)
+        let (logMinY, logMaxY) = (self.minY, self.maxY)
+        let (logMinZ, logMaxZ) = (self.minZ, self.maxZ)
+        spxLog.debug("SPXHeader: Parsed BBox - minX: \(logMinX), maxX: \(logMaxX), minY: \(logMinY), maxY: \(logMaxY), minZ: \(logMinZ), maxZ: \(logMaxZ)")
         
         self.minTopY = Float(bitPattern: try SplatDataValidator.safeDataAccess(data: data, offset: 32, type: UInt32.self).littleEndian)
         self.maxTopY = Float(bitPattern: try SplatDataValidator.safeDataAccess(data: data, offset: 36, type: UInt32.self).littleEndian)

@@ -4,9 +4,11 @@ import ARKit
 import Foundation
 import Metal
 import MetalKit
+import os
 import simd
 
 public class ARBackgroundRenderer {
+    private static let log = Logger(subsystem: "com.metalsplatter", category: "ARBackgroundRenderer")
     private let device: MTLDevice
     private let commandQueue: MTLCommandQueue
     private let library: MTLLibrary
@@ -46,9 +48,9 @@ public class ARBackgroundRenderer {
             let library = try device.makeDefaultLibrary(bundle: metalSplatterBundle)
             
             self.library = library
-            print("ARBackgroundRenderer: Successfully created Metal library from MetalSplatter bundle")
+            Self.log.debug("Successfully created Metal library from MetalSplatter bundle")
         } catch {
-            print("ARBackgroundRenderer: Error creating Metal library: \(error)")
+            Self.log.error("Error creating Metal library: \(error.localizedDescription)")
             throw ARBackgroundRendererError.failedToCreateLibrary
         }
         
@@ -73,12 +75,12 @@ public class ARBackgroundRenderer {
         self.indexBuffer = indexBuffer
         
         // Create render pipeline
-        print("ARBackgroundRenderer: Creating render pipeline state...")
+        Self.log.debug("Creating render pipeline state...")
         do {
             self.renderPipelineState = try Self.createRenderPipelineState(device: device, library: library)
-            print("ARBackgroundRenderer: Successfully created render pipeline state")
+            Self.log.debug("Successfully created render pipeline state")
         } catch {
-            print("ARBackgroundRenderer: Failed to create render pipeline state: \(error)")
+            Self.log.error("Failed to create render pipeline state: \(error.localizedDescription)")
             throw error
         }
         
@@ -243,20 +245,20 @@ public class ARBackgroundRenderer {
     }
     
     private static func createRenderPipelineState(device: MTLDevice, library: MTLLibrary) throws -> MTLRenderPipelineState {
-        print("ARBackgroundRenderer: Looking for shader functions...")
-        print("ARBackgroundRenderer: Available function names: \(library.functionNames.sorted())")
-        
+        log.debug("Looking for shader functions...")
+        log.debug("Available function names: \(library.functionNames.sorted())")
+
         guard let vertexFunction = library.makeFunction(name: "ar_background_vertex") else {
-            print("ARBackgroundRenderer: ar_background_vertex function not found!")
+            log.error("ar_background_vertex function not found!")
             throw ARBackgroundRendererError.failedToCreateShaderFunctions
         }
-        print("ARBackgroundRenderer: Found ar_background_vertex")
-        
+        log.debug("Found ar_background_vertex")
+
         guard let fragmentFunction = library.makeFunction(name: "ar_background_fragment") else {
-            print("ARBackgroundRenderer: ar_background_fragment function not found!")
+            log.error("ar_background_fragment function not found!")
             throw ARBackgroundRendererError.failedToCreateShaderFunctions
         }
-        print("ARBackgroundRenderer: Found ar_background_fragment")
+        log.debug("Found ar_background_fragment")
         
         let descriptor = MTLRenderPipelineDescriptor()
         descriptor.vertexFunction = vertexFunction
