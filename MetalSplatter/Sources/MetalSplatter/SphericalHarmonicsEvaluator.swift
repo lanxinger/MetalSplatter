@@ -3,7 +3,8 @@ import Metal
 import os
 import simd
 
-fileprivate let log = Logger(subsystem: Bundle.module.bundleIdentifier!, category: "SphericalHarmonicsEvaluator")
+fileprivate let log = Logger(subsystem: Bundle.module.bundleIdentifier ?? "com.metalsplatter.unknown",
+                             category: "SphericalHarmonicsEvaluator")
 
 /// Manages fast spherical harmonics evaluation for SOGS format
 public class SphericalHarmonicsEvaluator {

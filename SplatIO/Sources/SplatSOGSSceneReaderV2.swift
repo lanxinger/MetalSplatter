@@ -105,41 +105,66 @@ public class SplatSOGSSceneReaderV2: SplatSceneReader {
     }
     
     public func read(to delegate: SplatSceneReaderDelegate) {
-        do {
-            let points = try readScene()
-            delegate.didStartReading(withPointCount: UInt32(points.count))
-            delegate.didRead(points: points)
-            delegate.didFinishReading()
-        } catch {
-            delegate.didFailReading(withError: error)
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard let self = self else { return }
+            do {
+                let points = try self.readScene()
+                DispatchQueue.main.async {
+                    delegate.didStartReading(withPointCount: UInt32(points.count))
+                    delegate.didRead(points: points)
+                    delegate.didFinishReading()
+                }
+            } catch {
+                DispatchQueue.main.async {
+                    delegate.didFailReading(withError: error)
+                }
+            }
         }
     }
     
     private func loadCompressedDataV2(metadata: SOGSMetadataV2) throws -> SOGSCompressedDataV2 {
+        let semaphore = DispatchSemaphore(value: 0)
+        var result: Result<SOGSCompressedDataV2, Error>?
+        loadCompressedDataV2Async(metadata: metadata) { loadResult in
+            result = loadResult
+            semaphore.signal()
+        }
+        semaphore.wait()
+        return try result?.get() ?? { throw SOGSV2Error.webpDecodingFailed("Unknown async load failure") }()
+    }
+
+    private func loadCompressedDataV2Async(
+        metadata: SOGSMetadataV2,
+        completion: @escaping (Result<SOGSCompressedDataV2, Error>) -> Void
+    ) {
         print("SplatSOGSSceneReaderV2: Loading v2 WebP texture files...")
-        
+
         // Validate required file lists upfront
         guard metadata.means.files.count == 2 else {
-            throw SOGSV2Error.invalidMetadata
+            completion(.failure(SOGSV2Error.invalidMetadata))
+            return
         }
         guard let quatsFilename = metadata.quats.files.first else {
-            throw SOGSV2Error.invalidMetadata
+            completion(.failure(SOGSV2Error.invalidMetadata))
+            return
         }
         guard let scalesFilename = metadata.scales.files.first else {
-            throw SOGSV2Error.invalidMetadata
+            completion(.failure(SOGSV2Error.invalidMetadata))
+            return
         }
         guard let sh0Filename = metadata.sh0.files.first else {
-            throw SOGSV2Error.invalidMetadata
+            completion(.failure(SOGSV2Error.invalidMetadata))
+            return
         }
-        
+
         var sanitizedMetadata = metadata
         var shCentroidsFilename: String?
         var shLabelsFilename: String?
-        
+
         if let shN = metadata.shN {
             let shNHasRange = (shN.mins?.count ?? 0) > 0 && (shN.maxs?.count ?? 0) > 0
             let shNHasCodebook = shN.codebook.count >= 256
-            
+
             if !(shNHasRange || shNHasCodebook) {
                 print("SplatSOGSSceneReaderV2: SH metadata missing codebook/range - disabling SH data")
                 sanitizedMetadata = metadataWithoutSphericalHarmonics(metadata)
@@ -152,7 +177,7 @@ public class SplatSOGSSceneReaderV2: SplatSceneReader {
                         shLabelsFilename = filename
                     }
                 }
-                
+
                 if shCentroidsFilename == nil || shLabelsFilename == nil {
                     print("SplatSOGSSceneReaderV2: Missing SH centroid/label textures - disabling SH data")
                     sanitizedMetadata = metadataWithoutSphericalHarmonics(metadata)
@@ -161,7 +186,7 @@ public class SplatSOGSSceneReaderV2: SplatSceneReader {
                 }
             }
         }
-        
+
         let shouldLoadSHData = sanitizedMetadata.shN != nil
 
         // Use concurrent loading for better performance
@@ -176,85 +201,92 @@ public class SplatSOGSSceneReaderV2: SplatSceneReader {
         var sh0: WebPDecoder.DecodedImage?
         var sh_centroids: WebPDecoder.DecodedImage?
         var sh_labels: WebPDecoder.DecodedImage?
-        
+
         // Error handling
         var loadingErrors: [Error] = []
         let errorLock = NSLock()
-        
-        // Load required textures in parallel
-        let requiredFiles = [
-            (metadata.means.files[0], \SOGSCompressedDataV2.means_l),
-            (metadata.means.files[1], \SOGSCompressedDataV2.means_u),
-            (metadata.quats.files[0], \SOGSCompressedDataV2.quats),
-            (metadata.scales.files[0], \SOGSCompressedDataV2.scales),
-            (metadata.sh0.files[0], \SOGSCompressedDataV2.sh0)
-        ]
-        
+        let resultLock = NSLock()
+
         // Load means_l
         group.enter()
         queue.async {
             defer { group.leave() }
             do {
-                means_l = try self.loadAndDecodeWebPV2(metadata.means.files[0])
+                let image = try self.loadAndDecodeWebPV2(metadata.means.files[0])
+                resultLock.lock()
+                means_l = image
+                resultLock.unlock()
             } catch {
                 errorLock.lock()
                 loadingErrors.append(error)
                 errorLock.unlock()
             }
         }
-        
+
         // Load means_u
         group.enter()
         queue.async {
             defer { group.leave() }
             do {
-                means_u = try self.loadAndDecodeWebPV2(metadata.means.files[1])
+                let image = try self.loadAndDecodeWebPV2(metadata.means.files[1])
+                resultLock.lock()
+                means_u = image
+                resultLock.unlock()
             } catch {
                 errorLock.lock()
                 loadingErrors.append(error)
                 errorLock.unlock()
             }
         }
-        
+
         // Load quats
         group.enter()
         queue.async {
             defer { group.leave() }
             do {
-                quats = try self.loadAndDecodeWebPV2(quatsFilename)
+                let image = try self.loadAndDecodeWebPV2(quatsFilename)
+                resultLock.lock()
+                quats = image
+                resultLock.unlock()
             } catch {
                 errorLock.lock()
                 loadingErrors.append(error)
                 errorLock.unlock()
             }
         }
-        
+
         // Load scales
         group.enter()
         queue.async {
             defer { group.leave() }
             do {
-                scales = try self.loadAndDecodeWebPV2(scalesFilename)
+                let image = try self.loadAndDecodeWebPV2(scalesFilename)
+                resultLock.lock()
+                scales = image
+                resultLock.unlock()
             } catch {
                 errorLock.lock()
                 loadingErrors.append(error)
                 errorLock.unlock()
             }
         }
-        
+
         // Load sh0
         group.enter()
         queue.async {
             defer { group.leave() }
             do {
-                sh0 = try self.loadAndDecodeWebPV2(sh0Filename)
+                let image = try self.loadAndDecodeWebPV2(sh0Filename)
+                resultLock.lock()
+                sh0 = image
+                resultLock.unlock()
             } catch {
                 errorLock.lock()
                 loadingErrors.append(error)
                 errorLock.unlock()
             }
         }
-        
+
         // Load optional spherical harmonics textures
         if shouldLoadSHData {
             // Load centroids
@@ -263,7 +295,10 @@ public class SplatSOGSSceneReaderV2: SplatSceneReader {
                 defer { group.leave() }
                 do {
                     guard let filename = shCentroidsFilename else { throw SOGSV2Error.invalidMetadata }
-                    sh_centroids = try self.loadAndDecodeWebPV2(filename)
+                    let image = try self.loadAndDecodeWebPV2(filename)
+                    resultLock.lock()
+                    sh_centroids = image
+                    resultLock.unlock()
                     print("SplatSOGSSceneReaderV2: Loaded SH centroids texture")
                 } catch {
                     errorLock.lock()
@@ -271,14 +306,17 @@ public class SplatSOGSSceneReaderV2: SplatSceneReader {
                     errorLock.unlock()
                 }
             }
-            
+
             // Load labels
             group.enter()
             queue.async {
                 defer { group.leave() }
                 do {
                     guard let filename = shLabelsFilename else { throw SOGSV2Error.invalidMetadata }
-                    sh_labels = try self.loadAndDecodeWebPV2(filename)
+                    let image = try self.loadAndDecodeWebPV2(filename)
+                    resultLock.lock()
+                    sh_labels = image
+                    resultLock.unlock()
                     print("SplatSOGSSceneReaderV2: Loaded SH labels texture")
                 } catch {
                     errorLock.lock()
@@ -287,45 +325,58 @@ public class SplatSOGSSceneReaderV2: SplatSceneReader {
                 }
             }
         }
-        
-        // Wait for all operations to complete
-        group.wait()
-        
-        // Check for errors
-        if !loadingErrors.isEmpty {
-            throw loadingErrors.first!
-        }
-        
-        // Verify all required textures loaded
-        guard let means_l = means_l,
-              let means_u = means_u,
-              let quats = quats,
-              let scales = scales,
-              let sh0 = sh0 else {
-            throw SOGSV2Error.webpDecodingFailed("Failed to load required v2 textures")
-        }
-        
-        try validateSOGSV2Data(metadata: sanitizedMetadata,
-                               means_l: means_l,
-                               means_u: means_u,
-                               quats: quats,
-                               scales: scales,
-                               sh0: sh0,
-                               sh_centroids: sh_centroids,
-                               sh_labels: sh_labels)
 
-        print("SplatSOGSSceneReaderV2: Successfully loaded all v2 WebP textures")
-        
-        return SOGSCompressedDataV2(
-            metadata: sanitizedMetadata,
-            means_l: means_l,
-            means_u: means_u,
-            quats: quats,
-            scales: scales,
-            sh0: sh0,
-            sh_centroids: sh_centroids,
-            sh_labels: sh_labels
-        )
+        group.notify(queue: queue) {
+            if let error = loadingErrors.first {
+                completion(.failure(error))
+                return
+            }
+
+            resultLock.lock()
+            let resolvedMeansL = means_l
+            let resolvedMeansU = means_u
+            let resolvedQuats = quats
+            let resolvedScales = scales
+            let resolvedSh0 = sh0
+            let resolvedCentroids = sh_centroids
+            let resolvedLabels = sh_labels
+            resultLock.unlock()
+
+            guard let means_l = resolvedMeansL,
+                  let means_u = resolvedMeansU,
+                  let quats = resolvedQuats,
+                  let scales = resolvedScales,
+                  let sh0 = resolvedSh0 else {
+                completion(.failure(SOGSV2Error.webpDecodingFailed("Failed to load required v2 textures")))
+                return
+            }
+
+            do {
+                try self.validateSOGSV2Data(metadata: sanitizedMetadata,
+                                            means_l: means_l,
+                                            means_u: means_u,
+                                            quats: quats,
+                                            scales: scales,
+                                            sh0: sh0,
+                                            sh_centroids: resolvedCentroids,
+                                            sh_labels: resolvedLabels)
+            } catch {
+                completion(.failure(error))
+                return
+            }
+
+            print("SplatSOGSSceneReaderV2: Successfully loaded all v2 WebP textures")
+            completion(.success(SOGSCompressedDataV2(
+                metadata: sanitizedMetadata,
+                means_l: means_l,
+                means_u: means_u,
+                quats: quats,
+                scales: scales,
+                sh0: sh0,
+                sh_centroids: resolvedCentroids,
+                sh_labels: resolvedLabels
+            )))
+        }
     }
     
     private func metadataWithoutSphericalHarmonics(_ metadata: SOGSMetadataV2) -> SOGSMetadataV2 {

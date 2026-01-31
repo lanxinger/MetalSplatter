@@ -11,6 +11,7 @@ public class PLYWriter {
         case headerNotYetWritten
         case cannotWriteAfterClose
         case unexpectedElement
+        case invalidElementCount(requested: Int, available: Int)
         case unknownOutputStreamError
         case outputStreamFull
     }
@@ -21,6 +22,7 @@ public class PLYWriter {
     private var buffer: UnsafeMutableRawPointer?
     private var bufferSize: Int
     private var header: PLYHeader?
+    private var closed = false
 
     private var ascii = false
     private var bigEndian = false
@@ -47,10 +49,12 @@ public class PLYWriter {
     }
 
     public func close() throws {
+        guard !closed else { return }
         outputStream.close()
 
         buffer?.deallocate()
         buffer = nil
+        closed = true
 
         guard let header else {
             throw Error.headerNotYetWritten
@@ -62,6 +66,9 @@ public class PLYWriter {
 
     /// write(_:PLYHeader, elementCount: Int) must be callen exactly once before zero or more calls to write(_:[PLYElement]). Once called, this method should not be called again on the same PLYWriter.
     public func write(_ header: PLYHeader) throws {
+        guard !closed else {
+            throw Error.cannotWriteAfterClose
+        }
         if self.header != nil {
             throw Error.headerAlreadyWritten
         }
@@ -85,6 +92,9 @@ public class PLYWriter {
 
     /// write(_:PLYHeader, elementCount: Int) must be callen exactly once before any calls to write(_:[PLYElement]).  This method may be called multiple times, until all have been supplied, after which close() should be called exactly once.
     public func write(_ elements: [PLYElement], count: Int? = nil) throws {
+        guard !closed else {
+            throw Error.cannotWriteAfterClose
+        }
         guard let header else {
             throw Error.headerNotYetWritten
         }
@@ -92,6 +102,9 @@ public class PLYWriter {
         var remainingElements: [PLYElement]
         if let count {
             guard count > 0 else { return }
+            guard count <= elements.count else {
+                throw Error.invalidElementCount(requested: count, available: elements.count)
+            }
             remainingElements = Array(elements[0..<count])
         } else {
             remainingElements = elements

@@ -1708,21 +1708,24 @@ public class SplatRenderer: @unchecked Sendable {
     
     /// CPU fallback for bounds computation
     private func calculateBoundsCPU() -> (min: SIMD3<Float>, max: SIMD3<Float>)? {
-        guard splatCount > 0 else { return nil }
-        
-        let splats = splatBuffer.values
-        var minBounds = SIMD3<Float>(repeating: .infinity)
-        var maxBounds = SIMD3<Float>(repeating: -.infinity)
-        
-        for i in 0..<splatCount {
-            let position = SIMD3<Float>(splats[i].position.elements.0,
-                                       splats[i].position.elements.1,
-                                       splats[i].position.elements.2)
-            minBounds = min(minBounds, position)
-            maxBounds = max(maxBounds, position)
+        let expectedCount = splatCount
+        guard expectedCount > 0 else { return nil }
+
+        return splatBuffer.withLockedValues { values, count in
+            let actualCount = min(count, expectedCount)
+            var minBounds = SIMD3<Float>(repeating: .infinity)
+            var maxBounds = SIMD3<Float>(repeating: -.infinity)
+
+            for i in 0..<actualCount {
+                let position = SIMD3<Float>(values[i].position.elements.0,
+                                           values[i].position.elements.1,
+                                           values[i].position.elements.2)
+                minBounds = min(minBounds, position)
+                maxBounds = max(maxBounds, position)
+            }
+
+            return (min: minBounds, max: maxBounds)
         }
-        
-        return (min: minBounds, max: maxBounds)
     }
     
     // MARK: - Metal 4 TensorOps Batch Precompute
@@ -1832,18 +1835,22 @@ public class SplatRenderer: @unchecked Sendable {
         }
 
         // Pack colors from splat buffer to packed buffer
-        let packedPtr = buffer.contents().bindMemory(to: UInt32.self, capacity: splatBuffer.count)
+        let bufferCount = splatBuffer.count
+        let packedPtr = buffer.contents().bindMemory(to: UInt32.self, capacity: bufferCount)
 
-        for i in 0..<splatBuffer.count {
-            let color = splatBuffer.values[i].color
-            // Pack half4 color to snorm10a2
-            // Format: [A:2][B:10][G:10][R:10]
-            let r = packSnorm10(Float(color.r))
-            let g = packSnorm10(Float(color.g))
-            let b = packSnorm10(Float(color.b))
-            let a = packUnorm2(Float(color.a))
+        splatBuffer.withLockedValues { values, count in
+            let actualCount = min(count, bufferCount)
+            for i in 0..<actualCount {
+                let color = values[i].color
+                // Pack half4 color to snorm10a2
+                // Format: [A:2][B:10][G:10][R:10]
+                let r = packSnorm10(Float(color.r))
+                let g = packSnorm10(Float(color.g))
+                let b = packSnorm10(Float(color.b))
+                let a = packUnorm2(Float(color.a))
 
-            packedPtr[i] = r | (g << 10) | (b << 20) | (a << 30)
+                packedPtr[i] = r | (g << 10) | (b << 20) | (a << 30)
+            }
         }
 
         Self.log.debug("Packed \(self.splatBuffer.count) colors to snorm10a2 format")

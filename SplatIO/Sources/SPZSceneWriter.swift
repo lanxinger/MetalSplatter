@@ -1,5 +1,6 @@
 import Foundation
 import simd
+import zlib
 
 /**
  * Writer for SPZ format Gaussian splat scenes.
@@ -169,10 +170,8 @@ public class SPZSceneWriter: SplatSceneWriter {
         // Add the compressed data (without zlib header)
         gzippedData.append(compressed.dropFirst(2))
         
-        // Add CRC32 and original size
-        var crc: UInt32 = 0
-        // Placeholder CRC32 - in a real implementation this would be calculated
-        crc = 0
+        // Add CRC32 and original size (CRC of uncompressed data)
+        let crc = computeCRC32(data)
         gzippedData.append(contentsOf: withUnsafeBytes(of: crc.littleEndian) { Data($0) })
         
         // Original uncompressed size
@@ -180,6 +179,15 @@ public class SPZSceneWriter: SplatSceneWriter {
         gzippedData.append(contentsOf: withUnsafeBytes(of: originalSize.littleEndian) { Data($0) })
         
         return gzippedData
+    }
+
+    private func computeCRC32(_ data: Data) -> UInt32 {
+        data.withUnsafeBytes { rawBuffer in
+            guard let baseAddress = rawBuffer.baseAddress?.assumingMemoryBound(to: Bytef.self) else {
+                return 0
+            }
+            return UInt32(truncatingIfNeeded: crc32(0, baseAddress, uInt(rawBuffer.count)))
+        }
     }
     
     private func float32ToFloat16(_ value: Float) -> UInt16 {

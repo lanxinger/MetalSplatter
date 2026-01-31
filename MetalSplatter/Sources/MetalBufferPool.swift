@@ -227,32 +227,38 @@ public class MetalBufferPool<T> {
     
     /// Returns a buffer to the pool for reuse
     public func release(_ buffer: MetalBuffer<T>) {
-        queue.async(flags: .barrier) { [weak self] in
-            guard let self = self else { return }
-            
-            let bufferID = ObjectIdentifier(buffer)
-            guard self.leasedBuffers.contains(bufferID) else {
-                self.log.warning("Attempted to release buffer that wasn't acquired from this pool")
-                return
-            }
-            
-            self.leasedBuffers.remove(bufferID)
-            
-            // Reset buffer state
-            buffer.count = 0
-            
-            // Add to pool if there's room and it's worth keeping
-            if self.shouldPoolBuffer(buffer) {
-                let pooledBuffer = PooledBuffer(buffer: buffer)
-                self.availableBuffers.append(pooledBuffer)
-                self.log.debug("Returned buffer to pool, pool size: \(self.availableBuffers.count)")
-            } else {
-                self.log.debug("Buffer not added to pool (pool full or not suitable)")
-            }
-            
-            // Trim old buffers
-            self.trimExpiredBuffers()
+        if DispatchQueue.getSpecific(key: metalBufferPoolQueueKey) == true {
+            releaseImpl(buffer)
+            return
         }
+        queue.sync {
+            releaseImpl(buffer)
+        }
+    }
+
+    private func releaseImpl(_ buffer: MetalBuffer<T>) {
+        let bufferID = ObjectIdentifier(buffer)
+        guard self.leasedBuffers.contains(bufferID) else {
+            self.log.warning("Attempted to release buffer that wasn't acquired from this pool")
+            return
+        }
+
+        self.leasedBuffers.remove(bufferID)
+
+        // Reset buffer state
+        buffer.count = 0
+
+        // Add to pool if there's room and it's worth keeping
+        if self.shouldPoolBuffer(buffer) {
+            let pooledBuffer = PooledBuffer(buffer: buffer)
+            self.availableBuffers.append(pooledBuffer)
+            self.log.debug("Returned buffer to pool, pool size: \(self.availableBuffers.count)")
+        } else {
+            self.log.debug("Buffer not added to pool (pool full or not suitable)")
+        }
+
+        // Trim old buffers
+        self.trimExpiredBuffers()
     }
     
     // MARK: - Private Helper Methods
