@@ -8,6 +8,7 @@ public class SplatSOGSZipReader: SplatSceneReader {
         case failedToExtract
         case missingMetaJson
         case invalidSOGSStructure
+        case unsafeEntryPath(String)
     }
     
     private let zipURL: URL
@@ -16,27 +17,37 @@ public class SplatSOGSZipReader: SplatSceneReader {
     
     public init(_ zipURL: URL) throws {
         self.zipURL = zipURL
-        
+
         // Create a temporary directory for extraction
         let tempDir = FileManager.default.temporaryDirectory
         self.extractedURL = tempDir.appendingPathComponent("sogs_\(UUID().uuidString)")
-        
+
         print("SplatSOGSZipReader: Initializing with ZIP: \(zipURL.path)")
         print("SplatSOGSZipReader: Will extract to: \(extractedURL.path)")
-        
+
         // Validate it's a ZIP file
         guard zipURL.pathExtension.lowercased() == "zip" else {
             throw SOGSZipError.notAZipFile
         }
-        
+
+        // Ensure cleanup on any failure after extraction directory is created
+        var extractionSucceeded = false
+        defer {
+            if !extractionSucceeded {
+                cleanupExtractedFiles()
+            }
+        }
+
         // Extract the ZIP file
         try extractZipFile()
-        
+
         // Find and validate meta.json
         let metaURL = try findMetaJson()
-        
+
         // Create the actual SOGS reader with the extracted files
         self.actualReader = try SplatSOGSSceneReader(metaURL)
+
+        extractionSucceeded = true
     }
     
     deinit {
@@ -46,27 +57,49 @@ public class SplatSOGSZipReader: SplatSceneReader {
     
     private func extractZipFile() throws {
         print("SplatSOGSZipReader: Extracting ZIP file...")
-        
+
         // Create extraction directory
         try FileManager.default.createDirectory(at: extractedURL, withIntermediateDirectories: true)
-        
+
         // Use ZIPFoundation to extract the archive
         guard let archive = Archive(url: zipURL, accessMode: .read) else {
             throw SOGSZipError.failedToExtract
         }
-        
+
+        // Resolve the extraction directory to a canonical path for comparison
+        let canonicalExtractedPath = extractedURL.standardizedFileURL.path
+
         for entry in archive {
-            let entryURL = extractedURL.appendingPathComponent(entry.path)
-            
+            // Zip Slip protection: validate entry path
+            let entryPath = entry.path
+
+            // Reject absolute paths
+            if entryPath.hasPrefix("/") {
+                throw SOGSZipError.unsafeEntryPath(entryPath)
+            }
+
+            // Reject paths containing ".." that could escape the extraction directory
+            if entryPath.contains("..") {
+                throw SOGSZipError.unsafeEntryPath(entryPath)
+            }
+
+            let entryURL = extractedURL.appendingPathComponent(entryPath)
+
+            // Final check: ensure the resolved path is still under the extraction directory
+            let canonicalEntryPath = entryURL.standardizedFileURL.path
+            guard canonicalEntryPath.hasPrefix(canonicalExtractedPath) else {
+                throw SOGSZipError.unsafeEntryPath(entryPath)
+            }
+
             // Create intermediate directories if needed
             let entryDirectory = entryURL.deletingLastPathComponent()
             try FileManager.default.createDirectory(at: entryDirectory, withIntermediateDirectories: true)
-            
+
             // Extract the file
             _ = try archive.extract(entry, to: entryURL)
             print("SplatSOGSZipReader: Extracted: \(entry.path)")
         }
-        
+
         print("SplatSOGSZipReader: Successfully extracted ZIP")
     }
     

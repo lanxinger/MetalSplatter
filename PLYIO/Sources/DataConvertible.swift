@@ -1,5 +1,19 @@
 import Foundation
 
+/// Protocol for converting data to/from binary representations.
+///
+/// # Safety Model
+/// These methods use `precondition` to validate data bounds, which will crash if
+/// insufficient data is provided. This is intentional for the following reasons:
+///
+/// 1. **Trusted Input**: This library expects file format readers to validate data
+///    bounds at a higher level before calling these primitives.
+/// 2. **Performance**: Avoiding throwing in tight parsing loops improves performance.
+/// 3. **Fail-Fast**: Crashes on invalid data ensure bugs are caught immediately rather
+///    than propagating corrupt state.
+///
+/// For untrusted input, callers should validate data size before calling these methods.
+/// See `SplatDataValidator.validateDataBounds()` for an example of higher-level validation.
 public protocol DataConvertible {
     // MARK: Reading from DataProtocol
 

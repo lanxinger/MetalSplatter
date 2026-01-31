@@ -43,6 +43,8 @@ public class SplatPLYSceneReader: SplatSceneReader {
 }
 
 private class SplatPLYSceneReaderStream {
+    private static let batchSize = 1000
+
     private weak var delegate: SplatSceneReaderDelegate? = nil
     private var active = false
     private var elementMapping: ElementInputMapping?
@@ -53,6 +55,7 @@ private class SplatPLYSceneReaderStream {
                                                 opacity: .linearFloat(.zero),
                                                 scale: .exponent(.zero),
                                                 rotation: .init(vector: .zero))
+    private var pointBatch: [SplatScenePoint] = []
 
     func read(_ ply: PLYReader, to delegate: SplatSceneReaderDelegate) {
         self.delegate = delegate
@@ -60,6 +63,8 @@ private class SplatPLYSceneReaderStream {
         elementMapping = nil
         expectedPointCount = 0
         pointCount = 0
+        pointBatch = []
+        pointBatch.reserveCapacity(Self.batchSize)
 
         ply.read(to: self)
 
@@ -100,7 +105,13 @@ extension SplatPLYSceneReaderStream: PLYReaderDelegate {
         do {
             try elementMapping.apply(from: element, to: &reusablePoint)
             pointCount += 1
-            delegate?.didRead(points: [ reusablePoint ])
+
+            // Batch points to reduce ARC/GC overhead from single-element array allocations
+            pointBatch.append(reusablePoint)
+            if pointBatch.count >= Self.batchSize {
+                delegate?.didRead(points: pointBatch)
+                pointBatch.removeAll(keepingCapacity: true)
+            }
         } catch {
             delegate?.didFailReading(withError: error)
             active = false
@@ -110,6 +121,13 @@ extension SplatPLYSceneReaderStream: PLYReaderDelegate {
 
     func didFinishReading() {
         guard active else { return }
+
+        // Flush any remaining batched points
+        if !pointBatch.isEmpty {
+            delegate?.didRead(points: pointBatch)
+            pointBatch.removeAll(keepingCapacity: false)
+        }
+
         guard expectedPointCount == pointCount else {
             delegate?.didFailReading(withError: SplatPLYSceneReader.Error.unexpectedPointCountDiscrepancy)
             active = false
@@ -122,6 +140,7 @@ extension SplatPLYSceneReaderStream: PLYReaderDelegate {
 
     func didFailReading(withError error: Swift.Error?) {
         guard active else { return }
+        pointBatch.removeAll(keepingCapacity: false)
         delegate?.didFailReading(withError: error)
         active = false
     }

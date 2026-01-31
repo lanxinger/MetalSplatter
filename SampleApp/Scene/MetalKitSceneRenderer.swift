@@ -47,6 +47,7 @@ class MetalKitSceneRenderer: NSObject, MTKViewDelegate {
 
     var model: ModelIdentifier?
     var modelRenderer: (any ModelRenderer)?
+    private var currentLoadID: UUID?
     
     // Track last logged model to avoid spam
     private var lastLoggedModel: String?
@@ -103,12 +104,22 @@ class MetalKitSceneRenderer: NSObject, MTKViewDelegate {
         guard model != self.model else { return }
         self.model = model
 
+        // Generate unique load ID to detect stale loads from rapid model switches
+        let loadID = UUID()
+        currentLoadID = loadID
+
         modelRenderer = nil
-        
+
         switch model {
         case .gaussianSplat(let url):
             // Get cached model data
             let cachedModel = try await ModelCache.shared.getModel(.gaussianSplat(url))
+
+            // Check if another load started while we were awaiting
+            guard currentLoadID == loadID else {
+                Self.log.info("Model load cancelled - another load started")
+                return
+            }
             
             // Capture needed values from main actor context
             let deviceRef = device
@@ -142,9 +153,15 @@ class MetalKitSceneRenderer: NSObject, MTKViewDelegate {
                     return renderer
                 }
             }.value
-            
+
+            // Check again after renderer creation - another load may have started
+            guard currentLoadID == loadID else {
+                Self.log.info("Model load cancelled after renderer creation - another load started")
+                return
+            }
+
             modelRenderer = splat
-            
+
             // Initialize Metal 4 bindless resources if available and enabled
             if useMetal4Bindless {
                 if #available(iOS 26.0, macOS 26.0, tvOS 26.0, visionOS 26.0, *) {
@@ -208,8 +225,12 @@ class MetalKitSceneRenderer: NSObject, MTKViewDelegate {
     }
 
     private var viewport: ModelRendererViewportDescriptor {
+        // Guard against zero height to prevent NaN/inf in projection matrix
+        let safeAspectRatio: Float = drawableSize.height > 0
+            ? Float(drawableSize.width / drawableSize.height)
+            : 1.0
         let projectionMatrix = matrix_perspective_right_hand(fovyRadians: Float(Constants.fovy.radians) / zoom,
-                                                             aspectRatio: Float(drawableSize.width / drawableSize.height),
+                                                             aspectRatio: safeAspectRatio,
                                                              nearZ: 0.1,
                                                              farZ: 100.0)
 

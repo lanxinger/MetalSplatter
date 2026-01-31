@@ -65,11 +65,15 @@ final class ModelCache {
     }
     
     /// Load model from file
+    /// File I/O is performed off the main actor to avoid blocking UI
     private func loadModel(_ identifier: ModelIdentifier, securityScopedURL: URL?, hasSecurityScopedAccess: Bool) async throws -> CachedModel {
         switch identifier {
         case .gaussianSplat(let url):
-            let reader = try AutodetectSceneReader(url)
-            let points = try reader.readScene()
+            // Perform file I/O and parsing off the main actor
+            let points = try await Task.detached(priority: .userInitiated) {
+                let reader = try AutodetectSceneReader(url)
+                return try reader.readScene()
+            }.value
 
             return CachedModel(
                 identifier: identifier,
