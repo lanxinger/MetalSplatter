@@ -97,24 +97,17 @@ class ARSceneRenderer: NSObject, MTKViewDelegate {
             
         case .sampleBox:
             Self.log.info("AR: Creating sample box for AR")
-            // Create a simple AR renderer without a model for demonstration
-            let deviceRef = device
-            let colorPixelFormat = metalKitView.colorPixelFormat
-            let depthStencilPixelFormat = metalKitView.depthStencilPixelFormat
-            let sampleCount = metalKitView.sampleCount
-            let maxSimultaneousRenders = Constants.maxSimultaneousRenders
 
-            let renderer = try await Task.detached {
-                return try ARSplatRenderer(
-                    device: deviceRef,
-                    colorFormat: colorPixelFormat,
-                    depthFormat: depthStencilPixelFormat,
-                    sampleCount: sampleCount,
-                    maxViewCount: 1,
-                    maxSimultaneousRenders: maxSimultaneousRenders
-                )
-            }.value
-            
+            // Direct construction - both ARSceneRenderer and ARSplatRenderer are @MainActor
+            let renderer = try ARSplatRenderer(
+                device: device,
+                colorFormat: metalKitView.colorPixelFormat,
+                depthFormat: metalKitView.depthStencilPixelFormat,
+                sampleCount: metalKitView.sampleCount,
+                maxViewCount: 1,
+                maxSimultaneousRenders: Constants.maxSimultaneousRenders
+            )
+
             arSplatRenderer = renderer
             noRendererLogCount = 0 // Reset log throttling
             Self.log.info("AR: Successfully created AR renderer for sample box")

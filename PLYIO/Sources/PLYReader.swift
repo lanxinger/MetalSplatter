@@ -300,7 +300,10 @@ public class PLYReader {
                         // Insufficient data available
                         return
                     }
-                    assert(bytesConsumed != 0, "PLYElement.tryDecode consumed at least one byte in producing the PLYElement")
+                    guard bytesConsumed > 0 else {
+                        // Zero-byte element would cause infinite loop - treat as corrupted file
+                        throw Error.internalConsistency
+                    }
                     bodyOffset += bytesConsumed
                     bodyUnsafeRawPointerOffset += bytesConsumed
 

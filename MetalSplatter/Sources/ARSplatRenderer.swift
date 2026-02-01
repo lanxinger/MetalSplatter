@@ -11,15 +11,11 @@ import UIKit
 /// AR-enabled Gaussian splat renderer that composites 3D splats with the camera feed.
 ///
 /// Thread Safety:
-/// - This class is marked `@unchecked Sendable` but is **NOT thread-safe**.
-/// - **All property access and method calls must be performed from the main thread.**
-/// - Properties like `splatPosition`, `splatScale`, and `splatRotation` have no internal
-///   synchronization and must only be modified from the main thread.
-/// - The `render(to:viewportSize:)` method must be called from the main thread.
-/// - AR session delegate callbacks (ARSessionDelegate) are delivered on an ARKit-managed thread;
-///   these internal callbacks do not modify shared state that would conflict with main-thread operations.
-/// - If you need to update properties from a background thread, dispatch to the main queue first.
-public class ARSplatRenderer: NSObject, @unchecked Sendable {
+/// - This class is `@MainActor` isolated - all property access and method calls must be on the main actor.
+/// - Use `await` or `MainActor.run {}` when calling from background contexts.
+/// - ARSessionDelegate callbacks are marked `nonisolated` and hop to main actor internally.
+@MainActor
+public class ARSplatRenderer: NSObject {
     private let device: MTLDevice
     private let commandQueue: MTLCommandQueue
     private let commandBufferManager: CommandBufferManager
@@ -887,14 +883,16 @@ public class ARSplatRenderer: NSObject, @unchecked Sendable {
         computeEncoder.endEncoding()
 
         // Read back the render mode decision
-        commandBuffer.addCompletedHandler { [weak self] _ in
-            guard let self = self else { return }
-            let modePointer = modeBuffer.contents().bindMemory(to: UInt32.self, capacity: 1)
-            let newMode = modePointer.pointee
+        commandBuffer.addCompletedHandler { [weak self, modeBuffer] _ in
+            Task { @MainActor [weak self] in
+                guard let self = self else { return }
+                let modePointer = modeBuffer.contents().bindMemory(to: UInt32.self, capacity: 1)
+                let newMode = modePointer.pointee
 
-            if newMode != self.currentRenderMode {
-                self.currentRenderMode = newMode
-                self.applyRenderMode(newMode)
+                if newMode != self.currentRenderMode {
+                    self.currentRenderMode = newMode
+                    self.applyRenderMode(newMode)
+                }
             }
         }
     }
@@ -1025,22 +1023,26 @@ public class ARSplatRenderer: NSObject, @unchecked Sendable {
 // MARK: - ARSessionDelegate
 
 extension ARSplatRenderer: ARSessionDelegate {
-    public func session(_ session: ARSession, didFailWithError error: Error) {
-        print("AR Session failed with error: \(error)")
+    nonisolated public func session(_ session: ARSession, didFailWithError error: Error) {
+        Task { @MainActor in
+            print("AR Session failed with error: \(error)")
+        }
     }
-    
-    public func sessionWasInterrupted(_ session: ARSession) {
-        print("AR Session was interrupted")
+
+    nonisolated public func sessionWasInterrupted(_ session: ARSession) {
+        Task { @MainActor in
+            print("AR Session was interrupted")
+        }
     }
-    
-    public func sessionInterruptionEnded(_ session: ARSession) {
-        print("AR Session interruption ended")
+
+    nonisolated public func sessionInterruptionEnded(_ session: ARSession) {
+        Task { @MainActor in
+            print("AR Session interruption ended")
+        }
     }
-    
-    public func session(_ session: ARSession, didUpdate frame: ARFrame) {
-        // This will be called frequently when AR is working
-        // Uncomment this line only for debugging, it will spam the console:
-        // print("AR Session: Received frame update")
+
+    nonisolated public func session(_ session: ARSession, didUpdate frame: ARFrame) {
+        // High-frequency callback - no state mutation needed
     }
     
     // Note: renderAsModelRenderer removed - ARSplatRenderer is not used via the ModelRenderer protocol.

@@ -78,17 +78,18 @@ final class MetalBufferPoolTests: XCTestCase {
     
     func testCapacitySelection() throws {
         // Create buffers of different sizes
-        let small = try pool.acquire(minimumCapacity: 50)
+        // Note: "small" must still meet the medium request's minimumCapacity
+        let small = try pool.acquire(minimumCapacity: 100)
         pool.release(small)
-        
+
         let large = try pool.acquire(minimumCapacity: 200)
         pool.release(large)
-        
+
         // Request medium size - should get the smaller buffer that still fits
         let medium = try pool.acquire(minimumCapacity: 100)
         XCTAssertGreaterThanOrEqual(medium.capacity, 100)
         XCTAssertLessThan(medium.capacity, large.capacity) // Should prefer smaller suitable buffer
-        
+
         pool.release(medium)
     }
     

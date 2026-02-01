@@ -1,6 +1,7 @@
 import Foundation
 import CoreImage
 import CoreGraphics
+import ImageIO
 
 #if canImport(UIKit)
 import UIKit
@@ -15,7 +16,15 @@ public struct WebPDecoder {
         case decodingFailed
         case unsupportedFormat
         case invalidImageData
+        case imageTooLarge
     }
+
+    /// Maximum allowed decoded image bytes (platform-based)
+    #if os(macOS)
+    private static let maxDecodedBytes = 512 * 1024 * 1024  // 512 MB
+    #else
+    private static let maxDecodedBytes = 256 * 1024 * 1024  // 256 MB (iOS/visionOS)
+    #endif
     
     /// Decoded WebP image data
     public struct DecodedImage {
@@ -56,6 +65,11 @@ public struct WebPDecoder {
         let bytesPerRow = width * bytesPerPixel
         let totalBytes = height * bytesPerRow
 
+        // Check total allocation size against platform limit
+        guard totalBytes <= Self.maxDecodedBytes else {
+            throw WebPError.imageTooLarge
+        }
+
         var pixels = Data(count: totalBytes)
         var decodingSucceeded = false
 
@@ -95,15 +109,18 @@ public struct WebPDecoder {
     
     /// Alternative decoder using ImageIO (fallback method)
     public static func decodeWithImageIO(_ webpData: Data) throws -> DecodedImage {
-        guard let source = CGImageSourceCreateWithData(webpData as CFData, nil),
-              let cgImage = CGImageSourceCreateImageAtIndex(source, 0, nil) else {
+        guard let source = CGImageSourceCreateWithData(webpData as CFData, nil) else {
             throw WebPError.decodingFailed
         }
 
-        let width = cgImage.width
-        let height = cgImage.height
+        // Read image properties BEFORE creating CGImage to avoid allocation
+        guard let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any],
+              let width = properties[kCGImagePropertyPixelWidth] as? Int,
+              let height = properties[kCGImagePropertyPixelHeight] as? Int else {
+            throw WebPError.decodingFailed
+        }
 
-        // Validate image dimensions
+        // Validate dimensions BEFORE decoding
         guard width > 0 && height > 0 else {
             throw WebPError.invalidImageData
         }
@@ -111,9 +128,18 @@ public struct WebPDecoder {
             throw WebPError.invalidImageData  // Reject unreasonably large images
         }
 
+        // Check total allocation size against platform limit
         let bytesPerPixel = 4
         let bytesPerRow = width * bytesPerPixel
         let totalBytes = height * bytesPerRow
+        guard totalBytes <= Self.maxDecodedBytes else {
+            throw WebPError.imageTooLarge
+        }
+
+        // NOW safe to create CGImage
+        guard let cgImage = CGImageSourceCreateImageAtIndex(source, 0, nil) else {
+            throw WebPError.decodingFailed
+        }
 
         var pixels = Data(count: totalBytes)
         var decodingSucceeded = false

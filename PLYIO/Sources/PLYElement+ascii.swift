@@ -45,6 +45,10 @@ extension PLYElement {
                 guard let count = Property.tryDecodeASCIIPrimitive(type: countType, from: &stringParser)?.uint64Value else {
                     throw ASCIIDecodeError.bodyInvalidStringForPropertyType(elementHeader, elementIndex, propertyHeader)
                 }
+                // Validate count is reasonable (match binary 100M limit) and fits in Int
+                guard count <= 100_000_000, count <= UInt64(Int.max) else {
+                    throw ASCIIDecodeError.bodyInvalidStringForPropertyType(elementHeader, elementIndex, propertyHeader)
+                }
 
                 properties[i] = try PLYElement.Property.tryDecodeASCIIList(valueType: valueType,
                                                                            count: Int(count),
@@ -214,7 +218,11 @@ fileprivate struct UnsafeStringParser {
     var size: Int
     var currentPosition = 0
 
-    // Find the next token boundaries without allocating
+    /// Find the next token boundaries without allocating.
+    ///
+    /// **Safety**: All pointer accesses are guarded by `start < size` or `end < size` checks,
+    /// ensuring we never read beyond the buffer. The `offset` base is validated
+    /// by PLYReader's body slice management.
     private mutating func findNextTokenBounds() -> (start: Int, end: Int)? {
         var start = currentPosition
         var end = start

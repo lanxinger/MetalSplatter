@@ -22,6 +22,8 @@ extension PLYElement {
 
         var offset = offset
         let originalOffset = offset
+        // Total valid range from body start (for bounds checking)
+        let totalAvailableBytes = offset + bodySize
         for (i, propertyHeader) in elementHeader.properties.enumerated() {
             let remainingBytes = bodySize - (offset - originalOffset)
             switch propertyHeader.type {
@@ -55,7 +57,14 @@ extension PLYElement {
                 }
 
                 offset += countType.byteWidth
-                let value = PLYElement.Property.decodeBinaryList(valueType: valueType, from: body, at: offset, count: count, bigEndian: bigEndian)
+                let value = try PLYElement.Property.decodeBinaryList(
+                    valueType: valueType,
+                    from: body,
+                    at: offset,
+                    count: count,
+                    totalAvailableBytes: totalAvailableBytes,
+                    bigEndian: bigEndian
+                )
                 properties[i] = value
                 offset += listDataSize
             }
@@ -111,16 +120,41 @@ fileprivate extension PLYElement.Property {
                                  from body: UnsafeRawPointer,
                                  at offset: Int,
                                  count: Int,
-                                 bigEndian: Bool) -> PLYElement.Property {
+                                 totalAvailableBytes: Int,
+                                 bigEndian: Bool) throws -> PLYElement.Property {
         switch valueType {
-        case .int8   : .listInt8   (Int8.array  (body, from: offset, count: count, bigEndian: bigEndian))
-        case .uint8  : .listUInt8  (UInt8.array (body, from: offset, count: count, bigEndian: bigEndian))
-        case .int16  : .listInt16  (Int16.array (body, from: offset, count: count, bigEndian: bigEndian))
-        case .uint16 : .listUInt16 (UInt16.array(body, from: offset, count: count, bigEndian: bigEndian))
-        case .int32  : .listInt32  (Int32.array (body, from: offset, count: count, bigEndian: bigEndian))
-        case .uint32 : .listUInt32 (UInt32.array(body, from: offset, count: count, bigEndian: bigEndian))
-        case .float32: .listFloat32(Float.array (body, from: offset, count: count, bigEndian: bigEndian))
-        case .float64: .listFloat64(Double.array(body, from: offset, count: count, bigEndian: bigEndian))
+        case .int8:
+            return .listInt8(try checkedReadArray(Int8.self, from: body, offset: offset,
+                                                   count: count, availableBytes: totalAvailableBytes,
+                                                   bigEndian: bigEndian))
+        case .uint8:
+            return .listUInt8(try checkedReadArray(UInt8.self, from: body, offset: offset,
+                                                    count: count, availableBytes: totalAvailableBytes,
+                                                    bigEndian: bigEndian))
+        case .int16:
+            return .listInt16(try checkedReadArray(Int16.self, from: body, offset: offset,
+                                                    count: count, availableBytes: totalAvailableBytes,
+                                                    bigEndian: bigEndian))
+        case .uint16:
+            return .listUInt16(try checkedReadArray(UInt16.self, from: body, offset: offset,
+                                                     count: count, availableBytes: totalAvailableBytes,
+                                                     bigEndian: bigEndian))
+        case .int32:
+            return .listInt32(try checkedReadArray(Int32.self, from: body, offset: offset,
+                                                    count: count, availableBytes: totalAvailableBytes,
+                                                    bigEndian: bigEndian))
+        case .uint32:
+            return .listUInt32(try checkedReadArray(UInt32.self, from: body, offset: offset,
+                                                     count: count, availableBytes: totalAvailableBytes,
+                                                     bigEndian: bigEndian))
+        case .float32:
+            return .listFloat32(try checkedReadArray(Float.self, from: body, offset: offset,
+                                                      count: count, availableBytes: totalAvailableBytes,
+                                                      bigEndian: bigEndian))
+        case .float64:
+            return .listFloat64(try checkedReadArray(Double.self, from: body, offset: offset,
+                                                      count: count, availableBytes: totalAvailableBytes,
+                                                      bigEndian: bigEndian))
         }
     }
 
