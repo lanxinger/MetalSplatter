@@ -155,6 +155,20 @@ public class ARSplatRenderer: NSObject {
         set { splatRenderer.highQualityDepth = newValue }
     }
 
+    /// Sorting mode for depth ordering
+    /// Auto mode selects between radial and linear based on camera motion
+    public var sortingMode: SplatRenderer.SortingMode {
+        get { splatRenderer.sortingMode }
+        set { splatRenderer.sortingMode = newValue }
+    }
+
+    /// Enable/disable dithered (stochastic) transparency
+    /// Order-independent transparency that doesn't require sorting
+    public var useDitheredTransparency: Bool {
+        get { splatRenderer.useDitheredTransparency }
+        set { splatRenderer.useDitheredTransparency = newValue }
+    }
+
     /// Enable/disable Fast SH evaluation (if FastSHSplatRenderer is in use)
     public var fastSHEnabled: Bool {
         get { fastSHRenderer?.fastSHConfig.enabled ?? false }
