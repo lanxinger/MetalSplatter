@@ -80,6 +80,9 @@ vertex FragmentIn demoBindlessSplatVertex(
     out.position = float4(position * 0.1, 0.0, 1.0); // Small quad for demo
     out.relativePosition = half2(position);
     out.color = half4(1.0, 0.5, 0.0, 1.0); // Orange color to identify demo path
+    out.lodBand = 0;
+    out.debugFlags = 0;
+    out.splatID = instanceID;
 
     return out;
 }
@@ -140,6 +143,9 @@ vertex FragmentIn demoBindlessLODSplatVertex(
     out.position = float4(position * scale, 0.0, 1.0);
     out.relativePosition = half2(position);
     out.color = half4(0.0, 1.0, 0.5, 1.0); // Green to identify LOD demo
+    out.lodBand = 0;
+    out.debugFlags = 0;
+    out.splatID = instanceID;
 
     return out;
 }

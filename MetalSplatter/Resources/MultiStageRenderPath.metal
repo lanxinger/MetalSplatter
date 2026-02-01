@@ -46,6 +46,7 @@ vertex FragmentIn multiStageSplatVertexShader(uint vertexID [[vertex_id]],
         out.color = half4(0);
         out.lodBand = 0;
         out.debugFlags = 0;
+        out.splatID = 0;
         return out;
     }
 
@@ -56,7 +57,7 @@ vertex FragmentIn multiStageSplatVertexShader(uint vertexID [[vertex_id]],
     // Override color with packed buffer if enabled (via function constant)
     splat.color = getSplatColor(actualSplatID, splatArray, packedColors);
 
-    return splatVertex(splat, uniforms, vertexID % 4);
+    return splatVertex(splat, uniforms, vertexID % 4, actualSplatID);
 }
 
 fragment FragmentStore multiStageSplatFragmentShader(FragmentIn in [[stage_in]],
@@ -93,6 +94,7 @@ vertex FragmentIn postprocessVertexShader(uint vertexID [[vertex_id]]) {
     out.color = half4(0);
     out.lodBand = 0;
     out.debugFlags = 0;
+    out.splatID = 0;
     return out;
 }
 

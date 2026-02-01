@@ -592,6 +592,52 @@ class MetalKitSceneRenderer: NSObject, MTKViewDelegate {
         #endif
     }
 
+    /// Set sorting mode: auto, radial (distance-based), or linear (view-direction-based)
+    /// - auto: Automatically selects based on camera motion (rotation vs translation)
+    /// - radial: Better for rotation-heavy camera movement (turntable, 360°)
+    /// - linear: Better for translation-heavy movement (walking through scene)
+    func setSortingMode(_ mode: SplatRenderer.SortingMode) {
+        if let splat = modelRenderer as? SplatRenderer {
+            splat.sortingMode = mode
+            switch mode {
+            case .auto:
+                Self.log.info("Sorting mode: auto (adapts to camera motion)")
+            case .radial:
+                Self.log.info("Sorting mode: radial (distance-based, best for rotation)")
+            case .linear:
+                Self.log.info("Sorting mode: linear (view-direction, best for translation)")
+            }
+        }
+
+        // Request redraw
+        #if os(macOS)
+        metalKitView.setNeedsDisplay(metalKitView.bounds)
+        #else
+        metalKitView.setNeedsDisplay()
+        #endif
+    }
+
+    /// Enable or disable 2DGS rendering mode
+    /// 2DGS uses simplified uniform circular splats for faster rendering
+    /// Less accurate for anisotropic splats but significantly faster
+    func set2DGSMode(_ enabled: Bool) {
+        if let splat = modelRenderer as? SplatRenderer {
+            splat.use2DGSMode = enabled
+            if enabled {
+                Self.log.info("2DGS mode enabled - simplified circular splats (faster)")
+            } else {
+                Self.log.info("2DGS mode disabled - full 3D covariance projection (accurate)")
+            }
+        }
+
+        // Request redraw
+        #if os(macOS)
+        metalKitView.setNeedsDisplay(metalKitView.bounds)
+        #else
+        metalKitView.setNeedsDisplay()
+        #endif
+    }
+
     // MARK: - User Interaction API
     #if os(iOS) || os(macOS)
     

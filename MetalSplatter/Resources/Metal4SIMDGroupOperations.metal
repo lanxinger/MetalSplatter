@@ -109,10 +109,14 @@ vertex FragmentIn metal4_simd_group_splatVertex(
     using namespace simd_group_ops;
     
     FragmentIn out;
-    
+    out.splatID = instanceID;
+
     if (instanceID >= argumentBuffer.splatCount) {
         out.position = float4(0, 0, 0, 1);
-        out.color = float4(0);
+        out.relativePosition = half2(0);
+        out.color = half4(0);
+        out.lodBand = 0;
+        out.debugFlags = 0;
         return out;
     }
     
@@ -136,7 +140,10 @@ vertex FragmentIn metal4_simd_group_splatVertex(
     
     if (!is_visible) {
         out.position = float4(0, 0, 0, 1);
-        out.color = float4(0);
+        out.relativePosition = half2(0);
+        out.color = half4(0);
+        out.lodBand = 0;
+        out.debugFlags = 0;
         return out;
     }
     
@@ -160,8 +167,11 @@ vertex FragmentIn metal4_simd_group_splatVertex(
     float4 screenPos = modelViewProj * float4(viewPos.xyz + float3(screenOffset, 0), 1.0);
     
     out.position = screenPos;
+    out.relativePosition = half2(0);  // Not using for this path
     out.color = splat.color;
-    
+    out.lodBand = 0;
+    out.debugFlags = 0;
+
     return out;
 }
 

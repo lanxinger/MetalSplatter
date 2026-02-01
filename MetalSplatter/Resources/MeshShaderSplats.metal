@@ -47,6 +47,7 @@ struct MeshVertexOutput {
     half4 color;
     half lodBand;
     uint debugFlags;
+    uint splatID [[flat]];  // For temporal noise in Bayer dithering
 };
 
 // Mesh type alias
@@ -323,6 +324,7 @@ void splatMeshShader(
         v0.color = splatColor;
         v0.lodBand = half(0);
         v0.debugFlags = debugFlags;
+        v0.splatID = actualSplatIndex;
         outputMesh.set_vertex(vertexBase + 0, v0);
     }
 
@@ -338,6 +340,7 @@ void splatMeshShader(
         v1.color = splatColor;
         v1.lodBand = half(0);
         v1.debugFlags = debugFlags;
+        v1.splatID = actualSplatIndex;
         outputMesh.set_vertex(vertexBase + 1, v1);
     }
 
@@ -353,6 +356,7 @@ void splatMeshShader(
         v2.color = splatColor;
         v2.lodBand = half(0);
         v2.debugFlags = debugFlags;
+        v2.splatID = actualSplatIndex;
         outputMesh.set_vertex(vertexBase + 2, v2);
     }
 
@@ -368,9 +372,10 @@ void splatMeshShader(
         v3.color = splatColor;
         v3.lodBand = half(0);
         v3.debugFlags = debugFlags;
+        v3.splatID = actualSplatIndex;
         outputMesh.set_vertex(vertexBase + 3, v3);
     }
-    
+
     // Generate 2 triangles for this splat's quad
     uint triangleBase = threadIndex * TRIANGLES_PER_SPLAT;
     
@@ -457,6 +462,7 @@ void splatMeshShaderPrecomputed(
         v0.color = splatColor;
         v0.lodBand = half(0);
         v0.debugFlags = debugFlags;
+        v0.splatID = actualSplatIndex;
         outputMesh.set_vertex(vertexBase + 0, v0);
     }
 
@@ -471,6 +477,7 @@ void splatMeshShaderPrecomputed(
         v1.color = splatColor;
         v1.lodBand = half(0);
         v1.debugFlags = debugFlags;
+        v1.splatID = actualSplatIndex;
         outputMesh.set_vertex(vertexBase + 1, v1);
     }
 
@@ -485,6 +492,7 @@ void splatMeshShaderPrecomputed(
         v2.color = splatColor;
         v2.lodBand = half(0);
         v2.debugFlags = debugFlags;
+        v2.splatID = actualSplatIndex;
         outputMesh.set_vertex(vertexBase + 2, v2);
     }
 
@@ -499,6 +507,7 @@ void splatMeshShaderPrecomputed(
         v3.color = splatColor;
         v3.lodBand = half(0);
         v3.debugFlags = debugFlags;
+        v3.splatID = actualSplatIndex;
         outputMesh.set_vertex(vertexBase + 3, v3);
     }
 

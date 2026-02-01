@@ -156,30 +156,37 @@ public class FastSHSplatRenderer: SplatRenderer {
     
     private func setupFastSHPipeline(library: MTLLibrary) {
         do {
+            // Set function constants (required for shaders including ShaderCommon.h)
+            let functionConstants = MTLFunctionConstantValues()
+            var usePackedColorsValue = false
+            var hasPackedColorsBufferValue = false
+            var use2DGSValue = use2DGSMode
+            functionConstants.setConstantValue(&usePackedColorsValue, type: .bool, index: 10)
+            functionConstants.setConstantValue(&hasPackedColorsBufferValue, type: .bool, index: 11)
+            functionConstants.setConstantValue(&use2DGSValue, type: .bool, index: 12)
+
             // Buffer-based fast SH pipeline
-            let vertexFunction = library.makeFunction(name: "fastSHSplatVertexShader")
-            let fragmentFunction = library.makeFunction(name: "fastSHSplatFragmentShader")
-            
-            if let vertexFunction = vertexFunction, let fragmentFunction = fragmentFunction {
-                let pipelineDescriptor = MTLRenderPipelineDescriptor()
-                pipelineDescriptor.label = "Fast SH Splat Pipeline"
-                pipelineDescriptor.vertexFunction = vertexFunction
-                pipelineDescriptor.fragmentFunction = fragmentFunction
-                pipelineDescriptor.colorAttachments[0].pixelFormat = colorFormat
-                pipelineDescriptor.colorAttachments[0].isBlendingEnabled = true
-                pipelineDescriptor.colorAttachments[0].sourceRGBBlendFactor = .one
-                pipelineDescriptor.colorAttachments[0].destinationRGBBlendFactor = .oneMinusSourceAlpha
-                pipelineDescriptor.colorAttachments[0].sourceAlphaBlendFactor = .one
-                pipelineDescriptor.colorAttachments[0].destinationAlphaBlendFactor = .oneMinusSourceAlpha
-                pipelineDescriptor.depthAttachmentPixelFormat = depthFormat
-                pipelineDescriptor.sampleCount = sampleCount
-                
-                if #available(iOS 17.0, macOS 14.0, *) {
-                    pipelineDescriptor.maxVertexAmplificationCount = maxViewCount
-                }
-                
-                fastSHPipelineState = try device.makeRenderPipelineState(descriptor: pipelineDescriptor)
+            let vertexFunction = try library.makeFunction(name: "fastSHSplatVertexShader", constantValues: functionConstants)
+            let fragmentFunction = try library.makeFunction(name: "fastSHSplatFragmentShader", constantValues: functionConstants)
+
+            let pipelineDescriptor = MTLRenderPipelineDescriptor()
+            pipelineDescriptor.label = "Fast SH Splat Pipeline"
+            pipelineDescriptor.vertexFunction = vertexFunction
+            pipelineDescriptor.fragmentFunction = fragmentFunction
+            pipelineDescriptor.colorAttachments[0].pixelFormat = colorFormat
+            pipelineDescriptor.colorAttachments[0].isBlendingEnabled = true
+            pipelineDescriptor.colorAttachments[0].sourceRGBBlendFactor = .one
+            pipelineDescriptor.colorAttachments[0].destinationRGBBlendFactor = .oneMinusSourceAlpha
+            pipelineDescriptor.colorAttachments[0].sourceAlphaBlendFactor = .one
+            pipelineDescriptor.colorAttachments[0].destinationAlphaBlendFactor = .oneMinusSourceAlpha
+            pipelineDescriptor.depthAttachmentPixelFormat = depthFormat
+            pipelineDescriptor.sampleCount = sampleCount
+
+            if #available(iOS 17.0, macOS 14.0, *) {
+                pipelineDescriptor.maxVertexAmplificationCount = maxViewCount
             }
+
+            fastSHPipelineState = try device.makeRenderPipelineState(descriptor: pipelineDescriptor)
         } catch {
             print("Failed to create fast SH pipeline: \(error)")
         }

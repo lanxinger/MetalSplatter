@@ -91,21 +91,23 @@ void decomposeCovariance(float3 cov2D, thread float2 &v1, thread float2 &v2) {
 
 FragmentIn splatVertex(Splat splat,
                        Uniforms uniforms,
-                       uint relativeVertexIndex) {
+                       uint relativeVertexIndex,
+                       uint splatID) {
     FragmentIn out;
     out.debugFlags = uniforms.debugFlags;
     out.lodBand = 0;
+    out.splatID = splatID;
 
     // Optimized matrix multiplication with memory-coalesced access pattern
     // Load position components into SIMD-friendly variables for better memory access
     float3 splatPos = float3(splat.position);
-    
+
     // Pre-load matrix rows for coalesced access
     float3 viewMatrixRow0 = uniforms.viewMatrix[0].xyz;
     float3 viewMatrixRow1 = uniforms.viewMatrix[1].xyz;
     float3 viewMatrixRow2 = uniforms.viewMatrix[2].xyz;
     float3 viewMatrixRow3 = uniforms.viewMatrix[3].xyz;
-    
+
     // SIMD-optimized matrix multiplication
     float3 viewPosition3 = viewMatrixRow0 * splatPos.x +
                           viewMatrixRow1 * splatPos.y +
@@ -117,12 +119,13 @@ FragmentIn splatVertex(Splat splat,
         out.position = float4(1, 1, 0, 1);
         out.relativePosition = half2(0);
         out.color = half4(0);
+        out.splatID = splatID;
         return out;
     }
 
     // Optimized projection matrix multiplication
     float4 projectedCenter = uniforms.projectionMatrix * float4(viewPosition3, 1.0);
-    
+
     // Optimized frustum culling with single bounds calculation
     // Guard against division by zero
     float safeW = (abs(projectedCenter.w) < kDivisionEpsilon) ? copysign(kDivisionEpsilon, projectedCenter.w) : projectedCenter.w;
@@ -131,42 +134,77 @@ FragmentIn splatVertex(Splat splat,
     // Combined frustum check: depth + XY bounds in one condition
     if (ndc.z > 1.0f || any(abs(ndc.xy) > 1.2f)) {
         out.position = float4(1, 1, 0, 1);
+        out.splatID = splatID;
         return out;
     }
 
-    // Pre-load covariance data for coalesced memory access
-    packed_half3 covA = splat.covA;
-    packed_half3 covB = splat.covB;
-    
-    float3 cov2D = calcCovariance2D(viewPosition3, covA, covB,
-                                    uniforms.viewMatrix, uniforms.projectionMatrix, uniforms.screenSize);
-
     float2 axis1;
     float2 axis2;
-    decomposeCovariance(cov2D, axis1, axis2);
 
-    // Screen-space LOD culling - cull sub-pixel splats
-    // Compute pixel radius from 2D covariance axes (matches actual quad size)
-    float pixelRadius = max(length(axis1 + axis2), length(axis1 - axis2)) * kBoundsRadius;
-    if (pixelRadius < 0.5f) {
-        out.position = float4(1, 1, 0, 1);
-        out.relativePosition = half2(0);
-        out.color = half4(0);
-        return out;
+    // 2DGS mode: simplified screen-space quads without full 3D covariance projection
+    // Uses uniform circular splats based on maximum covariance component
+    // Faster but less accurate for anisotropic splats
+    if (use2DGS) {
+        // Estimate radius from covariance diagonal (maximum eigenvalue approximation)
+        packed_half3 covA = splat.covA;
+        packed_half3 covB = splat.covB;
+
+        // Use max of diagonal covariance as radius estimate
+        float maxCov = max(max(float(covA.x), float(covB.x)), float(covB.z));
+        float radius = fast::sqrt(maxCov);
+
+        // Project radius to screen space
+        float focalX = float(uniforms.screenSize.x) * uniforms.projectionMatrix[0][0] * 0.5f;
+        float screenRadius = radius * focalX * invW;
+
+        // Sub-pixel culling
+        if (screenRadius < 0.5f) {
+            out.position = float4(1, 1, 0, 1);
+            out.relativePosition = half2(0);
+            out.color = half4(0);
+            out.splatID = splatID;
+            return out;
+        }
+
+        // Set uniform circular splat axes
+        axis1 = float2(screenRadius, 0);
+        axis2 = float2(0, screenRadius);
+    } else {
+        // Full 3DGS: complete covariance projection and decomposition
+
+        // Pre-load covariance data for coalesced memory access
+        packed_half3 covA = splat.covA;
+        packed_half3 covB = splat.covB;
+
+        float3 cov2D = calcCovariance2D(viewPosition3, covA, covB,
+                                        uniforms.viewMatrix, uniforms.projectionMatrix, uniforms.screenSize);
+
+        decomposeCovariance(cov2D, axis1, axis2);
+
+        // Screen-space LOD culling - cull sub-pixel splats
+        // Compute pixel radius from 2D covariance axes (matches actual quad size)
+        float pixelRadius = max(length(axis1 + axis2), length(axis1 - axis2)) * kBoundsRadius;
+        if (pixelRadius < 0.5f) {
+            out.position = float4(1, 1, 0, 1);
+            out.relativePosition = half2(0);
+            out.color = half4(0);
+            out.splatID = splatID;
+            return out;
+        }
     }
 
     // Pre-compute lookup table data for better cache utilization
     const half2 relativeCoordinatesArray[] = { { -1, -1 }, { -1, 1 }, { 1, -1 }, { 1, 1 } };
     half2 relativeCoordinates = relativeCoordinatesArray[relativeVertexIndex];
-    
+
     // Pre-compute screen size as half2 to avoid repeated conversions
     half2 screenSizeFloat = half2(uniforms.screenSize);
-    
+
     // SIMD-optimized delta calculation with coalesced memory access
     half2 axisContribution1 = relativeCoordinates.x * half2(axis1);
     half2 axisContribution2 = relativeCoordinates.y * half2(axis2);
     half2 totalAxisContribution = axisContribution1 + axisContribution2;
-    
+
     half2 projectedScreenDelta = totalAxisContribution * (2.0h * kBoundsRadius) / screenSizeFloat;
 
     out.position = float4(projectedCenter.x + projectedScreenDelta.x * projectedCenter.w,

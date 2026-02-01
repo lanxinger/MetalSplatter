@@ -1,5 +1,6 @@
 import SwiftUI
 import Metal
+import MetalSplatter
 import os
 
 private let renderSettingsLog = Logger(subsystem: "com.metalsplatter.sampleapp", category: "RenderSettings")
@@ -32,6 +33,8 @@ struct RenderSettings: View {
     @Binding var batchPrecomputeEnabled: Bool  // TensorOps batch precompute
     @Binding var meshShaderEnabled: Bool  // Mesh shaders (Metal 3+)
     @Binding var ditheredTransparencyEnabled: Bool  // Stochastic transparency (order-independent)
+    @Binding var sortingModeIndex: Int  // 0=auto, 1=radial, 2=linear
+    @Binding var use2DGSMode: Bool  // Simplified 2D gaussian splatting
     @State private var isMetal4Available: Bool = false
     @State private var metal4SIMDGroupEnabled: Bool = true
     @State private var metal4AtomicSortEnabled: Bool = true
@@ -107,6 +110,34 @@ struct RenderSettings: View {
 
             Divider()
 
+            // 2DGS Mode Toggle - simplified rendering
+            Toggle(isOn: $use2DGSMode) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("2DGS Rendering Mode")
+                        .font(.subheadline)
+                    Text("Faster circular splats (less accurate for anisotropic)")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+            }
+
+            // Sorting Mode Picker
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Sorting Mode")
+                    .font(.subheadline)
+                Picker("Sorting Mode", selection: $sortingModeIndex) {
+                    Text("Auto").tag(0)
+                    Text("Radial").tag(1)
+                    Text("Linear").tag(2)
+                }
+                .pickerStyle(.segmented)
+                Text(sortingModeDescription)
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
+
+            Divider()
+
             // Metal 4 Bindless Toggle
             Toggle(isOn: $metal4BindlessEnabled) {
                 VStack(alignment: .leading, spacing: 2) {
@@ -176,6 +207,15 @@ struct RenderSettings: View {
         }
     }
     
+    private var sortingModeDescription: String {
+        switch sortingModeIndex {
+        case 0: return "Auto: Adapts to camera motion (rotation vs translation)"
+        case 1: return "Radial: Distance-based, best for turntable/360° views"
+        case 2: return "Linear: View-direction, best for walking through scenes"
+        default: return ""
+        }
+    }
+
     private func checkMetal4Availability() {
         if #available(iOS 26.0, macOS 26.0, tvOS 26.0, visionOS 26.0, *) {
             // Check for actual Metal device support
@@ -218,6 +258,8 @@ struct EnhancedMetalKitSceneView: View {
     @State private var batchPrecomputeEnabled = true // TensorOps batch precompute - enabled by default
     @State private var meshShaderEnabled = true // Mesh shaders - enabled by default for Metal 3+ devices
     @State private var ditheredTransparencyEnabled = false // Stochastic transparency - disabled by default
+    @State private var sortingModeIndex = 0 // 0=auto, 1=radial, 2=linear (auto by default)
+    @State private var use2DGSMode = false // 2DGS simplified rendering - disabled by default
     @State private var showARUnavailableAlert = false
     @State private var navigateToAR = false
     
@@ -232,7 +274,9 @@ struct EnhancedMetalKitSceneView: View {
                 showDebugAABB: $showDebugAABB,
                 batchPrecomputeEnabled: $batchPrecomputeEnabled,
                 meshShaderEnabled: $meshShaderEnabled,
-                ditheredTransparencyEnabled: $ditheredTransparencyEnabled
+                ditheredTransparencyEnabled: $ditheredTransparencyEnabled,
+                sortingModeIndex: $sortingModeIndex,
+                use2DGSMode: $use2DGSMode
             )
             .ignoresSafeArea()
             
@@ -303,6 +347,8 @@ struct EnhancedMetalKitSceneView: View {
                                 batchPrecomputeEnabled: $batchPrecomputeEnabled,
                                 meshShaderEnabled: $meshShaderEnabled,
                                 ditheredTransparencyEnabled: $ditheredTransparencyEnabled,
+                                sortingModeIndex: $sortingModeIndex,
+                                use2DGSMode: $use2DGSMode,
                                 onDismiss: { showSettings = false }
                             )
                             .padding()
@@ -361,21 +407,23 @@ struct MetalKitRendererViewEnhanced: ViewRepresentable {
     @Binding var batchPrecomputeEnabled: Bool
     @Binding var meshShaderEnabled: Bool
     @Binding var ditheredTransparencyEnabled: Bool
-    
+    @Binding var sortingModeIndex: Int
+    @Binding var use2DGSMode: Bool
+
     class Coordinator: NSObject, UIGestureRecognizerDelegate {
         var renderer: MetalKitSceneRenderer?
         var parent: MetalKitRendererViewEnhanced
-        
+
         // Store camera interaction state
         var lastPanLocation: CGPoint?
         var lastRotation: Angle = .zero
         var lastRollRotation: Float = 0.0
         var zoom: Float = 1.0
-        
+
         init(_ parent: MetalKitRendererViewEnhanced) {
             self.parent = parent
         }
-        
+
         func updateSettings() {
             renderer?.fastSHSettings.enabled = parent.fastSHEnabled
             renderer?.setSHRendering(parent.shRenderingEnabled)
@@ -384,6 +432,17 @@ struct MetalKitRendererViewEnhanced: ViewRepresentable {
             renderer?.setBatchPrecompute(parent.batchPrecomputeEnabled)
             renderer?.setMeshShader(parent.meshShaderEnabled)
             renderer?.setDitheredTransparency(parent.ditheredTransparencyEnabled)
+            renderer?.setSortingMode(parent.sortingMode)
+            renderer?.set2DGSMode(parent.use2DGSMode)
+        }
+    }
+
+    /// Convert sortingModeIndex to SplatRenderer.SortingMode
+    var sortingMode: SplatRenderer.SortingMode {
+        switch sortingModeIndex {
+        case 1: return .radial
+        case 2: return .linear
+        default: return .auto
         }
     }
     
@@ -428,7 +487,9 @@ struct MetalKitRendererViewEnhanced: ViewRepresentable {
         renderer?.setBatchPrecompute(batchPrecomputeEnabled)
         renderer?.setMeshShader(meshShaderEnabled)
         renderer?.setDitheredTransparency(ditheredTransparencyEnabled)
-        
+        renderer?.setSortingMode(sortingMode)
+        renderer?.set2DGSMode(use2DGSMode)
+
         // Add gesture recognizers (same as original)
         #if os(iOS)
         let panGesture = UIPanGestureRecognizer(target: coordinator, action: #selector(Coordinator.handlePan(_:)))

@@ -74,6 +74,11 @@ typedef struct
 constant bool usePackedColors [[function_constant(10)]];
 constant bool hasPackedColorsBuffer [[function_constant(11)]];
 
+// Function constant for 2DGS rendering mode
+// When enabled, uses simplified screen-space quads instead of full 3D covariance projection
+// Using index 12 to avoid conflict with packed colors (10-11) and SH (0-3)
+constant bool use2DGS [[function_constant(12)]];
+
 // Helper to unpack snorm10a2 to half4
 // Format: [A:2][B:10][G:10][R:10] (standard snorm10a2 layout)
 inline half4 unpackSnorm10a2ToHalf(uint packed) {
@@ -112,4 +117,5 @@ typedef struct
     half4 color;
     half lodBand;
     uint debugFlags;
+    uint splatID [[flat]];  // For temporal noise in Bayer dithering
 } FragmentIn;

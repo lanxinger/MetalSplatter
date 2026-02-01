@@ -56,13 +56,19 @@ public enum SplatRendererError: LocalizedError {
 }
 
 public class SplatRenderer: @unchecked Sendable {
+    /// Sorting mode selection for gaussian splat depth ordering
+    /// - radial: Sort by squared distance from camera (better for rotation-heavy views like 360°)
+    /// - linear: Sort by dot product with view direction (better for translation-heavy movement)
+    /// - auto: Automatically select based on camera motion between frames
+    public enum SortingMode: Sendable {
+        case radial   // Distance-based sorting (better for rotation)
+        case linear   // View-direction-based sorting (better for translation)
+        case auto     // Auto-select based on camera motion
+    }
+
     enum Constants {
         // Keep in sync with Shaders.metal : maxViewCount
         static let maxViewCount = 2
-        // Sort by euclidian distance squared from camera position (true), or along the "forward" vector (false)
-        // TODO: compare the behaviour and performance of sortByDistance
-        // notes: sortByDistance introduces unstable artifacts when you get close to an object; whereas !sortByDistance introduces artifacts are you turn -- but they're a little subtler maybe?
-        static let sortByDistance = true
         // Only store indices for 1024 splats; for the remainder, use instancing of these existing indices.
         // Setting to 1 uses only instancing (with a significant performance penalty); setting to a number higher than the splat count
         // uses only indexing (with a significant memory penalty for th elarge index array, and a small performance penalty
@@ -334,6 +340,30 @@ public class SplatRenderer: @unchecked Sendable {
         }
     }
 
+    // MARK: - 2DGS Rendering Mode
+
+    /// When true, uses simplified 2D Gaussian splat rendering instead of full 3D covariance projection.
+    ///
+    /// **Benefits:**
+    /// - Faster rendering (no Jacobian computation)
+    /// - Simpler math for screen-space projection
+    ///
+    /// **Trade-offs:**
+    /// - Less accurate for anisotropic (elongated) splats
+    /// - Best suited for content with relatively uniform/circular splats
+    /// - May show visual artifacts on highly stretched splats
+    ///
+    /// The 2DGS mode uses uniform circular splats based on the maximum covariance component,
+    /// avoiding the full 3D covariance projection and eigenvalue decomposition.
+    public var use2DGSMode: Bool = false {
+        didSet {
+            if use2DGSMode != oldValue {
+                // Invalidate pipeline states to rebuild with correct settings
+                invalidatePipelineStates()
+            }
+        }
+    }
+
     public var sortPositionEpsilon: Float = 0.01
     public var sortDirectionEpsilon: Float = 0.0001  // ~0.5-1° rotation (reduced from 0.001 to fix flickering during rotation)
     public var minimumSortInterval: TimeInterval = 0
@@ -402,6 +432,84 @@ public class SplatRenderer: @unchecked Sendable {
             interval = interval * 0.5
         }
         return interval
+    }
+
+    // MARK: - Sorting Mode Selection
+
+    /// Sorting mode for depth ordering. Default is `.auto` which selects based on camera motion.
+    /// - `.radial`: Always use squared distance from camera (better for rotation-heavy views)
+    /// - `.linear`: Always use dot product with view direction (better for translation)
+    /// - `.auto`: Automatically select based on camera motion between frames
+    public var sortingMode: SortingMode = .auto
+
+    /// Threshold for auto-selecting sorting mode. When the ratio of rotation to translation
+    /// exceeds this value, radial sorting is preferred. Range: 0.0 to 1.0
+    public var autoSortModeRotationBias: Float = 0.5
+
+    /// Previous camera position for motion tracking (used in auto mode)
+    private var previousCameraPosition: SIMD3<Float>?
+
+    /// Previous camera forward for motion tracking (used in auto mode)
+    private var previousCameraForward: SIMD3<Float>?
+
+    /// Last computed effective sorting mode (for debugging/statistics)
+    private(set) var lastEffectiveSortingMode: SortingMode = .radial
+
+    /// Computes the effective sort mode based on camera motion when in auto mode.
+    /// Returns true for radial sorting, false for linear sorting.
+    private func computeEffectiveSortByDistance(
+        cameraPosition: SIMD3<Float>,
+        cameraForward: SIMD3<Float>
+    ) -> Bool {
+        switch sortingMode {
+        case .radial:
+            lastEffectiveSortingMode = .radial
+            return true
+        case .linear:
+            lastEffectiveSortingMode = .linear
+            return false
+        case .auto:
+            // Track camera motion to determine best sorting mode
+            guard let prevPos = previousCameraPosition,
+                  let prevFwd = previousCameraForward else {
+                // First frame: default to radial
+                previousCameraPosition = cameraPosition
+                previousCameraForward = cameraForward
+                lastEffectiveSortingMode = .radial
+                return true
+            }
+
+            // Compute translation magnitude (squared for efficiency)
+            let translationDelta = cameraPosition - prevPos
+            let translationMagnitudeSq = simd_dot(translationDelta, translationDelta)
+
+            // Compute rotation magnitude via dot product deviation from 1.0
+            // (1 - dot) gives 0 for no rotation, approaches 2 for 180° rotation
+            let rotationDelta = 1.0 - simd_dot(cameraForward, prevFwd)
+
+            // Update previous values for next frame
+            previousCameraPosition = cameraPosition
+            previousCameraForward = cameraForward
+
+            // Normalize rotation to roughly match translation scale
+            // rotation of ~0.01 (about 8°) corresponds to noticeable turn
+            // Multiply by 100 to bring it to similar magnitude as typical translation
+            let normalizedRotation = rotationDelta * 100.0
+
+            // Calculate ratio: higher = more rotation relative to translation
+            let total = Float(translationMagnitudeSq) + normalizedRotation
+            guard total > 0.0001 else {
+                // Minimal motion - keep last mode
+                return lastEffectiveSortingMode == .radial
+            }
+
+            let rotationRatio = normalizedRotation / total
+
+            // Use radial if rotation dominates, linear if translation dominates
+            let useRadial = rotationRatio > autoSortModeRotationBias
+            lastEffectiveSortingMode = useRadial ? .radial : .linear
+            return useRadial
+        }
     }
 
     // Performance tracking
@@ -937,17 +1045,19 @@ public class SplatRenderer: @unchecked Sendable {
         }
         
         do {
-            // Set function constants for packed colors
+            // Set function constants for packed colors and 2DGS mode
             let functionConstants = MTLFunctionConstantValues()
             var usePackedColorsValue = usePackedColors
             var hasPackedColorsBufferValue = packedColorBuffer != nil
+            var use2DGSValue = use2DGSMode
             functionConstants.setConstantValue(&usePackedColorsValue, type: .bool, index: 10)
             functionConstants.setConstantValue(&hasPackedColorsBufferValue, type: .bool, index: 11)
+            functionConstants.setConstantValue(&use2DGSValue, type: .bool, index: 12)
 
             // Try to load mesh shader functions with function constants
-            guard let objectFunction = library.makeFunction(name: "splatObjectShader"),
+            guard let objectFunction = try? library.makeFunction(name: "splatObjectShader", constantValues: functionConstants),
                   let meshFunction = try? library.makeFunction(name: "splatMeshShader", constantValues: functionConstants),
-                  let fragmentFunction = library.makeFunction(name: "meshSplatFragmentShader") else {
+                  let fragmentFunction = try? library.makeFunction(name: "meshSplatFragmentShader", constantValues: functionConstants) else {
                 Self.log.info("Mesh shader functions not found in library")
                 return
             }
@@ -1117,12 +1227,14 @@ public class SplatRenderer: @unchecked Sendable {
 
         pipelineDescriptor.label = "SingleStagePipeline"
 
-        // Set function constants for packed colors
+        // Set function constants for packed colors and 2DGS mode
         let functionConstants = MTLFunctionConstantValues()
         var usePackedColorsValue = usePackedColors
         var hasPackedColorsBufferValue = packedColorBuffer != nil
+        var use2DGSValue = use2DGSMode
         functionConstants.setConstantValue(&usePackedColorsValue, type: .bool, index: 10)
         functionConstants.setConstantValue(&hasPackedColorsBufferValue, type: .bool, index: 11)
+        functionConstants.setConstantValue(&use2DGSValue, type: .bool, index: 12)
 
         pipelineDescriptor.vertexFunction = try library.makeFunction(name: "singleStageSplatVertexShader", constantValues: functionConstants)
         pipelineDescriptor.fragmentFunction = try library.makeRequiredFunction(name: "singleStageSplatFragmentShader")
@@ -1174,12 +1286,14 @@ public class SplatRenderer: @unchecked Sendable {
 
         pipelineDescriptor.label = "DitheredTransparencyPipeline"
 
-        // Set function constants for packed colors
+        // Set function constants for packed colors and 2DGS mode
         let functionConstants = MTLFunctionConstantValues()
         var usePackedColorsValue = usePackedColors
         var hasPackedColorsBufferValue = packedColorBuffer != nil
+        var use2DGSValue = use2DGSMode
         functionConstants.setConstantValue(&usePackedColorsValue, type: .bool, index: 10)
         functionConstants.setConstantValue(&hasPackedColorsBufferValue, type: .bool, index: 11)
+        functionConstants.setConstantValue(&use2DGSValue, type: .bool, index: 12)
 
         pipelineDescriptor.vertexFunction = try library.makeFunction(name: "singleStageSplatVertexShader", constantValues: functionConstants)
         pipelineDescriptor.fragmentFunction = try library.makeRequiredFunction(name: "singleStageSplatFragmentShaderDithered")
@@ -1233,12 +1347,14 @@ public class SplatRenderer: @unchecked Sendable {
 
         pipelineDescriptor.label = "DrawSplatPipeline"
 
-        // Set function constants for packed colors
+        // Set function constants for packed colors and 2DGS mode
         let functionConstants = MTLFunctionConstantValues()
         var usePackedColorsValue = usePackedColors
         var hasPackedColorsBufferValue = packedColorBuffer != nil
+        var use2DGSValue = use2DGSMode
         functionConstants.setConstantValue(&usePackedColorsValue, type: .bool, index: 10)
         functionConstants.setConstantValue(&hasPackedColorsBufferValue, type: .bool, index: 11)
+        functionConstants.setConstantValue(&use2DGSValue, type: .bool, index: 12)
 
         pipelineDescriptor.vertexFunction = try library.makeFunction(name: "multiStageSplatVertexShader", constantValues: functionConstants)
         pipelineDescriptor.fragmentFunction = try library.makeRequiredFunction(name: "multiStageSplatFragmentShader")
@@ -2770,6 +2886,12 @@ public class SplatRenderer: @unchecked Sendable {
         let cameraWorldForward = sortCameraForward
         let cameraWorldPosition = sortCameraPosition
         let sortStartTime = CFAbsoluteTimeGetCurrent()
+
+        // Compute effective sort mode based on camera motion (auto mode tracks rotation vs translation)
+        let effectiveSortByDistance = computeEffectiveSortByDistance(
+            cameraPosition: cameraWorldPosition,
+            cameraForward: cameraWorldForward
+        )
         
 //        // For benchmark.
 //        guard splatCount > 0 else {
@@ -2814,7 +2936,7 @@ public class SplatRenderer: @unchecked Sendable {
                                 count: splatCount,
                                 cameraPosition: cameraWorldPosition,
                                 cameraForward: cameraWorldForward,
-                                sortByDistance: Constants.sortByDistance,
+                                sortByDistance: effectiveSortByDistance,
                                 outputIndices: indexOutputBuffer.buffer,
                                 commandBuffer: commandBuffer
                             )
@@ -2879,7 +3001,7 @@ public class SplatRenderer: @unchecked Sendable {
                             outputBuffer: indexOutputBuffer.buffer,
                             cameraPosition: cameraWorldPosition,
                             cameraForward: cameraWorldForward,
-                            sortByDistance: Constants.sortByDistance,
+                            sortByDistance: effectiveSortByDistance,
                             splatCount: splatCount,
                             depthBounds: depthBounds,
                             useCameraRelativeBinning: self.useCameraRelativeBinning
@@ -2949,7 +3071,7 @@ public class SplatRenderer: @unchecked Sendable {
                     // Set up compute shader parameters
                     var cameraPos = cameraWorldPosition
                     var cameraFwd = cameraWorldForward
-                    var sortByDist = Constants.sortByDistance
+                    var sortByDist = effectiveSortByDistance
                     var count = UInt32(splatCount)
 
                     computeEncoder.setComputePipelineState(computePipelineState)
@@ -3020,7 +3142,7 @@ public class SplatRenderer: @unchecked Sendable {
                 // This avoids holding the lock during the slow sort operation
                 splatBuffer.withLockedValues { values, count in
                     let actualCount = min(count, splatCount)
-                    if Constants.sortByDistance {
+                    if effectiveSortByDistance {
                         for i in 0..<actualCount {
                             orderAndDepthTempSort[i].index = UInt32(i)
                             let splatPos = values[i].position.simd

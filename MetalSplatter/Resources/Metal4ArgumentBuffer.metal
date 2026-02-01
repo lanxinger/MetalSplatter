@@ -26,19 +26,20 @@ vertex FragmentIn metal4_splatVertex(uint vertexID [[vertex_id]],
     
     Uniforms uniforms = uniformsArray.uniforms[min(int(amplificationID), kMaxViewCount)];
     
-    uint splatID = instanceID * uniforms.indexedSplatCount + (vertexID / 4);
-    if (splatID >= uniforms.splatCount) {
+    uint logicalSplatID = instanceID * uniforms.indexedSplatCount + (vertexID / 4);
+    if (logicalSplatID >= uniforms.splatCount) {
         FragmentIn out;
         out.position = float4(1, 1, 0, 1);
         out.relativePosition = half2(0);
         out.color = half4(0);
         out.lodBand = 0;
         out.debugFlags = 0;
+        out.splatID = 0;
         return out;
     }
-    
-    Splat splat = splatArray[splatID];
-    return splatVertex(splat, uniforms, vertexID % 4);
+
+    Splat splat = splatArray[logicalSplatID];
+    return splatVertex(splat, uniforms, vertexID % 4, logicalSplatID);
 }
 
 // Metal 4.0 fragment shader (can also access argument buffer if needed)
