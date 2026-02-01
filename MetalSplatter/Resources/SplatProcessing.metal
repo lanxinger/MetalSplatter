@@ -145,6 +145,16 @@ FragmentIn splatVertex(Splat splat,
     float2 axis2;
     decomposeCovariance(cov2D, axis1, axis2);
 
+    // Screen-space LOD culling - cull sub-pixel splats
+    // Compute pixel radius from 2D covariance axes (matches actual quad size)
+    float pixelRadius = max(length(axis1 + axis2), length(axis1 - axis2)) * kBoundsRadius;
+    if (pixelRadius < 0.5f) {
+        out.position = float4(1, 1, 0, 1);
+        out.relativePosition = half2(0);
+        out.color = half4(0);
+        return out;
+    }
+
     // Pre-compute lookup table data for better cache utilization
     const half2 relativeCoordinatesArray[] = { { -1, -1 }, { -1, 1 }, { 1, -1 }, { 1, 1 } };
     half2 relativeCoordinates = relativeCoordinatesArray[relativeVertexIndex];

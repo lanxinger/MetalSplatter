@@ -377,6 +377,33 @@ public class SplatRenderer: @unchecked Sendable {
     public var postInteractionSortDelay: TimeInterval = 0.1
     private var interactionEndTime: CFAbsoluteTime?
 
+    // MARK: - Adaptive Sort Frequency
+
+    /// When true, sort interval adapts based on frame time to maintain target FPS
+    public var adaptiveSortFrequencyEnabled: Bool = false
+
+    /// Target frame rate for adaptive sort interval calculation
+    public var targetFrameRate: Double = 60.0
+
+    /// Computed adaptive sort interval based on recent frame performance.
+    /// Respects interaction mode (minimumSortInterval is already adjusted there).
+    private var effectiveMinimumSortInterval: TimeInterval {
+        var interval = minimumSortInterval
+
+        guard adaptiveSortFrequencyEnabled else { return interval }
+
+        let targetFrameTime = 1.0 / targetFrameRate
+
+        if averageFrameTime > targetFrameTime * 1.2 {
+            // Over budget by 20%+ - sort less often to recover
+            interval = max(interval, targetFrameTime * 2.0)
+        } else if averageFrameTime < targetFrameTime * 0.8 {
+            // Under budget by 20%+ - can sort more often
+            interval = interval * 0.5
+        }
+        return interval
+    }
+
     // Performance tracking
     private var frameStartTime: CFAbsoluteTime = 0
     private var lastFrameTime: TimeInterval = 0
@@ -1507,10 +1534,19 @@ public class SplatRenderer: @unchecked Sendable {
 
         guard !updates.isEmpty else { return }
 
+        // Optimization: Find last .full update and skip all updates before it
+        // This preserves "last write wins" semantics while avoiding redundant work
+        let startIndex: Int
+        if let lastFullIndex = updates.lastIndex(where: { if case .full = $0 { return true } else { return false } }) {
+            startIndex = lastFullIndex
+        } else {
+            startIndex = 0
+        }
+
         // Apply updates in order to preserve "last write wins" semantics
         // Use withLockedValues to safely access buffer during potential resize operations
         splatBuffer.withLockedValues { values, bufferCount in
-            for update in updates {
+            for update in updates[startIndex...] {
                 switch update {
                 case .full(let colors):
                     for i in 0..<min(colors.count, bufferCount) {
@@ -2111,7 +2147,8 @@ public class SplatRenderer: @unchecked Sendable {
             return true
         }
         let now = CFAbsoluteTimeGetCurrent()
-        if minimumSortInterval > 0 && (now - lastSortTime) < minimumSortInterval {
+        let effectiveInterval = effectiveMinimumSortInterval
+        if effectiveInterval > 0 && (now - lastSortTime) < effectiveInterval {
             return false
         }
         guard let lastPos = lastSortedCameraPosition,

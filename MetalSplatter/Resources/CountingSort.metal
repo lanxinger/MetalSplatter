@@ -232,6 +232,103 @@ void countingSortPrefixSumParallel(
     }
 }
 
+// MARK: - Blocked Parallel Prefix Sum (for large bin counts)
+// When binCount exceeds threadgroup memory limits, we use a 3-phase blocked approach:
+// Phase 1: Local prefix sum within each block, output block totals
+// Phase 2: Prefix sum of block totals (small array, single-thread OK)
+// Phase 3: Add block prefix to each element
+
+// Phase 1: Compute local prefix sum per block and output block totals
+[[kernel]]
+void countingSortBlockPrefixSum(
+    device const uint* histogram [[buffer(0)]],
+    device uint* prefixSum [[buffer(1)]],
+    device uint* blockSums [[buffer(2)]],
+    constant uint& binCount [[buffer(3)]],
+    constant uint& blockSize [[buffer(4)]],
+    threadgroup uint* temp [[threadgroup(0)]],
+    uint blockId [[threadgroup_position_in_grid]],
+    uint tid [[thread_position_in_threadgroup]],
+    uint tgSize [[threads_per_threadgroup]]
+) {
+    uint blockStart = blockId * blockSize;
+    uint blockEnd = min(blockStart + blockSize, binCount);
+    uint localCount = blockEnd - blockStart;
+
+    // Load this block's data into threadgroup memory
+    for (uint i = tid; i < localCount; i += tgSize) {
+        temp[i] = histogram[blockStart + i];
+    }
+    // Zero out any remaining threadgroup memory for power-of-2 alignment
+    for (uint i = localCount + tid; i < blockSize; i += tgSize) {
+        temp[i] = 0;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    // Up-sweep (reduce) phase
+    for (uint stride = 1; stride < blockSize; stride *= 2) {
+        uint strideDouble = stride * 2;
+        for (uint index = tid * strideDouble + strideDouble - 1; index < blockSize; index += tgSize * strideDouble) {
+            temp[index] += temp[index - stride];
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+
+    // Save block total before zeroing for exclusive scan
+    if (tid == 0) {
+        blockSums[blockId] = temp[blockSize - 1];
+        temp[blockSize - 1] = 0;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    // Down-sweep phase
+    for (uint stride = blockSize / 2; stride >= 1; stride /= 2) {
+        uint strideDouble = stride * 2;
+        for (uint index = tid * strideDouble + strideDouble - 1; index < blockSize; index += tgSize * strideDouble) {
+            uint t = temp[index - stride];
+            temp[index - stride] = temp[index];
+            temp[index] += t;
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+
+    // Write local prefix sums back to global memory
+    for (uint i = tid; i < localCount; i += tgSize) {
+        prefixSum[blockStart + i] = temp[i];
+    }
+}
+
+// Phase 2: Prefix sum of block totals (small array, single-thread is fine)
+[[kernel]]
+void countingSortBlockSumsPrefixSum(
+    device uint* blockSums [[buffer(0)]],
+    constant uint& blockCount [[buffer(1)]],
+    uint tid [[thread_position_in_grid]]
+) {
+    if (tid != 0) return;
+
+    uint sum = 0;
+    for (uint i = 0; i < blockCount; i++) {
+        uint val = blockSums[i];
+        blockSums[i] = sum;
+        sum += val;
+    }
+}
+
+// Phase 3: Add block prefix to each element
+[[kernel]]
+void countingSortAddBlockPrefix(
+    device uint* prefixSum [[buffer(0)]],
+    device const uint* blockSums [[buffer(1)]],
+    constant uint& binCount [[buffer(2)]],
+    constant uint& blockSize [[buffer(3)]],
+    uint gid [[thread_position_in_grid]]
+) {
+    if (gid >= binCount) return;
+    uint blockId = gid / blockSize;
+    prefixSum[gid] += blockSums[blockId];
+}
+
 // Pass 3: Scatter splat indices to sorted positions (optimized with cached bins)
 // Uses cached bin indices from histogram pass - no depth recomputation needed
 [[kernel]]

@@ -98,11 +98,20 @@ internal class CountingSorter {
     private let resetHistogramPipeline: MTLComputePipelineState
     private let initBinOffsetsPipeline: MTLComputePipelineState
 
+    // Blocked prefix sum pipelines (for large bin counts exceeding threadgroup memory)
+    private let blockPrefixSumPipeline: MTLComputePipelineState
+    private let blockSumsPrefixSumPipeline: MTLComputePipelineState
+    private let addBlockPrefixPipeline: MTLComputePipelineState
+
+    // Maximum block size based on device threadgroup memory
+    private let maxPrefixSumBlockSize: Int
+
     // Reusable buffers (allocated once, reused across frames)
     private var histogramBuffer: MTLBuffer?
     private var prefixSumBuffer: MTLBuffer?
     private var binOffsetsBuffer: MTLBuffer?
     private var cachedBinsBuffer: MTLBuffer?  // Caches bin indices between histogram and scatter passes
+    private var blockSumsBuffer: MTLBuffer?   // Block totals for blocked prefix sum
     private var currentBinCount: Int = 0
     private var currentSplatCapacity: Int = 0
 
@@ -133,6 +142,17 @@ internal class CountingSorter {
             throw SplatRendererError.failedToLoadShaderFunction(name: "countingSortInitBinOffsets")
         }
 
+        // Blocked prefix sum functions
+        guard let blockPrefixSumFunction = library.makeFunction(name: "countingSortBlockPrefixSum") else {
+            throw SplatRendererError.failedToLoadShaderFunction(name: "countingSortBlockPrefixSum")
+        }
+        guard let blockSumsPrefixSumFunction = library.makeFunction(name: "countingSortBlockSumsPrefixSum") else {
+            throw SplatRendererError.failedToLoadShaderFunction(name: "countingSortBlockSumsPrefixSum")
+        }
+        guard let addBlockPrefixFunction = library.makeFunction(name: "countingSortAddBlockPrefix") else {
+            throw SplatRendererError.failedToLoadShaderFunction(name: "countingSortAddBlockPrefix")
+        }
+
         // Create pipeline states
         histogramPipeline = try device.makeComputePipelineState(function: histogramFunction)
         histogramWeightedPipeline = try device.makeComputePipelineState(function: histogramWeightedFunction)
@@ -140,6 +160,23 @@ internal class CountingSorter {
         scatterPipeline = try device.makeComputePipelineState(function: scatterFunction)
         resetHistogramPipeline = try device.makeComputePipelineState(function: resetFunction)
         initBinOffsetsPipeline = try device.makeComputePipelineState(function: initOffsetsFunction)
+
+        // Blocked prefix sum pipelines
+        blockPrefixSumPipeline = try device.makeComputePipelineState(function: blockPrefixSumFunction)
+        blockSumsPrefixSumPipeline = try device.makeComputePipelineState(function: blockSumsPrefixSumFunction)
+        addBlockPrefixPipeline = try device.makeComputePipelineState(function: addBlockPrefixFunction)
+
+        // Calculate max block size based on device threadgroup memory
+        // Block size must be power of 2 for Blelloch algorithm
+        // Each element is UInt32 (4 bytes)
+        let maxThreadgroupMemory = device.maxThreadgroupMemoryLength
+        let maxElements = maxThreadgroupMemory / MemoryLayout<UInt32>.stride
+        // Find largest power of 2 that fits
+        var blockSize = 1
+        while blockSize * 2 <= maxElements {
+            blockSize *= 2
+        }
+        maxPrefixSumBlockSize = blockSize
     }
 
     /// Computes camera-relative bin parameters for weighted sorting
@@ -235,6 +272,20 @@ internal class CountingSorter {
             histogramBuffer = histogram
             prefixSumBuffer = prefixSum
             binOffsetsBuffer = binOffsets
+
+            // Allocate block sums buffer for blocked prefix sum (when binCount > maxPrefixSumBlockSize)
+            let blockCount = (binCount + maxPrefixSumBlockSize - 1) / maxPrefixSumBlockSize
+            if blockCount > 1 {
+                let blockSumsSize = blockCount * MemoryLayout<UInt32>.stride
+                guard let blockSums = device.makeBuffer(length: blockSumsSize, options: .storageModePrivate) else {
+                    throw SplatRendererError.failedToCreateBuffer(length: blockSumsSize)
+                }
+                blockSums.label = "CountingSort BlockSums"
+                blockSumsBuffer = blockSums
+            } else {
+                blockSumsBuffer = nil
+            }
+
             currentBinCount = binCount
         }
 
@@ -424,19 +475,73 @@ internal class CountingSorter {
         }
 
         // Pass 3: Prefix sum (converts histogram to starting indices)
-        if let encoder = commandBuffer.makeComputeCommandEncoder() {
-            encoder.label = "CountingSort PrefixSum"
-            encoder.setComputePipelineState(prefixSumPipeline)
-            encoder.setBuffer(histogram, offset: 0, index: 0)
-            encoder.setBuffer(prefixSum, offset: 0, index: 1)
-            encoder.setBytes(&binCountVar, length: MemoryLayout<UInt32>.size, index: 2)
+        // Use blocked approach for large bin counts that exceed threadgroup memory
+        let blockCount = (binCount + maxPrefixSumBlockSize - 1) / maxPrefixSumBlockSize
 
-            // Single thread for simple prefix sum (sufficient for 64K bins)
-            encoder.dispatchThreadgroups(
-                MTLSize(width: 1, height: 1, depth: 1),
-                threadsPerThreadgroup: MTLSize(width: 1, height: 1, depth: 1)
-            )
-            encoder.endEncoding()
+        if blockCount > 1, let blockSums = blockSumsBuffer {
+            // Blocked 3-phase prefix sum for large bin counts
+            var blockSizeVar = UInt32(maxPrefixSumBlockSize)
+
+            // Phase 1: Local prefix sum per block, output block totals
+            if let encoder = commandBuffer.makeComputeCommandEncoder() {
+                encoder.label = "CountingSort BlockPrefixSum"
+                encoder.setComputePipelineState(blockPrefixSumPipeline)
+                encoder.setBuffer(histogram, offset: 0, index: 0)
+                encoder.setBuffer(prefixSum, offset: 0, index: 1)
+                encoder.setBuffer(blockSums, offset: 0, index: 2)
+                encoder.setBytes(&binCountVar, length: MemoryLayout<UInt32>.size, index: 3)
+                encoder.setBytes(&blockSizeVar, length: MemoryLayout<UInt32>.size, index: 4)
+                encoder.setThreadgroupMemoryLength(maxPrefixSumBlockSize * MemoryLayout<UInt32>.stride, index: 0)
+                encoder.dispatchThreadgroups(
+                    MTLSize(width: blockCount, height: 1, depth: 1),
+                    threadsPerThreadgroup: MTLSize(width: min(256, maxPrefixSumBlockSize), height: 1, depth: 1)
+                )
+                encoder.endEncoding()
+            }
+
+            // Phase 2: Prefix sum of block totals (small array, single-thread is fine)
+            if let encoder = commandBuffer.makeComputeCommandEncoder() {
+                encoder.label = "CountingSort BlockSumsPrefixSum"
+                encoder.setComputePipelineState(blockSumsPrefixSumPipeline)
+                encoder.setBuffer(blockSums, offset: 0, index: 0)
+                var blockCountVar = UInt32(blockCount)
+                encoder.setBytes(&blockCountVar, length: MemoryLayout<UInt32>.size, index: 1)
+                encoder.dispatchThreadgroups(
+                    MTLSize(width: 1, height: 1, depth: 1),
+                    threadsPerThreadgroup: MTLSize(width: 1, height: 1, depth: 1)
+                )
+                encoder.endEncoding()
+            }
+
+            // Phase 3: Add block prefix to each element
+            if let encoder = commandBuffer.makeComputeCommandEncoder() {
+                encoder.label = "CountingSort AddBlockPrefix"
+                encoder.setComputePipelineState(addBlockPrefixPipeline)
+                encoder.setBuffer(prefixSum, offset: 0, index: 0)
+                encoder.setBuffer(blockSums, offset: 0, index: 1)
+                encoder.setBytes(&binCountVar, length: MemoryLayout<UInt32>.size, index: 2)
+                encoder.setBytes(&blockSizeVar, length: MemoryLayout<UInt32>.size, index: 3)
+                let addThreadgroups = (binCount + 255) / 256
+                encoder.dispatchThreadgroups(
+                    MTLSize(width: addThreadgroups, height: 1, depth: 1),
+                    threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1)
+                )
+                encoder.endEncoding()
+            }
+        } else {
+            // Single-thread prefix sum for small bin counts (fits in one block)
+            if let encoder = commandBuffer.makeComputeCommandEncoder() {
+                encoder.label = "CountingSort PrefixSum"
+                encoder.setComputePipelineState(prefixSumPipeline)
+                encoder.setBuffer(histogram, offset: 0, index: 0)
+                encoder.setBuffer(prefixSum, offset: 0, index: 1)
+                encoder.setBytes(&binCountVar, length: MemoryLayout<UInt32>.size, index: 2)
+                encoder.dispatchThreadgroups(
+                    MTLSize(width: 1, height: 1, depth: 1),
+                    threadsPerThreadgroup: MTLSize(width: 1, height: 1, depth: 1)
+                )
+                encoder.endEncoding()
+            }
         }
 
         // Pass 4: Copy prefix sum to bin offsets
