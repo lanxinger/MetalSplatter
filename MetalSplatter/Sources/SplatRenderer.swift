@@ -185,6 +185,12 @@ public class SplatRenderer: @unchecked Sendable {
         var viewMatrix: matrix_float4x4
         var screenSize: SIMD2<UInt32> // Size of screen in pixels
 
+        // Precomputed values for covariance projection (derived from projectionMatrix and screenSize)
+        var focalX: Float             // screenSize.x * projectionMatrix[0][0] / 2
+        var focalY: Float             // screenSize.y * projectionMatrix[1][1] / 2
+        var tanHalfFovX: Float        // 1 / projectionMatrix[0][0]
+        var tanHalfFovY: Float        // 1 / projectionMatrix[1][1]
+
         var splatCount: UInt32
         var indexedSplatCount: UInt32
         var debugFlags: UInt32
@@ -1930,10 +1936,22 @@ public class SplatRenderer: @unchecked Sendable {
         guard let precomputedBuffer = currentBuffer else { return }
         
         // Create uniform buffer for this computation
+        // Precompute values for covariance projection (avoids per-splat division in shader)
+        let proj00 = viewport.projectionMatrix[0][0]
+        let proj11 = viewport.projectionMatrix[1][1]
+        let focalX = Float(viewport.screenSize.x) * proj00 / 2
+        let focalY = Float(viewport.screenSize.y) * proj11 / 2
+        let tanHalfFovX = 1 / proj00
+        let tanHalfFovY = 1 / proj11
+
         var uniforms = Uniforms(
             projectionMatrix: viewport.projectionMatrix,
             viewMatrix: viewport.viewMatrix,
             screenSize: SIMD2<UInt32>(UInt32(viewport.screenSize.x), UInt32(viewport.screenSize.y)),
+            focalX: focalX,
+            focalY: focalY,
+            tanHalfFovX: tanHalfFovX,
+            tanHalfFovY: tanHalfFovY,
             splatCount: UInt32(splatCount),
             indexedSplatCount: UInt32(min(splatCount, Constants.maxIndexedSplatCount)),
             debugFlags: 0,
@@ -2310,9 +2328,22 @@ public class SplatRenderer: @unchecked Sendable {
         // Clamp to maxViewCount to avoid buffer overrun (off-by-one fix: use < not <=)
         for (i, viewport) in viewports.prefix(maxViewCount).enumerated() {
             let debugFlags = debugOptions.rawValue
+
+            // Precompute values for covariance projection (avoids per-splat division in shader)
+            let proj00 = viewport.projectionMatrix[0][0]
+            let proj11 = viewport.projectionMatrix[1][1]
+            let focalX = Float(viewport.screenSize.x) * proj00 / 2
+            let focalY = Float(viewport.screenSize.y) * proj11 / 2
+            let tanHalfFovX = 1 / proj00
+            let tanHalfFovY = 1 / proj11
+
             let uniforms = Uniforms(projectionMatrix: viewport.projectionMatrix,
                                     viewMatrix: viewport.viewMatrix,
                                     screenSize: SIMD2(x: UInt32(viewport.screenSize.x), y: UInt32(viewport.screenSize.y)),
+                                    focalX: focalX,
+                                    focalY: focalY,
+                                    tanHalfFovX: tanHalfFovX,
+                                    tanHalfFovY: tanHalfFovY,
                                     splatCount: splatCount,
                                     indexedSplatCount: indexedSplatCount,
                                     debugFlags: debugFlags,

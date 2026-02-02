@@ -7,26 +7,19 @@ float3 calcCovariance2D(float3 viewPos,
                         packed_half3 cov3Da,
                         packed_half3 cov3Db,
                         float4x4 viewMatrix,
-                        float4x4 projectionMatrix,
-                        uint2 screenSize) {
+                        float focalX,
+                        float focalY,
+                        float tanHalfFovX,
+                        float tanHalfFovY) {
     // Guard against division by zero with epsilon
     float safeViewPosZ = (abs(viewPos.z) < kDivisionEpsilon) ? copysign(kDivisionEpsilon, viewPos.z) : viewPos.z;
     float invViewPosZ = fast::divide(1.0f, safeViewPosZ);
     float invViewPosZSquared = invViewPosZ * invViewPosZ;
 
-    // Guard projection matrix diagonal elements
-    float proj00 = (abs(projectionMatrix[0][0]) < kDivisionEpsilon) ? kDivisionEpsilon : projectionMatrix[0][0];
-    float proj11 = (abs(projectionMatrix[1][1]) < kDivisionEpsilon) ? kDivisionEpsilon : projectionMatrix[1][1];
-    float tanHalfFovX = fast::divide(1.0f, proj00);
-    float tanHalfFovY = fast::divide(1.0f, proj11);
-    float limX = 1.3 * tanHalfFovX;
-    float limY = 1.3 * tanHalfFovY;
+    float limX = 1.3f * tanHalfFovX;
+    float limY = 1.3f * tanHalfFovY;
     viewPos.x = clamp(viewPos.x * invViewPosZ, -limX, limX) * viewPos.z;
     viewPos.y = clamp(viewPos.y * invViewPosZ, -limY, limY) * viewPos.z;
-
-    // Pre-compute focal lengths to avoid division in render loop
-    float focalX = float(screenSize.x) * projectionMatrix[0][0] * 0.5f;
-    float focalY = float(screenSize.y) * projectionMatrix[1][1] * 0.5f;
 
     float3x3 J = float3x3(
         focalX * invViewPosZ, 0, 0,
@@ -177,7 +170,9 @@ FragmentIn splatVertex(Splat splat,
         packed_half3 covB = splat.covB;
 
         float3 cov2D = calcCovariance2D(viewPosition3, covA, covB,
-                                        uniforms.viewMatrix, uniforms.projectionMatrix, uniforms.screenSize);
+                                        uniforms.viewMatrix,
+                                        uniforms.focalX, uniforms.focalY,
+                                        uniforms.tanHalfFovX, uniforms.tanHalfFovY);
 
         decomposeCovariance(cov2D, axis1, axis2);
 
