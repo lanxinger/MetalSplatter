@@ -70,6 +70,15 @@ public class AutodetectSceneReader: SplatSceneReader {
                 print("AutodetectSceneReader: Failed to create SPXSceneReader: \(error)")
                 throw Error.cannotDetermineFormat
             }
+        case .gltf, .glb:
+            print("AutodetectSceneReader: Loading as glTF Gaussian splats")
+            do {
+                reader = try GltfGaussianSplatSceneReader(url)
+                print("AutodetectSceneReader: Successfully created GltfGaussianSplatSceneReader")
+            } catch {
+                print("AutodetectSceneReader: Failed to create GltfGaussianSplatSceneReader: \(error)")
+                throw Error.cannotDetermineFormat
+            }
         case .none:
             print("AutodetectSceneReader: Unknown format")
             throw Error.cannotDetermineFormat
