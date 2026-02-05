@@ -145,7 +145,7 @@ public class SampleBoxRenderer {
     }
 
     private func updateUniforms(forViewports viewports: [ViewportDescriptor]) {
-        for (i, viewport) in viewports.enumerated() where i <= maxViewCount {
+        for (i, viewport) in viewports.enumerated() where i < maxViewCount {
             uniforms.pointee.setUniforms(index: i, Uniforms(projectionMatrix: viewport.projectionMatrix,
                                                             viewMatrix: viewport.viewMatrix))
         }

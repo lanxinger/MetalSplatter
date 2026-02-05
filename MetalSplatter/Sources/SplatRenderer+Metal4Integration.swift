@@ -106,12 +106,31 @@ extension SplatRenderer {
             return
         }
 
-        // Allocate output buffers for transformed data
-        // Each thread processes 4 splats, so we need buffers for all splats
-        guard let viewPositionsBuffer = device.makeBuffer(length: splatCount * MemoryLayout<SIMD4<Float>>.stride, options: .storageModePrivate),
-              let clipPositionsBuffer = device.makeBuffer(length: splatCount * MemoryLayout<SIMD4<Float>>.stride, options: .storageModePrivate),
-              let depthsBuffer = device.makeBuffer(length: splatCount * MemoryLayout<Float>.stride, options: .storageModePrivate) else {
-            Self.log.error("Metal 4.0: Failed to create output buffers for SIMD transform")
+        let viewPositionsSize = splatCount * MemoryLayout<SIMD4<Float>>.stride
+        let clipPositionsSize = splatCount * MemoryLayout<SIMD4<Float>>.stride
+        let depthsSize = splatCount * MemoryLayout<Float>.stride
+
+        if var outputs = metal4SIMDOutputs,
+           outputs.viewPositions.length >= viewPositionsSize,
+           outputs.clipPositions.length >= clipPositionsSize,
+           outputs.depths.length >= depthsSize {
+            outputs.count = splatCount
+            metal4SIMDOutputs = outputs
+        } else {
+            guard let viewPositionsBuffer = device.makeBuffer(length: viewPositionsSize, options: .storageModePrivate),
+                  let clipPositionsBuffer = device.makeBuffer(length: clipPositionsSize, options: .storageModePrivate),
+                  let depthsBuffer = device.makeBuffer(length: depthsSize, options: .storageModePrivate) else {
+                Self.log.error("Metal 4.0: Failed to create output buffers for SIMD transform")
+                return
+            }
+            metal4SIMDOutputs = Metal4SIMDOutputs(viewPositions: viewPositionsBuffer,
+                                                  clipPositions: clipPositionsBuffer,
+                                                  depths: depthsBuffer,
+                                                  count: splatCount)
+        }
+
+        guard let outputs = metal4SIMDOutputs else {
+            Self.log.error("Metal 4.0: SIMD output buffers unavailable")
             return
         }
 
@@ -123,9 +142,9 @@ extension SplatRenderer {
 
         encoder.setComputePipelineState(pipelineState)
         encoder.setBuffer(splatBuffer, offset: 0, index: 0)
-        encoder.setBuffer(viewPositionsBuffer, offset: 0, index: 1)
-        encoder.setBuffer(clipPositionsBuffer, offset: 0, index: 2)
-        encoder.setBuffer(depthsBuffer, offset: 0, index: 3)
+        encoder.setBuffer(outputs.viewPositions, offset: 0, index: 1)
+        encoder.setBuffer(outputs.clipPositions, offset: 0, index: 2)
+        encoder.setBuffer(outputs.depths, offset: 0, index: 3)
         encoder.setBuffer(uniformsBuffer, offset: uniformBufferOffset, index: 4)
         encoder.setBuffer(countBuffer, offset: 0, index: 5)
 
@@ -167,10 +186,8 @@ extension SplatRenderer {
         //   float depth:         offset 48, size 4
         //   uint visible:        offset 52, size 4
         //   Total: 56 bytes, rounded to 64 due to struct's 16-byte alignment requirement
-        let precomputedSplatStride = 64
-        guard let precomputedBuffer = device.makeBuffer(
-            length: splatCount * precomputedSplatStride,
-            options: .storageModePrivate) else {
+        let requiredSize = splatCount * Self.precomputedSplatStride
+        guard let precomputedBuffer = ensurePrecomputedSplatBuffer(requiredSize: requiredSize) else {
             Self.log.error("Metal 4.0: Failed to create precomputed buffer")
             return
         }
@@ -197,6 +214,8 @@ extension SplatRenderer {
 
         encoder.dispatchThreadgroups(threadgroupsPerGrid, threadsPerThreadgroup: threadsPerThreadgroup)
         Self.log.debug("Metal 4.0: Batch precompute dispatched for \(splatCount) splats")
+
+        precomputedDataDirty = false
     }
     
     /// Use Metal 4.0 mesh shaders for rendering (placeholder - mesh shaders need render pass)

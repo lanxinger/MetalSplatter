@@ -269,6 +269,9 @@ public class SplatOctree {
 
     /// Marks a node as loaded with specific LOD
     public func markAsLoaded(nodeID: String, lodLevel: Int, memoryBytes: Int) {
+        if let state = nodeState[nodeID], state.isLoaded {
+            loadedMemoryBytes -= state.memoryUsage
+        }
         nodeState[nodeID]?.isLoaded = true
         nodeState[nodeID]?.loadedLOD = lodLevel
         nodeState[nodeID]?.memoryUsage = memoryBytes

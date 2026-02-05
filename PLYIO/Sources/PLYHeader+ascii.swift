@@ -70,8 +70,11 @@ extension PLYHeader {
                     guard let match = try regex.wholeMatch(in: headerLine) else {
                         throw ASCIIDecodeError.headerInvalidLine(headerLine)
                     }
+                    guard let countValue = UInt32(match.count) else {
+                        throw ASCIIDecodeError.headerInvalidLine(headerLine)
+                    }
                     header?.elements.append(PLYHeader.Element(name: String(match.name),
-                                                              count: UInt32(match.count)!,
+                                                              count: countValue,
                                                               properties: []))
                 case .property:
                     guard header != nil, header?.elements.isEmpty == false else {

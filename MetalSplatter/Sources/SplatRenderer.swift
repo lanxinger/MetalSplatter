@@ -147,14 +147,23 @@ public class SplatRenderer: @unchecked Sendable {
     // Metal 4 TensorOps batch precompute (pre-computes covariance/transforms)
     private var batchPrecomputePipelineState: MTLComputePipelineState?
     private var precomputedSplatBuffer: MTLBuffer?
-    private var precomputedDataDirty = true
+    internal var precomputedDataDirty = true
     private var lastPrecomputeViewMatrix: simd_float4x4?
     public var batchPrecomputeEnabled = false  // Enable for large scenes
     
     // PrecomputedSplat structure size (must match Metal shader with proper alignment)
     // Metal alignment: float4 (16) + float3 (12+4 padding) + float2 (8) + float2 (8) + float (4) + uint (4)
     // = 56 bytes, rounded to 64 due to struct's 16-byte alignment (from float4/float3)
-    private static let precomputedSplatStride = 64
+    internal static let precomputedSplatStride = 64
+
+    internal struct Metal4SIMDOutputs {
+        var viewPositions: MTLBuffer
+        var clipPositions: MTLBuffer
+        var depths: MTLBuffer
+        var count: Int
+    }
+
+    internal var metal4SIMDOutputs: Metal4SIMDOutputs?
     
     public struct ViewportDescriptor {
         public var viewport: MTLViewport
@@ -1900,6 +1909,17 @@ public class SplatRenderer: @unchecked Sendable {
     }
     
     // MARK: - Metal 4 TensorOps Batch Precompute
+
+    /// Ensure precomputed splat buffer is allocated and large enough.
+    internal func ensurePrecomputedSplatBuffer(requiredSize: Int) -> MTLBuffer? {
+        var currentBuffer = precomputedSplatBuffer
+        if currentBuffer == nil || currentBuffer!.length < requiredSize {
+            currentBuffer = device.makeBuffer(length: requiredSize, options: .storageModePrivate)
+            currentBuffer?.label = "Precomputed Splats"
+            precomputedSplatBuffer = currentBuffer
+        }
+        return currentBuffer
+    }
     
     /// Pre-compute covariance and transforms for all splats on GPU
     /// This moves expensive per-vertex math to a one-time batch operation
@@ -1925,15 +1945,8 @@ public class SplatRenderer: @unchecked Sendable {
         }
         
         // Ensure precomputed buffer has correct size
-        // Use local capture to avoid TOCTOU race (buffer could be nil'd between check and use)
         let requiredSize = splatCount * Self.precomputedSplatStride
-        var currentBuffer = precomputedSplatBuffer
-        if currentBuffer == nil || currentBuffer!.length < requiredSize {
-            currentBuffer = device.makeBuffer(length: requiredSize, options: .storageModePrivate)
-            currentBuffer?.label = "Precomputed Splats"
-            precomputedSplatBuffer = currentBuffer
-        }
-        guard let precomputedBuffer = currentBuffer else { return }
+        guard let precomputedBuffer = ensurePrecomputedSplatBuffer(requiredSize: requiredSize) else { return }
         
         // Create uniform buffer for this computation
         // Precompute values for covariance projection (avoids per-splat division in shader)
@@ -3162,17 +3175,19 @@ public class SplatRenderer: @unchecked Sendable {
             }
         } else {
             Task(priority: .high) {
-                if orderAndDepthTempSort.count != splatCount {
-                    orderAndDepthTempSort = Array(
-                        repeating: SplatIndexAndDepth(index: .max, depth: 0),
-                        count: splatCount
-                    )
-                }
+                var actualCount = 0
 
                 // Copy positions under lock to ensure pointer validity during sort
                 // This avoids holding the lock during the slow sort operation
                 splatBuffer.withLockedValues { values, count in
-                    let actualCount = min(count, splatCount)
+                    actualCount = count
+                    if orderAndDepthTempSort.count != actualCount {
+                        orderAndDepthTempSort = Array(
+                            repeating: SplatIndexAndDepth(index: .max, depth: 0),
+                            count: actualCount
+                        )
+                    }
+                    guard actualCount > 0 else { return }
                     if effectiveSortByDistance {
                         for i in 0..<actualCount {
                             orderAndDepthTempSort[i].index = UInt32(i)
@@ -3194,9 +3209,9 @@ public class SplatRenderer: @unchecked Sendable {
                 // This maintains consistency with GPU path - splat data stays static
                 do {
                     // Acquire new buffer and fill with sorted indices
-                    let cpuSortedIndices = try sortIndexBufferPool.acquire(minimumCapacity: splatCount)
-                    cpuSortedIndices.count = splatCount
-                    for newIndex in 0..<orderAndDepthTempSort.count {
+                    let cpuSortedIndices = try sortIndexBufferPool.acquire(minimumCapacity: max(actualCount, 1))
+                    cpuSortedIndices.count = actualCount
+                    for newIndex in 0..<actualCount {
                         cpuSortedIndices.values[newIndex] = Int32(orderAndDepthTempSort[newIndex].index)
                     }
 

@@ -14,6 +14,7 @@ public class PLYWriter {
         case invalidElementCount(requested: Int, available: Int)
         case unknownOutputStreamError
         case outputStreamFull
+        case outputStreamPartialWrite(expected: Int, actual: Int)
     }
 
     private static let log = Logger()
@@ -75,8 +76,8 @@ public class PLYWriter {
 
         self.header = header
 
-        outputStream.write("\(header.description)")
-        outputStream.write("\(PLYHeader.Keyword.endHeader.rawValue)\n")
+        try writeASCII("\(header.description)")
+        try writeASCII("\(PLYHeader.Keyword.endHeader.rawValue)\n")
 
         switch header.format {
         case .ascii:
@@ -119,8 +120,8 @@ public class PLYWriter {
 
             if ascii {
                 for i in 0..<countInGroup {
-                    outputStream.write(remainingElements[i].description)
-                    outputStream.write("\n")
+                    try writeASCII(remainingElements[i].description)
+                    try writeASCII("\n")
                 }
             } else {
                 var bufferOffset = 0
@@ -186,6 +187,30 @@ public class PLYWriter {
 
     public func write(_ element: PLYElement) throws {
         try write([ element ])
+    }
+
+    private func writeASCII(_ string: String) throws {
+        guard let data = string.data(using: .utf8) else {
+            throw Error.unknownOutputStreamError
+        }
+        try writeData(data)
+    }
+
+    private func writeData(_ data: Data) throws {
+        let written = outputStream.write(data)
+        if written == data.count {
+            return
+        }
+        if written == 0 {
+            throw Error.outputStreamFull
+        }
+        if written < 0 {
+            if let error = outputStream.streamError {
+                throw error
+            }
+            throw Error.unknownOutputStreamError
+        }
+        throw Error.outputStreamPartialWrite(expected: data.count, actual: written)
     }
 }
 

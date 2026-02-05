@@ -7,6 +7,13 @@ struct ContentView: View {
     @State private var isPickingSOGSFolder = false
     @State private var lastLoadedModel: ModelIdentifier?
 
+    private static let allowedFileTypes: [UTType] = {
+        let extensions = ["ply", "splat", "spz", "spx", "gltf", "glb", "json", "sog"]
+        var types = extensions.compactMap { UTType(filenameExtension: $0) }
+        types.append(.zip)
+        return types
+    }()
+
 #if os(macOS)
     @Environment(\.openWindow) private var openWindow
 #elseif os(iOS)
@@ -80,17 +87,7 @@ struct ContentView: View {
             .disabled(immersiveSpaceIsShown)
 #endif
             .fileImporter(isPresented: $isPickingFile,
-                          allowedContentTypes: [
-                            UTType(filenameExtension: "ply")!,
-                            UTType(filenameExtension: "splat")!,
-                            UTType(filenameExtension: "spz")!,
-                            UTType(filenameExtension: "spx")!,
-                            UTType(filenameExtension: "gltf")!,
-                            UTType(filenameExtension: "glb")!,
-                            UTType(filenameExtension: "json")!,
-                            UTType(filenameExtension: "sog")!,
-                            UTType.zip
-                          ]) {
+                          allowedContentTypes: Self.allowedFileTypes) {
                 isPickingFile = false
                 switch $0 {
                 case .success(let url):
