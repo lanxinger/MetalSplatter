@@ -9,7 +9,7 @@ vertex FragmentIn singleStageSplatVertexShader(uint vertexID [[vertex_id]],
                                                constant UniformsArray & uniformsArray [[ buffer(BufferIndexUniforms) ]],
                                                constant int32_t* sortedIndices [[ buffer(BufferIndexSortedIndices) ]],
                                                constant PackedColor* packedColors [[ buffer(BufferIndexPackedColors) ]]) {
-    Uniforms uniforms = uniformsArray.uniforms[min(int(amplificationID), kMaxViewCount)];
+    Uniforms uniforms = uniformsArray.uniforms[min(int(amplificationID), kMaxViewCount - 1)];
 
     uint logicalSplatID = instanceID * uniforms.indexedSplatCount + (vertexID / 4);
     if (logicalSplatID >= uniforms.splatCount) {

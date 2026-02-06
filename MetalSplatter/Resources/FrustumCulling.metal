@@ -91,19 +91,23 @@ kernel void frustumCullSplats(uint index [[thread_position_in_grid]],
 
     threadgroup_barrier(mem_flags::mem_threadgroup);
 
-    // Flush visible indices to global memory with bounds checking
+    // Flush visible indices to global memory in parallel.
+    // Thread 0 reserves a contiguous block via a single atomic add,
+    // then all threads cooperatively write their portion.
+    threadgroup uint globalStartIdx;
     if (tid == 0) {
         uint localCount = min(atomic_load_explicit(&localVisibleCount, memory_order_relaxed), 256u);
-        if (localCount > 0) {
-            uint globalStartIdx = atomic_fetch_add_explicit(visibleCount, localCount, memory_order_relaxed);
+        globalStartIdx = (localCount > 0) ?
+            atomic_fetch_add_explicit(visibleCount, localCount, memory_order_relaxed) : 0;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
 
-            // Bounds check against splatCount (buffer must be at least this size)
-            for (uint i = 0; i < localCount; i++) {
-                uint globalIdx = globalStartIdx + i;
-                if (globalIdx < splatCount) {
-                    visibleIndices[globalIdx] = localVisibleIndices[i];
-                }
-            }
+    uint localCount = min(atomic_load_explicit(&localVisibleCount, memory_order_relaxed), 256u);
+    // Each thread writes a subset of the local visible indices in parallel
+    for (uint i = tid; i < localCount; i += 256) {
+        uint globalIdx = globalStartIdx + i;
+        if (globalIdx < splatCount) {
+            visibleIndices[globalIdx] = localVisibleIndices[i];
         }
     }
 }

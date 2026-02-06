@@ -2276,8 +2276,9 @@ public class SplatRenderer: @unchecked Sendable {
 
     private func updateSortReferenceCamera(from viewports: [ViewportDescriptor]) {
         if let reference = viewports.first {
-            sortCameraPosition = Self.cameraWorldPosition(forViewMatrix: reference.viewMatrix)
-            sortCameraForward = Self.cameraWorldForward(forViewMatrix: reference.viewMatrix).normalized
+            let invView = reference.viewMatrix.inverse
+            sortCameraPosition = (invView * SIMD4<Float>(x: 0, y: 0, z: 0, w: 1)).xyz
+            sortCameraForward = (invView * SIMD4<Float>(x: 0, y: 0, z: -1, w: 0)).xyz.normalized
         } else {
             sortCameraPosition = .zero
             sortCameraForward = .init(x: 0, y: 0, z: -1)
@@ -2370,8 +2371,11 @@ public class SplatRenderer: @unchecked Sendable {
             cameraForwardsTemp = Array(repeating: .zero, count: viewports.count)
         }
         for (i, viewport) in viewports.enumerated() {
-            cameraPositionsTemp[i] = Self.cameraWorldPosition(forViewMatrix: viewport.viewMatrix)
-            cameraForwardsTemp[i] = Self.cameraWorldForward(forViewMatrix: viewport.viewMatrix)
+            // Extract both position and forward from a single matrix inverse
+            // (avoids computing the expensive 4x4 inverse twice per viewport)
+            let invView = viewport.viewMatrix.inverse
+            cameraPositionsTemp[i] = (invView * SIMD4<Float>(x: 0, y: 0, z: 0, w: 1)).xyz
+            cameraForwardsTemp[i] = (invView * SIMD4<Float>(x: 0, y: 0, z: -1, w: 0)).xyz
         }
         cameraWorldPosition = cameraPositionsTemp.mean ?? .zero
         cameraWorldForward = cameraForwardsTemp.mean?.normalized ?? .init(x: 0, y: 0, z: -1)
@@ -2787,7 +2791,11 @@ public class SplatRenderer: @unchecked Sendable {
 
         lastFrameTime = CFAbsoluteTimeGetCurrent() - frameStartTime
         frameCount += 1
-        averageFrameTime += (lastFrameTime - averageFrameTime) / Double(frameCount)
+        // Use exponential moving average so recent frames have meaningful weight.
+        // A cumulative average (dividing by frameCount) becomes unresponsive after
+        // thousands of frames, making adaptive sort frequency ineffective.
+        let emaAlpha = 0.05  // ~20-frame smoothing window
+        averageFrameTime += (lastFrameTime - averageFrameTime) * emaAlpha
         
         onRenderComplete?(lastFrameTime)
 
@@ -3215,26 +3223,21 @@ public class SplatRenderer: @unchecked Sendable {
                         cpuSortedIndices.values[newIndex] = Int32(orderAndDepthTempSort[newIndex].index)
                     }
 
-                    // Use thread-safe swap (deferred release handles old buffer)
-                    if let oldBuffer = self.swapSortedIndicesBuffer(newBuffer: cpuSortedIndices) {
-                        self.deferredBufferRelease(oldBuffer)
-                    }
+                    // Dispatch state updates to main thread, consistent with GPU sort path.
+                    // Without this, properties like lastSortDuration, lastSortedCameraPosition,
+                    // etc. would be written from the cooperative thread pool while render()
+                    // reads them from the main thread - a data race.
+                    self.finishSort(
+                        indexOutputBuffer: cpuSortedIndices,
+                        sortStartTime: sortStartTime,
+                        cameraWorldPosition: cameraWorldPosition,
+                        cameraWorldForward: cameraWorldForward,
+                        dataDirtySnapshot: dataDirtySnapshot,
+                        useGPU: useGPU
+                    )
                 } catch {
                     Self.log.error("Failed to create sorted indices buffer: \(error)")
-                }
-
-                let elapsedCPU = CFAbsoluteTimeGetCurrent() - sortStartTime
-                self.lastSortDuration = elapsedCPU
-                self.onSortComplete?(elapsedCPU)
-                self.lastSortedCameraPosition = cameraWorldPosition
-                self.lastSortedCameraForward = cameraWorldForward
-                self.lastSortTime = CFAbsoluteTimeGetCurrent()
-                if self.sortDataRevision == dataDirtySnapshot {
-                    self.sortDirtyDueToData = false
-                }
-                self.finishSort()
-                if self.shouldResortForCurrentCamera() {
-                    self.resort(useGPU: useGPU)
+                    self.finishSort()
                 }
             }
         }

@@ -105,7 +105,7 @@ vertex FragmentIn fastSHSplatVertexShader(uint vertexID [[vertex_id]],
                                          constant int32_t* sortedIndices [[ buffer(BufferIndexSortedIndices) ]],
                                          device const float3* shPalette [[ buffer(3) ]],
                                          constant FastSHParams& params [[ buffer(4) ]]) {
-    Uniforms uniforms = uniformsArray.uniforms[min(int(amplificationID), kMaxViewCount)];
+    Uniforms uniforms = uniformsArray.uniforms[min(int(amplificationID), kMaxViewCount - 1)];
     
     uint logicalSplatID = instanceID * uniforms.indexedSplatCount + (vertexID / 4);
     if (logicalSplatID >= uniforms.splatCount) {
@@ -143,7 +143,7 @@ vertex FragmentIn textureSHSplatVertexShader(uint vertexID [[vertex_id]],
                                             constant int32_t* sortedIndices [[ buffer(BufferIndexSortedIndices) ]],
                                             device const float3* shPalette [[ buffer(3) ]],
                                             constant FastSHParams& params [[ buffer(4) ]]) {
-    Uniforms uniforms = uniformsArray.uniforms[min(int(amplificationID), kMaxViewCount)];
+    Uniforms uniforms = uniformsArray.uniforms[min(int(amplificationID), kMaxViewCount - 1)];
     
     uint logicalSplatID = instanceID * uniforms.indexedSplatCount + (vertexID / 4);
     if (logicalSplatID >= uniforms.splatCount) {

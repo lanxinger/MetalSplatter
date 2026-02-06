@@ -24,7 +24,7 @@ vertex FragmentIn metal4_splatVertex(uint vertexID [[vertex_id]],
     device Splat *splatArray = argumentBuffer.splatBuffer;
     constant UniformsArray &uniformsArray = argumentBuffer.uniformsArray;
     
-    Uniforms uniforms = uniformsArray.uniforms[min(int(amplificationID), kMaxViewCount)];
+    Uniforms uniforms = uniformsArray.uniforms[min(int(amplificationID), kMaxViewCount - 1)];
     
     uint logicalSplatID = instanceID * uniforms.indexedSplatCount + (vertexID / 4);
     if (logicalSplatID >= uniforms.splatCount) {
