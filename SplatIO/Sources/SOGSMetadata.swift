@@ -3,7 +3,7 @@ import simd
 
 // MARK: - SOGS Metadata Structures
 
-public struct SOGSMetadata: Codable {
+public struct SOGSMetadata: Codable, Sendable {
     let means: SOGSAttributeInfo
     let scales: SOGSAttributeInfo
     let quats: SOGSAttributeInfo
@@ -20,7 +20,7 @@ public struct SOGSMetadata: Codable {
     }
 }
 
-public struct SOGSAttributeInfo: Codable {
+public struct SOGSAttributeInfo: Codable, Sendable {
     let shape: [Int]
     let dtype: String
     let files: [String]
@@ -60,7 +60,7 @@ public struct SOGSAttributeInfo: Codable {
 
 // MARK: - SOGS Data Structures
 
-public struct SOGSCompressedData {
+public struct SOGSCompressedData: Sendable {
     let metadata: SOGSMetadata
     let means_l: WebPDecoder.DecodedImage
     let means_u: WebPDecoder.DecodedImage

@@ -3,7 +3,7 @@ import simd
 
 // MARK: - SOGS v2 Metadata Structures
 
-public struct SOGSMetadataV2: Codable {
+public struct SOGSMetadataV2: Codable, Sendable {
     public let version: Int
     public let count: Int
     public let antialias: Bool?
@@ -39,7 +39,7 @@ public struct SOGSMetadataV2: Codable {
     }
 }
 
-public struct SOGSMeansInfoV2: Codable {
+public struct SOGSMeansInfoV2: Codable, Sendable {
     public let mins: [Float]  // [xmin', ymin', zmin'] after log transform
     public let maxs: [Float]  // [xmax', ymax', zmax'] after log transform
     public let files: [String] // ["means_l.webp", "means_u.webp"]
@@ -51,7 +51,7 @@ public struct SOGSMeansInfoV2: Codable {
     }
 }
 
-public struct SOGSScalesInfoV2: Codable {
+public struct SOGSScalesInfoV2: Codable, Sendable {
     public let codebook: [Float]
     public let mins: [Float]?
     public let maxs: [Float]?
@@ -80,7 +80,7 @@ public struct SOGSScalesInfoV2: Codable {
     }
 }
 
-public struct SOGSQuatsInfoV2: Codable {
+public struct SOGSQuatsInfoV2: Codable, Sendable {
     public let files: [String]   // ["quats.webp"] - orientation texture
     
     public init(files: [String]) {
@@ -88,7 +88,7 @@ public struct SOGSQuatsInfoV2: Codable {
     }
 }
 
-public struct SOGSH0InfoV2: Codable {
+public struct SOGSH0InfoV2: Codable, Sendable {
     public let codebook: [Float]
     public let mins: [Float]?
     public let maxs: [Float]?
@@ -117,7 +117,7 @@ public struct SOGSH0InfoV2: Codable {
     }
 }
 
-public struct SOGSSHNInfoV2: Codable {
+public struct SOGSSHNInfoV2: Codable, Sendable {
     public let count: Int?       // Palette size (entries)
     public let bands: Int?       // Number of SH bands (1...3)
     public let codebook: [Float]
@@ -167,7 +167,7 @@ public struct SOGSSHNInfoV2: Codable {
 
 // MARK: - SOGS v2 Compressed Data Structure
 
-public struct SOGSCompressedDataV2 {
+public struct SOGSCompressedDataV2: Sendable {
     public let metadata: SOGSMetadataV2
     public let means_l: WebPDecoder.DecodedImage
     public let means_u: WebPDecoder.DecodedImage

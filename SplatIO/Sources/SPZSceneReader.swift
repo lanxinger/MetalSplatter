@@ -238,39 +238,19 @@ public class SPZSceneReader: SplatSceneReader {
             return startIdx..<endIdx
         }
         
-        // Use concurrent processing for large datasets
-        let useParallelProcessing = safeNumPoints > 100000
-
-        // Create a container for results that will be populated concurrently
+        // Process chunks sequentially to satisfy strict-concurrency checks.
         var chunkResults = Array<[SplatScenePoint]?>(repeating: nil, count: chunks.count)
 
-        if useParallelProcessing {
-            // Use withUnsafeMutableBufferPointer + concurrentPerform for thread-safe parallel writes
-            chunkResults.withUnsafeMutableBufferPointer { buffer in
-                DispatchQueue.concurrentPerform(iterations: chunks.count) { chunkIndex in
-                    let chunkRange = chunks[chunkIndex]
-                    buffer[chunkIndex] = self.processPointChunk(packedGaussians: packedGaussians,
-                                                                range: chunkRange,
-                                                                positionStride: positionStride,
-                                                                rotationStride: rotationStride,
-                                                                shDim: shDim,
-                                                                shStride: shStride)
-                }
-            }
-        } else {
-            // Process sequentially for smaller datasets
-            for (chunkIndex, chunkRange) in chunks.enumerated() {
-                chunkResults[chunkIndex] = self.processPointChunk(packedGaussians: packedGaussians,
-                                                                  range: chunkRange,
-                                                                  positionStride: positionStride,
-                                                                  rotationStride: rotationStride,
-                                                                  shDim: shDim,
-                                                                  shStride: shStride)
+        for (chunkIndex, chunkRange) in chunks.enumerated() {
+            chunkResults[chunkIndex] = self.processPointChunk(packedGaussians: packedGaussians,
+                                                              range: chunkRange,
+                                                              positionStride: positionStride,
+                                                              rotationStride: rotationStride,
+                                                              shDim: shDim,
+                                                              shStride: shStride)
 
-                // Progress reporting for sequential processing
-                if chunkRange.lowerBound > 0 && chunkRange.lowerBound % 100000 == 0 {
-                    spzLog.debug(" Unpacked \(chunkRange.lowerBound) points...")
-                }
+            if chunkRange.lowerBound > 0 && chunkRange.lowerBound % 100000 == 0 {
+                spzLog.debug(" Unpacked \(chunkRange.lowerBound) points...")
             }
         }
         

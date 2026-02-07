@@ -600,51 +600,46 @@ struct PackedGaussians {
         spzTypesLog.debug("  SH: \(safeSHBytes)/\(shBytes) bytes")
         
         // Only read the data we actually have, with bounds checking
-        do {
-            if safePositionBytes > 0 && positionOffset + safePositionBytes <= data.count {
-                result.positions = Array(data[positionOffset..<(positionOffset + safePositionBytes)])
-            } else {
-                result.positions = []
-                spzTypesLog.debug("deserialize: Warning - Cannot read position data safely")
-            }
-            
-            if safeAlphaBytes > 0 && alphaOffset + safeAlphaBytes <= data.count {
-                result.alphas = Array(data[alphaOffset..<(alphaOffset + safeAlphaBytes)])
-            } else {
-                result.alphas = []
-                spzTypesLog.debug("deserialize: Warning - Cannot read alpha data safely")
-            }
-            
-            if safeColorBytes > 0 && colorOffset + safeColorBytes <= data.count {
-                result.colors = Array(data[colorOffset..<(colorOffset + safeColorBytes)])
-            } else {
-                result.colors = []
-                spzTypesLog.debug("deserialize: Warning - Cannot read color data safely")
-            }
-            
-            if safeScaleBytes > 0 && scaleOffset + safeScaleBytes <= data.count {
-                result.scales = Array(data[scaleOffset..<(scaleOffset + safeScaleBytes)])
-            } else {
-                result.scales = []
-                spzTypesLog.debug("deserialize: Warning - Cannot read scale data safely")
-            }
-            
-            if safeRotationBytes > 0 && rotationOffset + safeRotationBytes <= data.count {
-                result.rotations = Array(data[rotationOffset..<(rotationOffset + safeRotationBytes)])
-            } else {
-                result.rotations = []
-                spzTypesLog.debug("deserialize: Warning - Cannot read rotation data safely")
-            }
-            
-            if safeSHBytes > 0 && shOffset + safeSHBytes <= data.count {
-                result.sh = Array(data[shOffset..<(shOffset + safeSHBytes)])
-            } else {
-                result.sh = []
-                spzTypesLog.debug("deserialize: Warning - Cannot read SH data safely")
-            }
-        } catch {
-            spzTypesLog.debug("deserialize: Error extracting data: \(error)")
-            throw SplatFileFormatError.invalidData
+        if safePositionBytes > 0 && positionOffset + safePositionBytes <= data.count {
+            result.positions = Array(data[positionOffset..<(positionOffset + safePositionBytes)])
+        } else {
+            result.positions = []
+            spzTypesLog.debug("deserialize: Warning - Cannot read position data safely")
+        }
+        
+        if safeAlphaBytes > 0 && alphaOffset + safeAlphaBytes <= data.count {
+            result.alphas = Array(data[alphaOffset..<(alphaOffset + safeAlphaBytes)])
+        } else {
+            result.alphas = []
+            spzTypesLog.debug("deserialize: Warning - Cannot read alpha data safely")
+        }
+        
+        if safeColorBytes > 0 && colorOffset + safeColorBytes <= data.count {
+            result.colors = Array(data[colorOffset..<(colorOffset + safeColorBytes)])
+        } else {
+            result.colors = []
+            spzTypesLog.debug("deserialize: Warning - Cannot read color data safely")
+        }
+        
+        if safeScaleBytes > 0 && scaleOffset + safeScaleBytes <= data.count {
+            result.scales = Array(data[scaleOffset..<(scaleOffset + safeScaleBytes)])
+        } else {
+            result.scales = []
+            spzTypesLog.debug("deserialize: Warning - Cannot read scale data safely")
+        }
+        
+        if safeRotationBytes > 0 && rotationOffset + safeRotationBytes <= data.count {
+            result.rotations = Array(data[rotationOffset..<(rotationOffset + safeRotationBytes)])
+        } else {
+            result.rotations = []
+            spzTypesLog.debug("deserialize: Warning - Cannot read rotation data safely")
+        }
+        
+        if safeSHBytes > 0 && shOffset + safeSHBytes <= data.count {
+            result.sh = Array(data[shOffset..<(shOffset + safeSHBytes)])
+        } else {
+            result.sh = []
+            spzTypesLog.debug("deserialize: Warning - Cannot read SH data safely")
         }
         
         // Update point count based on what we actually read

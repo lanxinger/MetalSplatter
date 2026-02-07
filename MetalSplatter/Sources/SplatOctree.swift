@@ -223,7 +223,7 @@ public class SplatOctree {
 
         for nodeID in visibleNodes {
             guard let state = nodeState[nodeID],
-                  let node = scene.nodes[nodeID] else { continue }
+                  scene.nodes[nodeID] != nil else { continue }
 
             // Check if we need to load or upgrade this node's LOD
             if !state.isLoaded || state.loadedLOD > state.selectedLOD {

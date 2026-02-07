@@ -54,7 +54,12 @@ public enum SplatFileFormat {
     
     private static func isSOGSZipFile(url: URL) -> Bool {
         // Check if the ZIP file contains SOGS files
-        guard let archive = Archive(url: url, accessMode: .read) else { return false }
+        let archive: Archive
+        do {
+            archive = try Archive(url: url, accessMode: .read)
+        } catch {
+            return false
+        }
         
         var hasMetaJson = false
         var hasWebPFiles = false

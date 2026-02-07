@@ -62,7 +62,10 @@ public class SplatSOGSZipReader: SplatSceneReader {
         try FileManager.default.createDirectory(at: extractedURL, withIntermediateDirectories: true)
 
         // Use ZIPFoundation to extract the archive
-        guard let archive = Archive(url: zipURL, accessMode: .read) else {
+        let archive: Archive
+        do {
+            archive = try Archive(url: zipURL, accessMode: .read)
+        } catch {
             throw SOGSZipError.failedToExtract
         }
 
@@ -153,4 +156,3 @@ public class SplatSOGSZipReader: SplatSceneReader {
         reader.read(to: delegate)
     }
 }
-

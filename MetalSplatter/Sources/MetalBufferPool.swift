@@ -13,7 +13,7 @@ private let metalBufferPoolQueueKey = DispatchSpecificKey<Bool>()
  * A thread-safe pool of Metal buffers for efficient reuse and reduced allocation overhead.
  * Manages type-safe buffers with automatic memory pressure handling.
  */
-public class MetalBufferPool<T> {
+public class MetalBufferPool<T>: @unchecked Sendable {
     
     // MARK: - Error Types
     
@@ -303,7 +303,6 @@ public class MetalBufferPool<T> {
     }
     
     private func trimExpiredBuffers() {
-        let now = CFAbsoluteTimeGetCurrent()
         availableBuffers.removeAll { pooledBuffer in
             let expired = pooledBuffer.age > configuration.maxBufferAge
             if expired {
@@ -478,7 +477,7 @@ public class MetalBufferPool<T> {
     /// Track buffer residency for Metal 4.0 optimization
     private func trackBufferResidency(_ buffer: MetalBuffer<T>) {
         if #available(iOS 26.0, macOS 26.0, tvOS 26.0, visionOS 26.0, *) {
-            if let residencySet = residencySet as? MTLResidencySet, configuration.useResidencyTracking {
+            if let _ = residencySet as? MTLResidencySet, configuration.useResidencyTracking {
                 // Add buffer to residency set for GPU memory tracking
                 // residencySet.addAllocation(buffer.buffer)
                 log.debug("Metal 4.0: Tracking buffer residency for capacity \(buffer.capacity)")

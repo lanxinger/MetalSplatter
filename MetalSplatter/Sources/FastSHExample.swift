@@ -26,7 +26,7 @@ public class FastSHExample {
         
         // Configure fast SH options
         renderer.fastSHConfig.enabled = true
-        renderer.fastSHConfig.updateFrequency = 1 // Update every frame
+        renderer.shDirectionEpsilon = 0.0 // Update every frame
         renderer.fastSHConfig.maxPaletteSize = 65536 // Support up to 64K unique SH sets
         
         // Load SOGS file with SH data
@@ -80,7 +80,7 @@ public class FastSHExample {
     public static func demonstrateModes(renderer: FastSHSplatRenderer) {
         // Fast mode - single direction evaluation
         renderer.fastSHConfig.enabled = true
-        renderer.fastSHConfig.updateFrequency = 2 // Update every other frame for performance
+        renderer.shDirectionEpsilon = 0.08 // Less frequent updates for performance
 
         // Disable fast SH - fall back to CPU evaluation
         renderer.fastSHConfig.enabled = false

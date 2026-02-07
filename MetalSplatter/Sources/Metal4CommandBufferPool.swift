@@ -5,7 +5,7 @@ import os
 /// A pool-based command buffer allocator that reuses command buffers to reduce memory allocation overhead.
 /// This implements Metal 4 command buffer reuse architecture for improved performance.
 @available(iOS 18.0, macOS 15.0, visionOS 2.0, *)
-class Metal4CommandBufferPool {
+class Metal4CommandBufferPool: @unchecked Sendable {
     
     private static let log = Logger(subsystem: "com.saturdayresearch.metalsplatter", category: "Metal4CommandBufferPool")
     

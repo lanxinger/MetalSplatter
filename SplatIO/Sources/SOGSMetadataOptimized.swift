@@ -237,30 +237,28 @@ extension SplatSOGSSceneReader {
         // Use concurrent queue for parallel loading
         let queue = DispatchQueue(label: "sogs.webp.loading", attributes: .concurrent)
         let group = DispatchGroup()
+        let loadWebP = self.loadAndDecodeWebP
         
         // Storage for results
-        var means_l: WebPDecoder.DecodedImage?
-        var means_u: WebPDecoder.DecodedImage?
-        var quats: WebPDecoder.DecodedImage?
-        var scales: WebPDecoder.DecodedImage?
-        var sh0: WebPDecoder.DecodedImage?
-        var sh_centroids: WebPDecoder.DecodedImage?
-        var sh_labels: WebPDecoder.DecodedImage?
+        let meansL = LockedBox<WebPDecoder.DecodedImage?>(nil)
+        let meansU = LockedBox<WebPDecoder.DecodedImage?>(nil)
+        let quats = LockedBox<WebPDecoder.DecodedImage?>(nil)
+        let scales = LockedBox<WebPDecoder.DecodedImage?>(nil)
+        let sh0 = LockedBox<WebPDecoder.DecodedImage?>(nil)
+        let shCentroids = LockedBox<WebPDecoder.DecodedImage?>(nil)
+        let shLabels = LockedBox<WebPDecoder.DecodedImage?>(nil)
         
         // Errors from parallel operations
-        var loadingErrors: [Error] = []
-        let errorLock = NSLock()
+        let loadingErrors = LockedBox<[Error]>([])
         
         // Load required textures in parallel
         group.enter()
         queue.async {
             defer { group.leave() }
             do {
-                means_l = try self.loadAndDecodeWebP(metadata.means.files[0])
+                meansL.set(try loadWebP(metadata.means.files[0]))
             } catch {
-                errorLock.lock()
-                loadingErrors.append(error)
-                errorLock.unlock()
+                loadingErrors.withValue { $0.append(error) }
             }
         }
         
@@ -268,11 +266,9 @@ extension SplatSOGSSceneReader {
         queue.async {
             defer { group.leave() }
             do {
-                means_u = try self.loadAndDecodeWebP(metadata.means.files[1])
+                meansU.set(try loadWebP(metadata.means.files[1]))
             } catch {
-                errorLock.lock()
-                loadingErrors.append(error)
-                errorLock.unlock()
+                loadingErrors.withValue { $0.append(error) }
             }
         }
         
@@ -280,11 +276,9 @@ extension SplatSOGSSceneReader {
         queue.async {
             defer { group.leave() }
             do {
-                quats = try self.loadAndDecodeWebP(metadata.quats.files[0])
+                quats.set(try loadWebP(metadata.quats.files[0]))
             } catch {
-                errorLock.lock()
-                loadingErrors.append(error)
-                errorLock.unlock()
+                loadingErrors.withValue { $0.append(error) }
             }
         }
         
@@ -292,11 +286,9 @@ extension SplatSOGSSceneReader {
         queue.async {
             defer { group.leave() }
             do {
-                scales = try self.loadAndDecodeWebP(metadata.scales.files[0])
+                scales.set(try loadWebP(metadata.scales.files[0]))
             } catch {
-                errorLock.lock()
-                loadingErrors.append(error)
-                errorLock.unlock()
+                loadingErrors.withValue { $0.append(error) }
             }
         }
         
@@ -304,11 +296,9 @@ extension SplatSOGSSceneReader {
         queue.async {
             defer { group.leave() }
             do {
-                sh0 = try self.loadAndDecodeWebP(metadata.sh0.files[0])
+                sh0.set(try loadWebP(metadata.sh0.files[0]))
             } catch {
-                errorLock.lock()
-                loadingErrors.append(error)
-                errorLock.unlock()
+                loadingErrors.withValue { $0.append(error) }
             }
         }
         
@@ -318,15 +308,13 @@ extension SplatSOGSSceneReader {
             queue.async {
                 defer { group.leave() }
                 do {
-                    let tempCentroids = try self.loadAndDecodeWebP(shN.files[0])
+                    let tempCentroids = try loadWebP(shN.files[0])
                     let shBands = self.calculateSHBands(width: tempCentroids.width)
                     if shBands > 0 {
-                        sh_centroids = tempCentroids
+                        shCentroids.set(tempCentroids)
                     }
                 } catch {
-                    errorLock.lock()
-                    loadingErrors.append(error)
-                    errorLock.unlock()
+                    loadingErrors.withValue { $0.append(error) }
                 }
             }
             
@@ -334,11 +322,9 @@ extension SplatSOGSSceneReader {
             queue.async {
                 defer { group.leave() }
                 do {
-                    sh_labels = try self.loadAndDecodeWebP(shN.files[1])
+                    shLabels.set(try loadWebP(shN.files[1]))
                 } catch {
-                    errorLock.lock()
-                    loadingErrors.append(error)
-                    errorLock.unlock()
+                    loadingErrors.withValue { $0.append(error) }
                 }
             }
         }
@@ -347,16 +333,16 @@ extension SplatSOGSSceneReader {
         group.wait()
         
         // Check for errors
-        if !loadingErrors.isEmpty {
-            throw loadingErrors.first!
+        if let error = loadingErrors.get().first {
+            throw error
         }
         
         // Verify all required textures loaded
-        guard let means_l = means_l,
-              let means_u = means_u,
-              let quats = quats,
-              let scales = scales,
-              let sh0 = sh0 else {
+        guard let means_l = meansL.get(),
+              let means_u = meansU.get(),
+              let quats = quats.get(),
+              let scales = scales.get(),
+              let sh0 = sh0.get() else {
             throw SOGSError.webpDecodingFailed("Failed to load required textures")
         }
         
@@ -369,8 +355,8 @@ extension SplatSOGSSceneReader {
             quats: quats,
             scales: scales,
             sh0: sh0,
-            sh_centroids: sh_centroids,
-            sh_labels: sh_labels
+            sh_centroids: shCentroids.get(),
+            sh_labels: shLabels.get()
         )
     }
 }

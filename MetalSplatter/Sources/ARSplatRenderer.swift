@@ -2,7 +2,7 @@
 
 import ARKit
 import Foundation
-import Metal
+@preconcurrency import Metal
 import MetalKit
 import SplatIO
 import simd
@@ -668,20 +668,6 @@ public class ARSplatRenderer: NSObject {
             return
         }
         
-        // Fallback: try legacy hit test for compatibility with more types
-        let hitTestResults = frame.hitTest(screenPoint, types: [.existingPlaneUsingExtent, .estimatedHorizontalPlane, .featurePoint])
-        
-        if let result = hitTestResults.first {
-            // Place the splat directly on the detected surface with minimal offset
-            let surfacePosition = result.worldTransform.columns.3.xyz
-            let surfaceNormal = result.worldTransform.columns.1.xyz // Y column is up vector for most surfaces
-            let offsetDistance: Float = 0.001 // Minimal 1mm offset to avoid Z-fighting
-            splatPosition = surfacePosition + normalize(surfaceNormal) * offsetDistance
-            hasBeenPlaced = true
-            logVerbose("ARSplatRenderer: ✅ Placed splat using legacy hit test at: \(splatPosition) (offset: \(offsetDistance))")
-            return
-        }
-        
         // Final fallback: place along ray at fixed distance
         let direction = screenPointToWorldDirection(screenPoint, frame: frame, viewportSize: viewportSize)
         splatPosition = frame.camera.transform.columns.3.xyz + normalize(direction) * 1.5
@@ -897,9 +883,10 @@ public class ARSplatRenderer: NSObject {
         computeEncoder.endEncoding()
 
         // Read back the render mode decision
-        commandBuffer.addCompletedHandler { [weak self, modeBuffer] _ in
+        commandBuffer.addCompletedHandler { [weak self] _ in
             Task { @MainActor [weak self] in
-                guard let self = self else { return }
+                guard let self = self,
+                      let modeBuffer = self.renderModeBuffer else { return }
                 let modePointer = modeBuffer.contents().bindMemory(to: UInt32.self, capacity: 1)
                 let newMode = modePointer.pointee
 
@@ -1114,7 +1101,7 @@ extension ARSplatRenderer: ARSessionDelegate {
         
         // Create compute pipeline for enhanced AR processing
         do {
-            let arComputePipeline = try device.makeComputePipelineState(function: arMatrixFunction)
+            _ = try device.makeComputePipelineState(function: arMatrixFunction)
             print("ARSplatRenderer: ✅ Initialized Metal 4 MPP for AR matrix operations")
             
             // Store pipeline for future use in AR processing

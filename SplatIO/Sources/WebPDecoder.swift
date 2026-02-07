@@ -27,7 +27,7 @@ public struct WebPDecoder {
     #endif
     
     /// Decoded WebP image data
-    public struct DecodedImage {
+    public struct DecodedImage: Sendable {
         public let pixels: Data
         public let width: Int
         public let height: Int

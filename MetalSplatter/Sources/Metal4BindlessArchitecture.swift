@@ -6,7 +6,7 @@ import os
 /// Enhanced Metal 4 Bindless Architecture with complete residency management
 /// Implements full bindless resource management with background population and zero per-draw binding
 @available(iOS 18.0, macOS 15.0, visionOS 2.0, *)
-public class Metal4BindlessArchitecture {
+public class Metal4BindlessArchitecture: @unchecked Sendable {
 
     private static let log = Logger(
         subsystem: Bundle.module.bundleIdentifier ?? "com.metalsplatter.unknown",
@@ -614,7 +614,7 @@ public struct ResourceHandle: Hashable, CustomStringConvertible, Sendable {
 }
 
 /// Resource type classification
-public enum ResourceType {
+public enum ResourceType: Sendable {
     case splatBuffer
     case uniformBuffer
     case indexBuffer

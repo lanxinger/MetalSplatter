@@ -73,9 +73,11 @@ public class ARPerspectiveCamera {
     }
     
     private func getOrientation() -> UIInterfaceOrientation? {
-        return UIApplication.shared.connectedScenes
-            .compactMap { $0 as? UIWindowScene }
-            .first?.interfaceOrientation
+        MainActor.assumeIsolated {
+            UIApplication.shared.connectedScenes
+                .compactMap { $0 as? UIWindowScene }
+                .first?.interfaceOrientation
+        }
     }
 }
 

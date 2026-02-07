@@ -7,7 +7,7 @@ import MetalKit
 import os
 import simd
 
-public class ARBackgroundRenderer {
+public class ARBackgroundRenderer: NSObject {
     private static let log = Logger(subsystem: "com.metalsplatter", category: "ARBackgroundRenderer")
     private let device: MTLDevice
     private let commandQueue: MTLCommandQueue
@@ -91,15 +91,14 @@ public class ARBackgroundRenderer {
             throw ARBackgroundRendererError.failedToCreateTextureCache
         }
         self.capturedImageTextureCache = cache
+        super.init()
 
-        // Setup orientation change notification
         NotificationCenter.default.addObserver(
-            forName: UIDevice.orientationDidChangeNotification,
-            object: nil,
-            queue: .main
-        ) { [weak self] _ in
-            self?.updateGeometry = true
-        }
+            self,
+            selector: #selector(handleOrientationDidChange),
+            name: UIDevice.orientationDidChangeNotification,
+            object: nil
+        )
     }
     
     deinit {
@@ -237,11 +236,18 @@ public class ARBackgroundRenderer {
         
         return texture
     }
+
+    @objc
+    private func handleOrientationDidChange() {
+        updateGeometry = true
+    }
     
     private func getOrientation() -> UIInterfaceOrientation? {
-        return UIApplication.shared.connectedScenes
-            .compactMap { $0 as? UIWindowScene }
-            .first?.interfaceOrientation
+        MainActor.assumeIsolated {
+            UIApplication.shared.connectedScenes
+                .compactMap { $0 as? UIWindowScene }
+                .first?.interfaceOrientation
+        }
     }
     
     private static func createRenderPipelineState(device: MTLDevice, library: MTLLibrary) throws -> MTLRenderPipelineState {

@@ -2,7 +2,7 @@ import Foundation
 import ImageIO
 import CoreGraphics
 
-public class SplatSOGSSceneReader: SplatSceneReader {
+public class SplatSOGSSceneReader: SplatSceneReader, @unchecked Sendable {
     public enum SOGSError: Error {
         case invalidMetadata
         case missingFile(String)
@@ -180,7 +180,6 @@ public class SplatSOGSSceneReader: SplatSceneReader {
         print("SplatSOGSSceneReader: Attempting to load WebP file: \(filename)")
         
         // Try multiple approaches for finding the file on iOS File Provider
-        var fileURL = baseURL.appendingPathComponent(filename)
         var fileData: Data?
         
         // List all approaches we'll try
@@ -217,7 +216,6 @@ public class SplatSOGSSceneReader: SplatSceneReader {
                 do {
                     // Try to read the file data
                     fileData = try Data(contentsOf: tryURL)
-                    fileURL = tryURL
                     print("SplatSOGSSceneReader: Successfully loaded \(fileData!.count) bytes from \(filename)")
                     break
                 } catch {

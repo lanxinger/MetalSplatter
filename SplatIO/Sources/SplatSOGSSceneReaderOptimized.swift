@@ -3,7 +3,7 @@ import ImageIO
 import CoreGraphics
 
 /// Optimized version of SplatSOGSSceneReader with performance improvements
-public class SplatSOGSSceneReaderOptimized: SplatSceneReader {
+public class SplatSOGSSceneReaderOptimized: SplatSceneReader, @unchecked Sendable {
     public enum SOGSError: Error {
         case invalidMetadata
         case missingFile(String)
@@ -180,23 +180,18 @@ public class SplatSOGSSceneReaderOptimized: SplatSceneReader {
 
         let queue = DispatchQueue(label: "sogs.webp.loading", attributes: .concurrent)
         let group = DispatchGroup()
-
-        // Use a lock to protect results instead of dispatching to main queue
-        // This ensures results are available immediately after group.wait()
-        let resultsLock = NSLock()
-        var means_l: WebPDecoder.DecodedImage?
-        var means_u: WebPDecoder.DecodedImage?
-        var quats: WebPDecoder.DecodedImage?
-        var scales: WebPDecoder.DecodedImage?
-        var sh0: WebPDecoder.DecodedImage?
-        var sh_centroids: WebPDecoder.DecodedImage?
-        var sh_labels: WebPDecoder.DecodedImage?
-
-        var loadingErrors: [Error] = []
-        let errorLock = NSLock()
+        let loadWebP = self.loadAndDecodeWebP
+        let meansL = LockedBox<WebPDecoder.DecodedImage?>(nil)
+        let meansU = LockedBox<WebPDecoder.DecodedImage?>(nil)
+        let quats = LockedBox<WebPDecoder.DecodedImage?>(nil)
+        let scales = LockedBox<WebPDecoder.DecodedImage?>(nil)
+        let sh0 = LockedBox<WebPDecoder.DecodedImage?>(nil)
+        let shCentroids = LockedBox<WebPDecoder.DecodedImage?>(nil)
+        let shLabels = LockedBox<WebPDecoder.DecodedImage?>(nil)
+        let loadingErrors = LockedBox<[Error]>([])
 
         // Load all textures in parallel
-        let loadTasks: [(String)] = [
+        let loadTasks: [String] = [
             metadata.means.files[0],
             metadata.means.files[1],
             metadata.quats.files[0],
@@ -209,22 +204,17 @@ public class SplatSOGSSceneReaderOptimized: SplatSceneReader {
             queue.async {
                 defer { group.leave() }
                 do {
-                    let decoded = try self.loadAndDecodeWebP(loadTasks[i])
-                    // Use lock-protected writes for thread safety
-                    resultsLock.lock()
+                    let decoded = try loadWebP(loadTasks[i])
                     switch i {
-                    case 0: means_l = decoded
-                    case 1: means_u = decoded
-                    case 2: quats = decoded
-                    case 3: scales = decoded
-                    case 4: sh0 = decoded
+                    case 0: meansL.set(decoded)
+                    case 1: meansU.set(decoded)
+                    case 2: quats.set(decoded)
+                    case 3: scales.set(decoded)
+                    case 4: sh0.set(decoded)
                     default: break
                     }
-                    resultsLock.unlock()
                 } catch {
-                    errorLock.lock()
-                    loadingErrors.append(error)
-                    errorLock.unlock()
+                    loadingErrors.withValue { $0.append(error) }
                 }
             }
         }
@@ -235,37 +225,31 @@ public class SplatSOGSSceneReaderOptimized: SplatSceneReader {
             queue.async {
                 defer { group.leave() }
                 do {
-                    let tempCentroids = try self.loadAndDecodeWebP(shN.files[0])
+                    let tempCentroids = try loadWebP(shN.files[0])
                     let shBands = self.calculateSHBands(width: tempCentroids.width)
                     if shBands > 0 {
-                        resultsLock.lock()
-                        sh_centroids = tempCentroids
-                        resultsLock.unlock()
+                        shCentroids.set(tempCentroids)
 
-                        let labels = try self.loadAndDecodeWebP(shN.files[1])
-                        resultsLock.lock()
-                        sh_labels = labels
-                        resultsLock.unlock()
+                        let labels = try loadWebP(shN.files[1])
+                        shLabels.set(labels)
                     }
                 } catch {
-                    errorLock.lock()
-                    loadingErrors.append(error)
-                    errorLock.unlock()
+                    loadingErrors.withValue { $0.append(error) }
                 }
             }
         }
 
         group.wait()
 
-        if !loadingErrors.isEmpty {
-            throw loadingErrors.first!
+        if let error = loadingErrors.get().first {
+            throw error
         }
         
-        guard let means_l = means_l,
-              let means_u = means_u,
-              let quats = quats,
-              let scales = scales,
-              let sh0 = sh0 else {
+        guard let means_l = meansL.get(),
+              let means_u = meansU.get(),
+              let quats = quats.get(),
+              let scales = scales.get(),
+              let sh0 = sh0.get() else {
             throw SOGSError.webpDecodingFailed("Failed to load required textures")
         }
         
@@ -278,8 +262,8 @@ public class SplatSOGSSceneReaderOptimized: SplatSceneReader {
             quats: quats,
             scales: scales,
             sh0: sh0,
-            sh_centroids: sh_centroids,
-            sh_labels: sh_labels
+            sh_centroids: shCentroids.get(),
+            sh_labels: shLabels.get()
         )
     }
     

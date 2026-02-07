@@ -23,7 +23,7 @@ private final class LockedCounter: @unchecked Sendable {
     }
 }
 
-public class SplatSOGSSceneReaderV2: SplatSceneReader {
+public class SplatSOGSSceneReaderV2: SplatSceneReader, @unchecked Sendable {
     public enum SOGSV2Error: Error {
         case invalidMetadata
         case missingFile(String)
@@ -105,32 +105,13 @@ public class SplatSOGSSceneReaderV2: SplatSceneReader {
     }
     
     public func read(to delegate: SplatSceneReaderDelegate) {
-        // Capture self weakly for the outer closure, but use a local strong reference
-        // for the duration of the read operation to ensure consistency
-        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            guard let self = self else { return }
-
-            // Perform the potentially long-running read operation
-            let result: Result<[SplatScenePoint], Error>
-            do {
-                let points = try self.readScene()
-                result = .success(points)
-            } catch {
-                result = .failure(error)
-            }
-
-            // Dispatch results to main queue
-            // By this point, the read is complete and delegate calls are safe
-            DispatchQueue.main.async {
-                switch result {
-                case .success(let points):
-                    delegate.didStartReading(withPointCount: UInt32(points.count))
-                    delegate.didRead(points: points)
-                    delegate.didFinishReading()
-                case .failure(let error):
-                    delegate.didFailReading(withError: error)
-                }
-            }
+        do {
+            let points = try readScene()
+            delegate.didStartReading(withPointCount: UInt32(points.count))
+            delegate.didRead(points: points)
+            delegate.didFinishReading()
+        } catch {
+            delegate.didFailReading(withError: error)
         }
     }
     
@@ -200,38 +181,30 @@ public class SplatSOGSSceneReaderV2: SplatSceneReader {
         }
 
         let shouldLoadSHData = sanitizedMetadata.shN != nil
+        let resolvedSHCentroidsFilename = shCentroidsFilename
+        let resolvedSHLabelsFilename = shLabelsFilename
 
         // Use concurrent loading for better performance
         let queue = DispatchQueue(label: "sogsv2.webp.loading", attributes: .concurrent)
         let group = DispatchGroup()
-
-        // Storage for results
-        var means_l: WebPDecoder.DecodedImage?
-        var means_u: WebPDecoder.DecodedImage?
-        var quats: WebPDecoder.DecodedImage?
-        var scales: WebPDecoder.DecodedImage?
-        var sh0: WebPDecoder.DecodedImage?
-        var sh_centroids: WebPDecoder.DecodedImage?
-        var sh_labels: WebPDecoder.DecodedImage?
-
-        // Error handling
-        var loadingErrors: [Error] = []
-        let errorLock = NSLock()
-        let resultLock = NSLock()
+        let loadWebP = self.loadAndDecodeWebPV2
+        let meansL = LockedBox<WebPDecoder.DecodedImage?>(nil)
+        let meansU = LockedBox<WebPDecoder.DecodedImage?>(nil)
+        let quats = LockedBox<WebPDecoder.DecodedImage?>(nil)
+        let scales = LockedBox<WebPDecoder.DecodedImage?>(nil)
+        let sh0 = LockedBox<WebPDecoder.DecodedImage?>(nil)
+        let shCentroids = LockedBox<WebPDecoder.DecodedImage?>(nil)
+        let shLabels = LockedBox<WebPDecoder.DecodedImage?>(nil)
+        let loadingErrors = LockedBox<[Error]>([])
 
         // Load means_l
         group.enter()
         queue.async {
             defer { group.leave() }
             do {
-                let image = try self.loadAndDecodeWebPV2(metadata.means.files[0])
-                resultLock.lock()
-                means_l = image
-                resultLock.unlock()
+                meansL.set(try loadWebP(metadata.means.files[0]))
             } catch {
-                errorLock.lock()
-                loadingErrors.append(error)
-                errorLock.unlock()
+                loadingErrors.withValue { $0.append(error) }
             }
         }
 
@@ -240,14 +213,9 @@ public class SplatSOGSSceneReaderV2: SplatSceneReader {
         queue.async {
             defer { group.leave() }
             do {
-                let image = try self.loadAndDecodeWebPV2(metadata.means.files[1])
-                resultLock.lock()
-                means_u = image
-                resultLock.unlock()
+                meansU.set(try loadWebP(metadata.means.files[1]))
             } catch {
-                errorLock.lock()
-                loadingErrors.append(error)
-                errorLock.unlock()
+                loadingErrors.withValue { $0.append(error) }
             }
         }
 
@@ -256,14 +224,9 @@ public class SplatSOGSSceneReaderV2: SplatSceneReader {
         queue.async {
             defer { group.leave() }
             do {
-                let image = try self.loadAndDecodeWebPV2(quatsFilename)
-                resultLock.lock()
-                quats = image
-                resultLock.unlock()
+                quats.set(try loadWebP(quatsFilename))
             } catch {
-                errorLock.lock()
-                loadingErrors.append(error)
-                errorLock.unlock()
+                loadingErrors.withValue { $0.append(error) }
             }
         }
 
@@ -272,14 +235,9 @@ public class SplatSOGSSceneReaderV2: SplatSceneReader {
         queue.async {
             defer { group.leave() }
             do {
-                let image = try self.loadAndDecodeWebPV2(scalesFilename)
-                resultLock.lock()
-                scales = image
-                resultLock.unlock()
+                scales.set(try loadWebP(scalesFilename))
             } catch {
-                errorLock.lock()
-                loadingErrors.append(error)
-                errorLock.unlock()
+                loadingErrors.withValue { $0.append(error) }
             }
         }
 
@@ -288,14 +246,9 @@ public class SplatSOGSSceneReaderV2: SplatSceneReader {
         queue.async {
             defer { group.leave() }
             do {
-                let image = try self.loadAndDecodeWebPV2(sh0Filename)
-                resultLock.lock()
-                sh0 = image
-                resultLock.unlock()
+                sh0.set(try loadWebP(sh0Filename))
             } catch {
-                errorLock.lock()
-                loadingErrors.append(error)
-                errorLock.unlock()
+                loadingErrors.withValue { $0.append(error) }
             }
         }
 
@@ -306,16 +259,12 @@ public class SplatSOGSSceneReaderV2: SplatSceneReader {
             queue.async {
                 defer { group.leave() }
                 do {
-                    guard let filename = shCentroidsFilename else { throw SOGSV2Error.invalidMetadata }
-                    let image = try self.loadAndDecodeWebPV2(filename)
-                    resultLock.lock()
-                    sh_centroids = image
-                    resultLock.unlock()
+                    guard let filename = resolvedSHCentroidsFilename else { throw SOGSV2Error.invalidMetadata }
+                    let image = try loadWebP(filename)
+                    shCentroids.set(image)
                     print("SplatSOGSSceneReaderV2: Loaded SH centroids texture")
                 } catch {
-                    errorLock.lock()
-                    loadingErrors.append(error)
-                    errorLock.unlock()
+                    loadingErrors.withValue { $0.append(error) }
                 }
             }
 
@@ -324,35 +273,29 @@ public class SplatSOGSSceneReaderV2: SplatSceneReader {
             queue.async {
                 defer { group.leave() }
                 do {
-                    guard let filename = shLabelsFilename else { throw SOGSV2Error.invalidMetadata }
-                    let image = try self.loadAndDecodeWebPV2(filename)
-                    resultLock.lock()
-                    sh_labels = image
-                    resultLock.unlock()
+                    guard let filename = resolvedSHLabelsFilename else { throw SOGSV2Error.invalidMetadata }
+                    let image = try loadWebP(filename)
+                    shLabels.set(image)
                     print("SplatSOGSSceneReaderV2: Loaded SH labels texture")
                 } catch {
-                    errorLock.lock()
-                    loadingErrors.append(error)
-                    errorLock.unlock()
+                    loadingErrors.withValue { $0.append(error) }
                 }
             }
         }
 
         group.notify(queue: queue) {
-            if let error = loadingErrors.first {
+            if let error = loadingErrors.get().first {
                 completion(.failure(error))
                 return
             }
 
-            resultLock.lock()
-            let resolvedMeansL = means_l
-            let resolvedMeansU = means_u
-            let resolvedQuats = quats
-            let resolvedScales = scales
-            let resolvedSh0 = sh0
-            let resolvedCentroids = sh_centroids
-            let resolvedLabels = sh_labels
-            resultLock.unlock()
+            let resolvedMeansL = meansL.get()
+            let resolvedMeansU = meansU.get()
+            let resolvedQuats = quats.get()
+            let resolvedScales = scales.get()
+            let resolvedSh0 = sh0.get()
+            let resolvedCentroids = shCentroids.get()
+            let resolvedLabels = shLabels.get()
 
             guard let means_l = resolvedMeansL,
                   let means_u = resolvedMeansU,
@@ -596,9 +539,9 @@ public class SplatSOGSSceneReaderV2: SplatSceneReader {
         let logStep = max(1, min(preferredBatchSize * 2, totalSplats / max(1, maxParallelChunks)))
 
         chunkResults.withUnsafeMutableBufferPointer { buffer in
-            DispatchQueue.concurrentPerform(iterations: chunkDescriptors.count) { chunkIndex in
+            for chunkIndex in chunkDescriptors.indices {
                 let descriptor = chunkDescriptors[chunkIndex]
-                var iterator = SOGSIteratorV2(compressedData)
+                let iterator = SOGSIteratorV2(compressedData)
                 var localPoints: [SplatScenePoint] = []
                 localPoints.reserveCapacity(descriptor.count)
 
@@ -627,7 +570,7 @@ public class SplatSOGSSceneReaderV2: SplatSceneReader {
     }
 
     private func decompressSequentialV2(_ compressedData: SOGSCompressedDataV2, batchSize: Int) -> [SplatScenePoint] {
-        var batchIterator = SOGSBatchIteratorV2(compressedData)
+        let batchIterator = SOGSBatchIteratorV2(compressedData)
         var allPoints: [SplatScenePoint] = []
         allPoints.reserveCapacity(compressedData.numSplats)
 
@@ -698,8 +641,8 @@ private class SOGSZipArchive {
         var entries: [String: ZipEntry] = [:]
         for entry in archive {
             entryCount += 1
-            let compressed = entry.compressedSize ?? 0
-            let uncompressed = entry.uncompressedSize ?? 0
+            let compressed = entry.compressedSize
+            let uncompressed = entry.uncompressedSize
             print("  - \(entry.path) (compressed: \(compressed), uncompressed: \(uncompressed))")
             entries[entry.path] = entry
         }

@@ -54,7 +54,7 @@ extension SplatRenderer {
 
 // MARK: - Fast SH Renderer Extension
 
-public class FastSHSplatRenderer: SplatRenderer {
+public class FastSHSplatRenderer: SplatRenderer, @unchecked Sendable {
     
     /// Configuration for fast SH rendering
     public struct FastSHConfiguration {
@@ -180,7 +180,11 @@ public class FastSHSplatRenderer: SplatRenderer {
             pipelineDescriptor.colorAttachments[0].sourceAlphaBlendFactor = .one
             pipelineDescriptor.colorAttachments[0].destinationAlphaBlendFactor = .oneMinusSourceAlpha
             pipelineDescriptor.depthAttachmentPixelFormat = depthFormat
-            pipelineDescriptor.sampleCount = sampleCount
+            if #available(iOS 16.0, macOS 13.0, visionOS 1.0, *) {
+                pipelineDescriptor.rasterSampleCount = sampleCount
+            } else {
+                pipelineDescriptor.sampleCount = sampleCount
+            }
 
             if #available(iOS 17.0, macOS 14.0, *) {
                 pipelineDescriptor.maxVertexAmplificationCount = maxViewCount
