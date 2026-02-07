@@ -212,6 +212,8 @@ enum SplatOutputFileFormat: ExpressibleByArgument {
         case .spz: self = .dotSplat  // Default to dotSplat when converting from SPZ
         case .sogs: self = .binaryPLY  // Default to binary PLY when converting from SOGS
         case .spx: self = .dotSplat  // Default to dotSplat when converting from SPX
+        case .gltf, .glb:
+            return nil  // Unsupported output formats for this converter
         case .none: return nil
         }
     }
