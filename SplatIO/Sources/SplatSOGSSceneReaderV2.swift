@@ -525,43 +525,44 @@ public class SplatSOGSSceneReaderV2: SplatSceneReader, @unchecked Sendable {
         }
 
         let chunkSize = max(preferredBatchSize, (totalSplats + maxParallelChunks - 1) / maxParallelChunks)
-        var chunkDescriptors: [(start: Int, count: Int)] = []
-        chunkDescriptors.reserveCapacity(maxParallelChunks)
+        var mutableChunkDescriptors: [(start: Int, count: Int)] = []
+        mutableChunkDescriptors.reserveCapacity(maxParallelChunks)
         var startIndex = 0
         while startIndex < totalSplats {
             let count = min(chunkSize, totalSplats - startIndex)
-            chunkDescriptors.append((start: startIndex, count: count))
+            mutableChunkDescriptors.append((start: startIndex, count: count))
             startIndex += count
         }
+        let chunkDescriptors = mutableChunkDescriptors
 
-        var chunkResults = Array(repeating: [SplatScenePoint](), count: chunkDescriptors.count)
+        let chunkResults = LockedBox(Array(repeating: [SplatScenePoint](), count: chunkDescriptors.count))
         let progressCounter = LockedCounter()
         let logStep = max(1, min(preferredBatchSize * 2, totalSplats / max(1, maxParallelChunks)))
 
-        chunkResults.withUnsafeMutableBufferPointer { buffer in
-            for chunkIndex in chunkDescriptors.indices {
-                let descriptor = chunkDescriptors[chunkIndex]
-                let iterator = SOGSIteratorV2(compressedData)
-                var localPoints: [SplatScenePoint] = []
-                localPoints.reserveCapacity(descriptor.count)
+        DispatchQueue.concurrentPerform(iterations: chunkDescriptors.count) { chunkIndex in
+            let descriptor = chunkDescriptors[chunkIndex]
+            let iterator = SOGSIteratorV2(compressedData)
+            var localPoints: [SplatScenePoint] = []
+            localPoints.reserveCapacity(descriptor.count)
 
-                let end = descriptor.start + descriptor.count
-                for idx in descriptor.start..<end {
-                    localPoints.append(iterator.readPoint(at: idx))
-                }
+            let end = descriptor.start + descriptor.count
+            for idx in descriptor.start..<end {
+                localPoints.append(iterator.readPoint(at: idx))
+            }
 
-                buffer[chunkIndex] = localPoints
+            chunkResults.withValue {
+                $0[chunkIndex] = localPoints
+            }
 
-                let processed = progressCounter.add(descriptor.count)
-                if processed == totalSplats || processed % logStep == 0 {
-                    print("SplatSOGSSceneReaderV2: Batch processed \(processed)/\(totalSplats) splats")
-                }
+            let processed = progressCounter.add(descriptor.count)
+            if processed == totalSplats || processed % logStep == 0 {
+                print("SplatSOGSSceneReaderV2: Batch processed \(processed)/\(totalSplats) splats")
             }
         }
 
         var allPoints: [SplatScenePoint] = []
         allPoints.reserveCapacity(totalSplats)
-        for chunk in chunkResults {
+        for chunk in chunkResults.get() {
             allPoints.append(contentsOf: chunk)
         }
 

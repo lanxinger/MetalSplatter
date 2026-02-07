@@ -5,6 +5,10 @@ import SwiftUI
 
 @main
 struct SampleApp: App {
+#if os(visionOS)
+    @State private var visionSceneRenderer: VisionSceneRenderer?
+#endif
+
     var body: some Scene {
         WindowGroup("MetalSplatter Sample App", id: "main") {
             ContentView()
@@ -22,13 +26,26 @@ struct SampleApp: App {
             CompositorLayer(configuration: ContentStageConfiguration()) { layerRenderer in
                 Task {
                     do {
+                        if let existingRenderer = visionSceneRenderer,
+                           existingRenderer.layerRenderer === layerRenderer,
+                           existingRenderer.model == modelIdentifier.wrappedValue {
+                            return
+                        }
+
+                        visionSceneRenderer?.stopRenderLoop()
+
                         let renderer = try VisionSceneRenderer(layerRenderer)
                         try await renderer.load(modelIdentifier.wrappedValue)
+                        visionSceneRenderer = renderer
                         renderer.startRenderLoop()
                     } catch {
                         print("Error initializing or loading renderer: \(error.localizedDescription)")
                     }
                 }
+            }
+            .onDisappear {
+                visionSceneRenderer?.stopRenderLoop()
+                visionSceneRenderer = nil
             }
         }
         .immersionStyle(selection: .constant(immersionStyle), in: immersionStyle)
@@ -45,4 +62,3 @@ struct SampleApp: App {
     }
 #endif // os(visionOS)
 }
-

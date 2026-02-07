@@ -92,6 +92,52 @@ final class SplatIOTests: XCTestCase {
         try testRead(dotSplatURL)
     }
 
+    func testReadPLYWithPartialSphericalHarmonicsProperties() {
+        let plyData = Data(
+            """
+            ply
+            format ascii 1.0
+            element vertex 1
+            property float x
+            property float y
+            property float z
+            property float f_dc_0
+            property float f_dc_1
+            property float f_dc_2
+            property float f_rest_0
+            property float f_rest_1
+            property float f_rest_2
+            property float scale_0
+            property float scale_1
+            property float scale_2
+            property float opacity
+            property float rot_0
+            property float rot_1
+            property float rot_2
+            property float rot_3
+            end_header
+            0 0 0 0.1 0.2 0.3 0.01 0.02 0.03 1 1 1 0.5 1 0 0 0
+            """.utf8
+        )
+
+        let stream = InputStream(data: plyData)
+        let reader = SplatPLYSceneReader(stream)
+        let content = ContentStorage()
+        reader.read(to: content)
+
+        XCTAssertTrue(content.didFinish)
+        XCTAssertFalse(content.didFail)
+        XCTAssertEqual(content.points.count, 1)
+
+        guard case .sphericalHarmonic(let coefficients) = content.points[0].color else {
+            XCTFail("Expected spherical harmonic color")
+            return
+        }
+
+        // 1 DC triplet + 1 additional f_rest triplet
+        XCTAssertEqual(coefficients.count, 2)
+    }
+
     func testFormatsEqual() throws {
         try testEqual(plyURL, dotSplatURL)
     }

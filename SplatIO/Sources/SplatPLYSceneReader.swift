@@ -153,8 +153,6 @@ private struct ElementInputMapping {
         case linearUInt8(SIMD3<Int>)
     }
 
-    static let sphericalHarmonicsCount = 45
-
     let elementTypeIndex: Int
 
     let positionXPropertyIndex: Int
@@ -186,9 +184,13 @@ private struct ElementInputMapping {
             let sh0_bPropertyIndex = try headerElement.index(forOptionalFloat32PropertyNamed: SplatPLYConstants.PropertyName.sh0_b) {
             let primaryColorPropertyIndices = SIMD3<Int>(x: sh0_rPropertyIndex, y: sh0_gPropertyIndex, z: sh0_bPropertyIndex)
             if headerElement.hasProperty(forName: "\(SplatPLYConstants.PropertyName.sphericalHarmonicsPrefix)0") {
-                let individualSphericalHarmonicsPropertyIndices: [Int] = try (0..<sphericalHarmonicsCount).map {
-                    try headerElement.index(forFloat32PropertyNamed: [ "\(SplatPLYConstants.PropertyName.sphericalHarmonicsPrefix)\($0)" ])
+                var individualSphericalHarmonicsPropertyIndices: [Int] = []
+                var shIndex = 0
+                while let propertyIndex = try headerElement.index(forOptionalFloat32PropertyNamed: [ "\(SplatPLYConstants.PropertyName.sphericalHarmonicsPrefix)\(shIndex)" ]) {
+                    individualSphericalHarmonicsPropertyIndices.append(propertyIndex)
+                    shIndex += 1
                 }
+
                 // Spherical harmonics come in RGB triplets, so count must be divisible by 3
                 // Truncate to nearest multiple of 3 to prevent out-of-bounds access
                 let validCount = (individualSphericalHarmonicsPropertyIndices.count / 3) * 3

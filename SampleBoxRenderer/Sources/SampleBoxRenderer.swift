@@ -179,14 +179,16 @@ public class SampleBoxRenderer {
 
         renderEncoder.label = "Primary Render Encoder"
 
-        renderEncoder.setViewports(viewports.map(\.viewport))
+        let clampedViewportCount = min(viewports.count, maxViewCount)
+        let activeViewports = Array(viewports.prefix(clampedViewportCount))
+        renderEncoder.setViewports(activeViewports.map(\.viewport))
 
-        if viewports.count > 1 {
-            var viewMappings = (0..<viewports.count).map {
+        if clampedViewportCount > 1 {
+            var viewMappings = (0..<clampedViewportCount).map {
                 MTLVertexAmplificationViewMapping(viewportArrayIndexOffset: UInt32($0),
                                                   renderTargetArrayIndexOffset: UInt32($0))
             }
-            renderEncoder.setVertexAmplificationCount(viewports.count, viewMappings: &viewMappings)
+            renderEncoder.setVertexAmplificationCount(clampedViewportCount, viewMappings: &viewMappings)
         }
 
         return renderEncoder

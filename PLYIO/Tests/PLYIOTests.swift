@@ -97,6 +97,23 @@ final class PLYIOTests: XCTestCase {
         try testRead(binaryURL)
     }
 
+    func testReadASCIICRLF() throws {
+        let originalData = try Data(contentsOf: asciiURL)
+        guard let originalString = String(data: originalData, encoding: .utf8) else {
+            XCTFail("Unable to decode ASCII test PLY as UTF-8")
+            return
+        }
+
+        let crlfData = Data(originalString.replacingOccurrences(of: "\n", with: "\r\n").utf8)
+        let reader = PLYReader(InputStream(data: crlfData))
+        let content = ContentCounter()
+        reader.read(to: content)
+
+        XCTAssertTrue(content.didFinish)
+        XCTAssertFalse(content.didFail)
+        XCTAssertNotNil(content.header)
+    }
+
     func testASCIIBinaryEqual() throws {
         try testEqual(asciiURL, binaryURL)
     }

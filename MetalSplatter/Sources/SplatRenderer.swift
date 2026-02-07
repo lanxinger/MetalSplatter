@@ -805,36 +805,38 @@ public class SplatRenderer: @unchecked Sendable {
     // Deferred buffer release - wait for GPU to finish before releasing
     private var pendingReleaseBuffers: [MetalBuffer<Int32>] = []
     private var pendingReleaseLock = os_unfair_lock()
-    // Max pending buffers before force-release (prevents memory exhaustion if rendering is paused)
+    // Warn when pending releases build up (helps detect long GPU stalls)
     private static let maxPendingReleaseBuffers = 16
 
     /// Queue a buffer for deferred release (call when swapping sorted indices)
     private func deferredBufferRelease(_ buffer: MetalBuffer<Int32>) {
         os_unfair_lock_lock(&pendingReleaseLock)
-
-        // If we've accumulated too many pending buffers (e.g., rendering paused),
-        // force-release the oldest ones to prevent memory exhaustion
-        while pendingReleaseBuffers.count >= Self.maxPendingReleaseBuffers {
-            let oldBuffer = pendingReleaseBuffers.removeFirst()
-            // Release without lock to avoid holding lock during pool operations
-            os_unfair_lock_unlock(&pendingReleaseLock)
-            sortIndexBufferPool.release(oldBuffer)
-            os_unfair_lock_lock(&pendingReleaseLock)
+        if pendingReleaseBuffers.count >= Self.maxPendingReleaseBuffers {
+            Self.log.warning("Pending sorted-index releases reached \(self.pendingReleaseBuffers.count + 1); waiting for GPU completion")
         }
-
         pendingReleaseBuffers.append(buffer)
         os_unfair_lock_unlock(&pendingReleaseLock)
     }
 
-    /// Release buffers that are no longer in use by GPU (call at frame start)
-    private func releasePendingBuffers() {
+    /// Drain any queued buffers that need release once GPU work completes.
+    private func drainPendingReleaseBuffers() -> [MetalBuffer<Int32>] {
         os_unfair_lock_lock(&pendingReleaseLock)
         let toRelease = pendingReleaseBuffers
         pendingReleaseBuffers.removeAll()
         os_unfair_lock_unlock(&pendingReleaseLock)
+        return toRelease
+    }
 
-        for buffer in toRelease {
-            sortIndexBufferPool.release(buffer)
+    /// Schedule pending sorted-index buffer releases on command buffer completion.
+    private func schedulePendingBufferRelease(on commandBuffer: MTLCommandBuffer) {
+        let toRelease = drainPendingReleaseBuffers()
+        guard !toRelease.isEmpty else { return }
+
+        commandBuffer.addCompletedHandler { [weak self] _ in
+            guard let self else { return }
+            for buffer in toRelease {
+                self.sortIndexBufferPool.release(buffer)
+            }
         }
     }
 
@@ -2380,9 +2382,6 @@ public class SplatRenderer: @unchecked Sendable {
         cameraWorldPosition = cameraPositionsTemp.mean ?? .zero
         cameraWorldForward = cameraForwardsTemp.mean?.normalized ?? .init(x: 0, y: 0, z: -1)
 
-        // Release any buffers that were pending from previous frames
-        releasePendingBuffers()
-
         if !isSorting && shouldResortForCurrentCamera() {
             resort()
         }
@@ -2474,6 +2473,7 @@ public class SplatRenderer: @unchecked Sendable {
         // Apply any pending color updates before GPU work begins.
         // This prevents CPU/GPU data races on the shared splatBuffer.
         applyPendingColorUpdates()
+        schedulePendingBufferRelease(on: commandBuffer)
 
         let splatCount = splatBuffer.count
         guard splatBuffer.count != 0 else { return }
@@ -2897,9 +2897,8 @@ public class SplatRenderer: @unchecked Sendable {
             // Swap buffers atomically - rendering continues with old buffer
             // until this completes, then switches to new buffer
             if let oldBuffer = self.swapSortedIndicesBuffer(newBuffer: indexOutputBuffer) {
-                // IMPORTANT: Defer release until next frame to avoid use-after-free.
-                // The old buffer may still be referenced by in-flight render command buffers.
-                // releasePendingBuffers() is called at the start of the next render.
+                // IMPORTANT: Defer release until a later render command buffer completes.
+                // The old buffer may still be referenced by in-flight GPU work.
                 self.deferredBufferRelease(oldBuffer)
             }
 

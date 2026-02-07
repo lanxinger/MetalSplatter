@@ -38,8 +38,8 @@ public class PLYReader {
     }
 
     enum Constants {
-        static let headerStartToken = "\(PLYHeader.Keyword.ply.rawValue)\n".data(using: .utf8)!
-        static let headerEndToken = "\(PLYHeader.Keyword.endHeader.rawValue)\n".data(using: .utf8)!
+        static let headerStartKeyword = "\(PLYHeader.Keyword.ply.rawValue)".data(using: .utf8)!
+        static let headerEndKeyword = "\(PLYHeader.Keyword.endHeader.rawValue)".data(using: .utf8)!
         // Hold up to 16k of data at once before reclaiming. Higher numbers will use more data, but lower numbers will result in more frequent, somewhat expensive "move bytes" operations.
         static let bodySizeForReclaim = 16*1024
         // Maximum header size to prevent memory exhaustion from malicious files (1 MB is very generous)
@@ -146,12 +146,19 @@ public class PLYReader {
                 case .unstarted:
                     headerData.append(buffer[bufferIndex])
                     bufferIndex += 1
-                    if headerData.count == Constants.headerStartToken.count {
-                        if headerData == Constants.headerStartToken {
+
+                    // Check header size limit to prevent memory exhaustion
+                    if headerData.count >= Constants.maxHeaderSize {
+                        delegate.didFailReading(withError: Error.headerTooLarge)
+                        return
+                    }
+
+                    if let line = Self.latestCompletedHeaderLine(in: headerData) {
+                        if line.elementsEqual(Constants.headerStartKeyword) {
                             // Found header start token. Continue to read actual header
                             phase = .header
                         } else {
-                            // Beginning of stream didn't match headerStartToken; fail
+                            // Beginning of stream didn't match header start keyword; fail
                             delegate.didFailReading(withError: Error.headerStartMissing)
                             return
                         }
@@ -164,7 +171,8 @@ public class PLYReader {
                     }
                     headerData.append(buffer[bufferIndex])
                     bufferIndex += 1
-                    if headerData.hasSuffix(Constants.headerEndToken) {
+                    if let line = Self.latestCompletedHeaderLine(in: headerData),
+                       line.elementsEqual(Constants.headerEndKeyword) {
                         do {
                             let header = try PLYHeader.decodeASCII(from: headerData)
                             self.header = header
@@ -196,6 +204,23 @@ public class PLYReader {
                 }
             }
         }
+    }
+
+    /// Returns the most recently completed header line, excluding trailing newline and optional carriage return.
+    /// Only returns a line when `data` ends with `\n`.
+    private static func latestCompletedHeaderLine(in data: Data) -> Data.SubSequence? {
+        guard !data.isEmpty, data.last == Constants.lf else { return nil }
+
+        let lineFeedIndex = data.index(before: data.endIndex)
+        let contentSearchEnd = lineFeedIndex
+        let lineStart = data[..<contentSearchEnd].lastIndex(of: Constants.lf).map { data.index(after: $0) } ?? data.startIndex
+
+        var lineEnd = contentSearchEnd
+        if lineEnd > lineStart && data[data.index(before: lineEnd)] == Constants.cr {
+            lineEnd = data.index(before: lineEnd)
+        }
+
+        return data[lineStart..<lineEnd]
     }
 
     private var isComplete: Bool {
