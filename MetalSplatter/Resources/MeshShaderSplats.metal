@@ -167,25 +167,29 @@ void splatObjectShader(
     
     if (isValid) {
         uint actualSplatIndex = uint(sortedIndices[globalSortedIndex]);
-        Splat splat = splatArray[actualSplatIndex];
-        
-        float3 splatPos = float3(splat.position);
-        viewPos = uniforms.viewMatrix[0].xyz * splatPos.x +
-                  uniforms.viewMatrix[1].xyz * splatPos.y +
-                  uniforms.viewMatrix[2].xyz * splatPos.z +
-                  uniforms.viewMatrix[3].xyz;
-        
-        // Cull if behind camera
-        if (viewPos.z < 0.0f) {
-            float4 projectedCenter = uniforms.projectionMatrix * float4(viewPos, 1.0f);
-            // Guard against division by zero
-            float safeW = (abs(projectedCenter.w) < kDivisionEpsilon) ? copysign(kDivisionEpsilon, projectedCenter.w) : projectedCenter.w;
-            float3 ndc = projectedCenter.xyz / safeW;
+        if (actualSplatIndex < uniforms.splatCount) {
+            Splat splat = splatArray[actualSplatIndex];
 
-            // Frustum check with margin
-            if (ndc.z <= 1.0f && all(abs(ndc.xy) <= 1.5f)) {
-                isVisible = true;
+            float3 splatPos = float3(splat.position);
+            viewPos = uniforms.viewMatrix[0].xyz * splatPos.x +
+                      uniforms.viewMatrix[1].xyz * splatPos.y +
+                      uniforms.viewMatrix[2].xyz * splatPos.z +
+                      uniforms.viewMatrix[3].xyz;
+
+            // Cull if behind camera
+            if (viewPos.z < 0.0f) {
+                float4 projectedCenter = uniforms.projectionMatrix * float4(viewPos, 1.0f);
+                // Guard against division by zero
+                float safeW = (abs(projectedCenter.w) < kDivisionEpsilon) ? copysign(kDivisionEpsilon, projectedCenter.w) : projectedCenter.w;
+                float3 ndc = projectedCenter.xyz / safeW;
+
+                // Frustum check with margin
+                if (ndc.z <= 1.0f && all(abs(ndc.xy) <= 1.5f)) {
+                    isVisible = true;
+                }
             }
+        } else {
+            isValid = false;
         }
     }
     
@@ -279,7 +283,13 @@ void splatMeshShader(
 
     uint localIndex = payload.visibleLocalIndices[threadIndex];
     uint globalSortedIndex = payload.meshletStartIndex + localIndex;
+    if (globalSortedIndex >= uniforms.splatCount) {
+        return;
+    }
     uint actualSplatIndex = uint(sortedIndices[globalSortedIndex]);
+    if (actualSplatIndex >= uniforms.splatCount) {
+        return;
+    }
 
     Splat splat = splatArray[actualSplatIndex];
     float3 viewPos = payload.viewPositions[threadIndex];
@@ -422,7 +432,13 @@ void splatMeshShaderPrecomputed(
 
     uint localIndex = payload.visibleLocalIndices[threadIndex];
     uint globalSortedIndex = payload.meshletStartIndex + localIndex;
+    if (globalSortedIndex >= uniforms.splatCount) {
+        return;
+    }
     uint actualSplatIndex = uint(sortedIndices[globalSortedIndex]);
+    if (actualSplatIndex >= uniforms.splatCount) {
+        return;
+    }
 
     // Read precomputed data instead of computing covariance
     PrecomputedSplat pre = precomputed[actualSplatIndex];

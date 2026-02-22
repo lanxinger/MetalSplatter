@@ -26,6 +26,17 @@ vertex FragmentIn singleStageSplatVertexShader(uint vertexID [[vertex_id]],
     // Use sorted index to access splat in depth-sorted order
     // sortedIndices maps logical draw order → actual splat index in buffer
     uint actualSplatID = uint(sortedIndices[logicalSplatID]);
+    // Defensive check for transient stale/corrupt sorted indices.
+    if (actualSplatID >= uniforms.splatCount) {
+        FragmentIn out;
+        out.position = float4(1, 1, 0, 1);
+        out.relativePosition = half2(0);
+        out.color = half4(0);
+        out.lodBand = 0;
+        out.debugFlags = 0;
+        out.splatID = 0;
+        return out;
+    }
     Splat splat = splatArray[actualSplatID];
 
     // Override color with packed buffer if enabled (via function constant)
