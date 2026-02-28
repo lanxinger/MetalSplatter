@@ -160,6 +160,6 @@ kernel void computeSplatDistancesSimple(uint index [[thread_position_in_grid]],
         distances[index] = distanceSquared;
     } else {
         // Project onto forward vector
-        distances[index] = dot(splatPos, cameraForward);
+        distances[index] = dot(splatPos - cameraPosition, cameraForward);
     }
 }

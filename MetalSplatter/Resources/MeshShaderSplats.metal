@@ -210,6 +210,14 @@ void splatObjectShader(
     // (Max 4 SIMD-groups if SIMD width is 16 on some devices)
     threadgroup uint simdGroupCounts[4];
     threadgroup uint simdGroupOffsets[4];
+
+    // Initialize shared arrays to avoid reading stale threadgroup memory
+    // when fewer than 4 SIMD-groups are active on a device.
+    if (threadIndex < 4) {
+        simdGroupCounts[threadIndex] = 0;
+        simdGroupOffsets[threadIndex] = 0;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
     
     // First lane of each SIMD-group writes its count
     if (simdLaneId == 0) {

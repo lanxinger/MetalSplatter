@@ -89,6 +89,26 @@ extension SplatRenderer {
     }
     
     // MARK: - Individual Metal 4.0 Rendering Paths
+
+    @available(iOS 26.0, macOS 26.0, tvOS 26.0, visionOS 26.0, *)
+    private func cachedMetal4ComputePipeline(functionName: String) -> MTLComputePipelineState? {
+        metal4PipelineCacheLock.lock()
+        if let cached = metal4ComputePipelineCache[functionName] {
+            metal4PipelineCacheLock.unlock()
+            return cached
+        }
+        metal4PipelineCacheLock.unlock()
+
+        guard let function = library.makeFunction(name: functionName),
+              let pipelineState = try? device.makeComputePipelineState(function: function) else {
+            return nil
+        }
+
+        metal4PipelineCacheLock.lock()
+        metal4ComputePipelineCache[functionName] = pipelineState
+        metal4PipelineCacheLock.unlock()
+        return pipelineState
+    }
     
     /// Use Metal 4.0 SIMD-group operations for splat transformation
     /// Uses batchTransformPositionsSIMD kernel from Metal4TensorOperations.metal
@@ -99,9 +119,8 @@ extension SplatRenderer {
         uniformsBuffer: MTLBuffer,
         splatCount: Int
     ) {
-        // Use actual compute kernel, not vertex shader
-        guard let function = library.makeFunction(name: "batchTransformPositionsSIMD"),
-              let pipelineState = try? device.makeComputePipelineState(function: function) else {
+        // Cache the pipeline so we don't compile during render.
+        guard let pipelineState = cachedMetal4ComputePipeline(functionName: "batchTransformPositionsSIMD") else {
             Self.log.warning("Metal 4.0: SIMD-group compute pipeline not available (batchTransformPositionsSIMD)")
             return
         }
@@ -135,10 +154,6 @@ extension SplatRenderer {
         }
 
         var count = UInt32(splatCount)
-        guard let countBuffer = device.makeBuffer(bytes: &count, length: MemoryLayout<UInt32>.stride, options: .storageModeShared) else {
-            Self.log.error("Metal 4.0: Failed to create count buffer")
-            return
-        }
 
         encoder.setComputePipelineState(pipelineState)
         encoder.setBuffer(splatBuffer, offset: 0, index: 0)
@@ -146,7 +161,7 @@ extension SplatRenderer {
         encoder.setBuffer(outputs.clipPositions, offset: 0, index: 2)
         encoder.setBuffer(outputs.depths, offset: 0, index: 3)
         encoder.setBuffer(uniformsBuffer, offset: uniformBufferOffset, index: 4)
-        encoder.setBuffer(countBuffer, offset: 0, index: 5)
+        encoder.setBytes(&count, length: MemoryLayout<UInt32>.stride, index: 5)
 
         // Each thread processes 4 splats
         let splatsPerThread = 4
@@ -171,9 +186,8 @@ extension SplatRenderer {
         uniformsBuffer: MTLBuffer,
         splatCount: Int
     ) {
-        // Use actual kernel name from Metal4TensorOperations.metal
-        guard let function = library.makeFunction(name: "batchPrecomputeSplats"),
-              let pipelineState = try? device.makeComputePipelineState(function: function) else {
+        // Cache the pipeline so we don't compile during render.
+        guard let pipelineState = cachedMetal4ComputePipeline(functionName: "batchPrecomputeSplats") else {
             Self.log.warning("Metal 4.0: Batch precompute pipeline not available (batchPrecomputeSplats)")
             return
         }
@@ -193,16 +207,12 @@ extension SplatRenderer {
         }
 
         var count = UInt32(splatCount)
-        guard let countBuffer = device.makeBuffer(bytes: &count, length: MemoryLayout<UInt32>.stride, options: .storageModeShared) else {
-            Self.log.error("Metal 4.0: Failed to create count buffer")
-            return
-        }
 
         encoder.setComputePipelineState(pipelineState)
         encoder.setBuffer(splatBuffer, offset: 0, index: 0)
         encoder.setBuffer(precomputedBuffer, offset: 0, index: 1)
         encoder.setBuffer(uniformsBuffer, offset: uniformBufferOffset, index: 2)
-        encoder.setBuffer(countBuffer, offset: 0, index: 3)
+        encoder.setBytes(&count, length: MemoryLayout<UInt32>.stride, index: 3)
 
         // batchPrecomputeSplats uses max_total_threads_per_threadgroup(256)
         let threadsPerThreadgroup = MTLSize(width: 256, height: 1, depth: 1)

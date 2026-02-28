@@ -121,6 +121,17 @@ vertex FragmentIn fastSHSplatVertexShader(uint vertexID [[vertex_id]],
 
     // Use sorted index to access splat in depth-sorted order
     uint actualSplatID = uint(sortedIndices[logicalSplatID]);
+    // Defensive guard for transient stale/corrupt sorted indices
+    if (actualSplatID >= uniforms.splatCount) {
+        FragmentIn out;
+        out.position = float4(1, 1, 0, 1);
+        out.relativePosition = half2(0);
+        out.color = half4(0);
+        out.lodBand = 0;
+        out.debugFlags = 0;
+        out.splatID = 0;
+        return out;
+    }
     SplatSH splatSH = splatArray[actualSplatID];
     // Evaluate in Gaussian local frame
     Splat splat = evaluateSplatWithSH(splatSH, uniforms, shPalette, params);
@@ -159,6 +170,17 @@ vertex FragmentIn textureSHSplatVertexShader(uint vertexID [[vertex_id]],
 
     // Use sorted index to access splat in depth-sorted order
     uint actualSplatID = uint(sortedIndices[logicalSplatID]);
+    // Defensive guard for transient stale/corrupt sorted indices
+    if (actualSplatID >= uniforms.splatCount) {
+        FragmentIn out;
+        out.position = float4(1, 1, 0, 1);
+        out.relativePosition = half2(0);
+        out.color = half4(0);
+        out.lodBand = 0;
+        out.debugFlags = 0;
+        out.splatID = 0;
+        return out;
+    }
     SplatSH splatSH = splatArray[actualSplatID];
     Splat splat = evaluateSplatWithSH(splatSH, uniforms, shPalette, params);
     return splatVertex(splat, uniforms, vertexID % 4, actualSplatID);

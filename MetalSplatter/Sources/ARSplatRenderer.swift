@@ -865,16 +865,12 @@ public class ARSplatRenderer: NSObject {
         guard let pipeline = adaptiveQualityPipeline,
               let modeBuffer = renderModeBuffer else { return }
 
-        // Create confidence buffer
         var confidence = trackingConfidence
-        guard let confidenceBuffer = device.makeBuffer(bytes: &confidence, length: MemoryLayout<Float>.stride, options: .storageModeShared) else {
-            return
-        }
 
         // Dispatch adaptive quality compute kernel
         guard let computeEncoder = commandBuffer.makeComputeCommandEncoder() else { return }
         computeEncoder.setComputePipelineState(pipeline)
-        computeEncoder.setBuffer(confidenceBuffer, offset: 0, index: 0)
+        computeEncoder.setBytes(&confidence, length: MemoryLayout<Float>.stride, index: 0)
         computeEncoder.setBuffer(modeBuffer, offset: 0, index: 1)
 
         let threadgroupSize = MTLSize(width: 1, height: 1, depth: 1)

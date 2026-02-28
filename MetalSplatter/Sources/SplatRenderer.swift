@@ -164,6 +164,10 @@ public class SplatRenderer: @unchecked Sendable {
     }
 
     internal var metal4SIMDOutputs: Metal4SIMDOutputs?
+
+    // Cache Metal 4 compute pipelines to avoid runtime recompilation.
+    let metal4PipelineCacheLock = NSLock()
+    var metal4ComputePipelineCache: [String: MTLComputePipelineState] = [:]
     
     public struct ViewportDescriptor {
         public var viewport: MTLViewport
@@ -3205,7 +3209,7 @@ public class SplatRenderer: @unchecked Sendable {
                         for i in 0..<actualCount {
                             orderAndDepthTempSort[i].index = UInt32(i)
                             let splatPos = values[i].position.simd
-                            orderAndDepthTempSort[i].depth = dot(splatPos, cameraWorldForward)
+                            orderAndDepthTempSort[i].depth = dot(splatPos - cameraWorldPosition, cameraWorldForward)
                         }
                     }
                 }
