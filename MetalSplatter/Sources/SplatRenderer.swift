@@ -1222,6 +1222,68 @@ public class SplatRenderer: @unchecked Sendable {
         resetPipelineStates()
     }
 
+    /// Compiles the active render pipeline(s) before first draw to avoid first-frame JIT stalls.
+    public func prewarmRenderPipelines() {
+        do {
+            if useMultiStagePipeline {
+                try buildMultiStagePipelineStatesIfNeeded()
+            } else if useDitheredTransparency {
+                try buildDitheredPipelineStatesIfNeeded()
+            } else {
+                try buildSingleStagePipelineStatesIfNeeded()
+            }
+
+            if meshShaderEnabled && meshShaderPipelineState == nil {
+                setupMeshShaders()
+            }
+        } catch {
+            Self.log.warning("Pipeline prewarm failed: \(error.localizedDescription)")
+        }
+    }
+
+    @available(iOS 26.0, macOS 26.0, tvOS 26.0, visionOS 26.0, *)
+    internal func updateMetal4ResidencyForFrame(commandBuffer: MTLCommandBuffer) {
+        guard let manager = metal4ArgumentBufferManager else { return }
+
+        do {
+            try manager.registerSplatBuffer(splatBuffer.buffer, at: 0)
+            try manager.registerUniformBuffer(dynamicUniformBuffers, at: 1)
+            manager.registerAdditionalBuffer(indexBuffer.buffer)
+
+            if let sortedIndices = sortedIndicesBuffer {
+                manager.registerAdditionalBuffer(sortedIndices.buffer)
+            }
+            if let packedColorBuffer {
+                manager.registerAdditionalBuffer(packedColorBuffer)
+            }
+            if let visibleIndicesBuffer {
+                manager.registerAdditionalBuffer(visibleIndicesBuffer)
+            }
+            if let visibleCountBuffer {
+                manager.registerAdditionalBuffer(visibleCountBuffer)
+            }
+            if let frustumCullDataBuffer {
+                manager.registerAdditionalBuffer(frustumCullDataBuffer)
+            }
+            if let indirectDrawArgsBuffer {
+                manager.registerAdditionalBuffer(indirectDrawArgsBuffer)
+            }
+            if let precomputedSplatBuffer {
+                manager.registerAdditionalBuffer(precomputedSplatBuffer)
+            }
+            if let boundsMinBuffer {
+                manager.registerAdditionalBuffer(boundsMinBuffer)
+            }
+            if let boundsMaxBuffer {
+                manager.registerAdditionalBuffer(boundsMaxBuffer)
+            }
+        } catch {
+            Self.log.warning("Metal 4 residency registration failed: \(error.localizedDescription)")
+        }
+
+        manager.makeResourcesResident(commandBuffer: commandBuffer)
+    }
+
     private func buildSingleStagePipelineStatesIfNeeded() throws {
         guard singleStagePipelineState == nil else { return }
 
@@ -2496,6 +2558,10 @@ public class SplatRenderer: @unchecked Sendable {
                 resetPipelineStates()
                 setupMeshShaders()
             }
+        }
+
+        if #available(iOS 26.0, macOS 26.0, tvOS 26.0, visionOS 26.0, *) {
+            updateMetal4ResidencyForFrame(commandBuffer: commandBuffer)
         }
 
         switchToNextDynamicBuffer()

@@ -176,6 +176,9 @@ class MetalKitSceneRenderer: NSObject, MTKViewDelegate {
                     Self.log.info("Metal 4 bindless resources not available on this platform (requires iOS 26+/macOS 26+)")
                 }
             }
+
+            // Prewarm active render pipelines before first draw to avoid early JIT stalls.
+            splat.prewarmRenderPipelines()
             
             // Configure Fast SH if using FastSHSplatRenderer
             if let fastRenderer = splat as? FastSHSplatRenderer {
@@ -394,11 +397,14 @@ class MetalKitSceneRenderer: NSObject, MTKViewDelegate {
     
     /// Enable or disable Metal 4 bindless rendering
     func setMetal4Bindless(_ enabled: Bool) {
+        let previousValue = useMetal4Bindless
         useMetal4Bindless = enabled
 
         // If we already have a renderer, try to initialize Metal 4
         if enabled, let splat = modelRenderer as? SplatRenderer {
             if #available(iOS 26.0, macOS 26.0, tvOS 26.0, visionOS 26.0, *) {
+                let alreadyInitialized = splat.metal4ArgumentBufferManager != nil
+                guard !alreadyInitialized || previousValue != enabled else { return }
                 do {
                     try splat.initializeMetal4Bindless()
                     Self.log.info("Enabled Metal 4 bindless resources for current model")
@@ -406,6 +412,9 @@ class MetalKitSceneRenderer: NSObject, MTKViewDelegate {
                     Self.log.warning("Failed to enable Metal 4 bindless: \(error.localizedDescription)")
                 }
             }
+        } else if previousValue == enabled {
+            // No state or renderer change; avoid redundant work/redraw.
+            return
         }
 
         // Request redraw

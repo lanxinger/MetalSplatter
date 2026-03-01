@@ -448,6 +448,7 @@ public class MetalBufferPool<T>: @unchecked Sendable {
                     do {
                         let descriptor = MTLResidencySetDescriptor()
                         residencySet = try device.makeResidencySet(descriptor: descriptor)
+                        (residencySet as? MTLResidencySet)?.requestResidency()
                         log.info("Metal 4.0: Residency tracking enabled")
                     } catch {
                         log.error("Metal 4.0: Failed to create residency set: \(error)")
@@ -477,9 +478,12 @@ public class MetalBufferPool<T>: @unchecked Sendable {
     /// Track buffer residency for Metal 4.0 optimization
     private func trackBufferResidency(_ buffer: MetalBuffer<T>) {
         if #available(iOS 26.0, macOS 26.0, tvOS 26.0, visionOS 26.0, *) {
-            if let _ = residencySet as? MTLResidencySet, configuration.useResidencyTracking {
-                // Add buffer to residency set for GPU memory tracking
-                // residencySet.addAllocation(buffer.buffer)
+            if let residencySet = residencySet as? MTLResidencySet, configuration.useResidencyTracking {
+                if !residencySet.containsAllocation(buffer.buffer) {
+                    residencySet.addAllocation(buffer.buffer)
+                    residencySet.commit()
+                }
+                residencySet.requestResidency()
                 log.debug("Metal 4.0: Tracking buffer residency for capacity \(buffer.capacity)")
             }
         }

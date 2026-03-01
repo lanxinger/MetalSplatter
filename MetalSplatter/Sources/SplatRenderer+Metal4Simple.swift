@@ -1,32 +1,26 @@
 import Foundation
 import Metal
+import ObjectiveC.runtime
 import os
 
 // MARK: - Metal 4 Bindless Resource Support for SplatRenderer
 
+private nonisolated(unsafe) var metal4ArgumentBufferManagerKey: UInt8 = 0
+
 extension SplatRenderer {
 
-    // MARK: - Private Properties
-
-    /// Lock protecting access to the Metal 4 argument buffer manager.
-    private static let metal4ManagerLock = NSLock()
-
-    /// Storage for the Metal 4 argument buffer manager (protected by metal4ManagerLock).
+    // MARK: - Private Storage
+    
     @available(iOS 26.0, macOS 26.0, tvOS 26.0, visionOS 26.0, *)
-    private static nonisolated(unsafe) var _metal4ArgumentBufferManagerStorage: Metal4ArgumentBufferManager?
-
-    /// Thread-safe accessor for the Metal 4 argument buffer manager.
-    @available(iOS 26.0, macOS 26.0, tvOS 26.0, visionOS 26.0, *)
-    private static var _metal4ArgumentBufferManager: Metal4ArgumentBufferManager? {
+    private var _metal4ArgumentBufferManager: Metal4ArgumentBufferManager? {
         get {
-            metal4ManagerLock.lock()
-            defer { metal4ManagerLock.unlock() }
-            return _metal4ArgumentBufferManagerStorage
+            objc_getAssociatedObject(self, &metal4ArgumentBufferManagerKey) as? Metal4ArgumentBufferManager
         }
         set {
-            metal4ManagerLock.lock()
-            _metal4ArgumentBufferManagerStorage = newValue
-            metal4ManagerLock.unlock()
+            objc_setAssociatedObject(self,
+                                     &metal4ArgumentBufferManagerKey,
+                                     newValue,
+                                     .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
         }
     }
     
@@ -45,34 +39,31 @@ extension SplatRenderer {
         guard isMetal4BindlessAvailable else {
             throw SplatRendererError.metalDeviceUnavailable
         }
-        
-        // Create real Metal4ArgumentBufferManager using genuine Metal APIs
-        Self._metal4ArgumentBufferManager = try Metal4ArgumentBufferManager(
-            device: device, 
-            maxSplatCount: max(splatCount, 1000) // Use current splat count or reasonable minimum
-        )
-        
-        // Register existing splat buffer with the argument buffer manager
-        try Self._metal4ArgumentBufferManager?.registerSplatBuffer(splatBuffer.buffer, at: 0)
-        
-        print("🚀 Metal 4 Bindless Resources Initialized")
-        print("   Device: \(device.name)")
-        print("   GPU Family: Apple 9+")
-        print("   Implementation: Real MTLArgumentEncoder")
-        print("   Expected Benefits:")
-        print("   • 50-80% CPU overhead reduction")
-        print("   • Bindless resource access via argument buffers")
-        print("   • Real MTLResidencySet memory management")
-        print("   • Enhanced parallel rendering")
-        
-        // Set a flag to indicate Metal 4 is active
-        UserDefaults.standard.set(true, forKey: "MetalSplatter.Metal4Active")
+
+        if _metal4ArgumentBufferManager == nil {
+            _metal4ArgumentBufferManager = try Metal4ArgumentBufferManager(
+                device: device,
+                maxSplatCount: max(splatCount, 1000)
+            )
+            Self.log.info("Metal 4 bindless manager initialized for renderer instance")
+        }
+
+        guard let manager = _metal4ArgumentBufferManager else {
+            throw Metal4Error.notInitialized
+        }
+
+        try manager.registerSplatBuffer(splatBuffer.buffer, at: 0)
+        try manager.registerUniformBuffer(dynamicUniformBuffers, at: 1)
+        manager.registerAdditionalBuffer(indexBuffer.buffer)
+        if let sortedIndicesBuffer {
+            manager.registerAdditionalBuffer(sortedIndicesBuffer.buffer)
+        }
     }
     
     /// Print Metal 4 statistics using real argument buffer manager data
     @available(iOS 26.0, macOS 26.0, tvOS 26.0, visionOS 26.0, *)
     public func printMetal4Statistics() {
-        let isActive = UserDefaults.standard.bool(forKey: "MetalSplatter.Metal4Active")
+        let isActive = _metal4ArgumentBufferManager != nil
         
         print("=== Metal 4 Bindless Status ===")
         print("Available: \(isMetal4BindlessAvailable)")
@@ -81,7 +72,7 @@ extension SplatRenderer {
         print("GPU Memory: \(device.recommendedMaxWorkingSetSize / 1024 / 1024)MB")
         
         // Print real argument buffer statistics if available
-        if let manager = Self._metal4ArgumentBufferManager {
+        if let manager = _metal4ArgumentBufferManager {
             let stats = manager.getStatistics()
             print("--- Real MTLArgumentEncoder Stats ---")
             print("Argument Buffer Size: \(stats.argumentBufferSize) bytes")
@@ -96,25 +87,25 @@ extension SplatRenderer {
     /// Make resources resident for command buffer using real Metal APIs
     @available(iOS 26.0, macOS 26.0, tvOS 26.0, visionOS 26.0, *)
     public func makeResourcesResident(commandBuffer: MTLCommandBuffer) {
-        Self._metal4ArgumentBufferManager?.makeResourcesResident(commandBuffer: commandBuffer)
+        _metal4ArgumentBufferManager?.makeResourcesResident(commandBuffer: commandBuffer)
     }
     
     /// Bind argument buffer to render encoder using real Metal APIs
     @available(iOS 26.0, macOS 26.0, tvOS 26.0, visionOS 26.0, *)
     public func bindArgumentBuffer(to renderEncoder: MTLRenderCommandEncoder, index: Int = 0) {
-        Self._metal4ArgumentBufferManager?.bindArgumentBuffer(to: renderEncoder, index: index)
+        _metal4ArgumentBufferManager?.bindArgumentBuffer(to: renderEncoder, index: index)
     }
     
     /// Get access to the argument buffer manager for advanced operations
     @available(iOS 26.0, macOS 26.0, tvOS 26.0, visionOS 26.0, *)
     public var metal4ArgumentBufferManager: Metal4ArgumentBufferManager? {
-        return Self._metal4ArgumentBufferManager
+        return _metal4ArgumentBufferManager
     }
     
     /// Demonstrate Metal 4 performance benefits (conceptual)
     @available(iOS 26.0, macOS 26.0, tvOS 26.0, visionOS 26.0, *)
     public func measureMetal4PerformanceImpact() -> Metal4PerformanceMetrics {
-        let isActive = UserDefaults.standard.bool(forKey: "MetalSplatter.Metal4Active")
+        let isActive = _metal4ArgumentBufferManager != nil
         
         // Simulated performance improvements based on Metal 4 documentation
         let metrics = Metal4PerformanceMetrics(

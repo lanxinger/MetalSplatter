@@ -376,6 +376,9 @@ extension FastSHSplatRenderer {
                                  renderTargetArrayLength: Int,
                                  commandBuffer: MTLCommandBuffer,
                                  pipelineState: MTLRenderPipelineState) throws {
+        if #available(iOS 26.0, macOS 26.0, tvOS 26.0, visionOS 26.0, *) {
+            updateMetal4ResidencyForFrame(commandBuffer: commandBuffer)
+        }
 
         // Create render pass descriptor
         let renderPassDescriptor = MTLRenderPassDescriptor()

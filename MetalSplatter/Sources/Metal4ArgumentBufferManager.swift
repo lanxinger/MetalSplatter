@@ -25,6 +25,9 @@ public class Metal4ArgumentBufferManager {
     // Resource management
     private var splatBuffers: [MTLBuffer] = []
     private var uniformBuffers: [MTLBuffer] = []
+    private var trackedAllocations: Set<ObjectIdentifier> = []
+    private var queuesWithAttachedResidencySet: Set<ObjectIdentifier> = []
+    private let lock = NSLock()
     
     // MARK: - Initialization
     
@@ -73,11 +76,20 @@ public class Metal4ArgumentBufferManager {
     }
     
     private func setupResidencySet() throws {
-        // Note: MTLResidencySet APIs may be future Metal 4 APIs not yet available
-        // For iOS 26.0+ Beta, we'll use placeholder implementation
-        // In production, this would create real residency sets for memory management
-        
-        Self.log.info("✅ Metal4 residency management initialized (placeholder for iOS 26.0+)")
+        do {
+            let descriptor = MTLResidencySetDescriptor()
+            descriptor.label = "MetalSplatter Residency Set"
+            descriptor.initialCapacity = max(8, maxSplatCount / 4)
+
+            let set = try device.makeResidencySet(descriptor: descriptor)
+            set.commit()
+            set.requestResidency()
+            residencySet = set
+
+            Self.log.info("✅ Metal4 residency management initialized")
+        } catch {
+            throw Metal4Error.residencySetCreationFailed
+        }
     }
     
     // MARK: - Resource Management
@@ -88,24 +100,72 @@ public class Metal4ArgumentBufferManager {
             throw Metal4Error.notInitialized
         }
         
+        lock.lock()
+        defer { lock.unlock() }
+
         // Use real Metal API to encode buffer into argument buffer
         encoder.setArgumentBuffer(argBuffer, offset: 0)
         encoder.setBuffer(buffer, offset: 0, index: index)
-        
-        // Add to residency set using real Metal API
-        // Note: MTLResidencySet.addResource may be future API, using placeholder for iOS 26.0+
-        // In current Metal, we would use makeResident/evict directly on resources
-        
-        splatBuffers.append(buffer)
+
+        if !splatBuffers.contains(where: { $0 === buffer }) {
+            splatBuffers.append(buffer)
+        }
+        registerAllocationIfNeeded(buffer)
+
         Self.log.debug("Registered splat buffer at index \(index) using real MTLArgumentEncoder")
+    }
+
+    public func registerUniformBuffer(_ buffer: MTLBuffer, at index: Int = 1) throws {
+        guard let encoder = argumentEncoder,
+              let argBuffer = argumentBuffer else {
+            throw Metal4Error.notInitialized
+        }
+
+        lock.lock()
+        defer { lock.unlock() }
+
+        encoder.setArgumentBuffer(argBuffer, offset: 0)
+        encoder.setBuffer(buffer, offset: 0, index: index)
+
+        if !uniformBuffers.contains(where: { $0 === buffer }) {
+            uniformBuffers.append(buffer)
+        }
+        registerAllocationIfNeeded(buffer)
+
+        Self.log.debug("Registered uniform buffer at index \(index)")
+    }
+
+    public func registerAdditionalBuffer(_ buffer: MTLBuffer) {
+        lock.lock()
+        defer { lock.unlock() }
+        registerAllocationIfNeeded(buffer)
+    }
+
+    private func registerAllocationIfNeeded(_ allocation: any MTLAllocation) {
+        guard let residencySet else { return }
+
+        let allocationID = ObjectIdentifier(allocation as AnyObject)
+        guard !trackedAllocations.contains(allocationID) else { return }
+
+        residencySet.addAllocation(allocation)
+        trackedAllocations.insert(allocationID)
+        residencySet.commit()
     }
     
     public func makeResourcesResident(commandBuffer: MTLCommandBuffer) {
-        // Note: MTLCommandBuffer.makeResourcesResident may be future Metal 4 API
-        // For iOS 26.0+ Beta, we'll use the current available APIs
-        // In production Metal 4, this would manage resource residency automatically
-        
-        Self.log.debug("Applied resource residency management (placeholder for iOS 26.0+)")
+        lock.lock()
+        defer { lock.unlock() }
+
+        guard let residencySet else { return }
+
+        let queue = commandBuffer.commandQueue
+        let queueID = ObjectIdentifier(queue)
+        if !queuesWithAttachedResidencySet.contains(queueID) {
+            queue.addResidencySet(residencySet)
+            queuesWithAttachedResidencySet.insert(queueID)
+        }
+
+        residencySet.requestResidency()
     }
     
     // MARK: - Render Pass Integration
@@ -126,6 +186,9 @@ public class Metal4ArgumentBufferManager {
     // MARK: - Statistics
     
     public func getStatistics() -> ArgumentBufferStatistics {
+        lock.lock()
+        defer { lock.unlock() }
+
         let bufferCount = splatBuffers.count + uniformBuffers.count
         let totalMemory = splatBuffers.reduce(0) { $0 + $1.length } + 
                          uniformBuffers.reduce(0) { $0 + $1.length }
@@ -134,7 +197,7 @@ public class Metal4ArgumentBufferManager {
             argumentBufferSize: argumentBuffer?.length ?? 0,
             resourceCount: bufferCount,
             totalResourceMemoryMB: Float(totalMemory) / (1024 * 1024),
-            residencySetSize: splatBuffers.count
+            residencySetSize: residencySet?.allocationCount ?? 0
         )
     }
 }
