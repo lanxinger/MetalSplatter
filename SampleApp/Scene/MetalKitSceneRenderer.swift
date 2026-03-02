@@ -3,6 +3,9 @@
 @preconcurrency import Metal
 @preconcurrency import MetalKit
 @preconcurrency import MetalSplatter
+#if os(iOS) && canImport(MetalFX)
+import MetalFX
+#endif
 import os
 import SampleBoxRenderer
 import simd
@@ -57,6 +60,13 @@ class MetalKitSceneRenderer: NSObject, MTKViewDelegate {
     
     // Metal 4 Bindless Support
     var useMetal4Bindless: Bool = true // Default to enabled
+    
+    // Optional frame-time hook for UI-level adaptive quality controls.
+    var onFrameTimeUpdate: ((TimeInterval) -> Void)? {
+        didSet {
+            updateFrameTimeBridge()
+        }
+    }
 
     let inFlightSemaphore = DispatchSemaphore(value: Constants.maxSimultaneousRenders)
 
@@ -74,6 +84,19 @@ class MetalKitSceneRenderer: NSObject, MTKViewDelegate {
     private var autoFitEnabled: Bool = true
 
     var drawableSize: CGSize = .zero
+    
+#if os(iOS)
+    // iOS: render splats at a fixed internal resolution, then upscale with MetalFX spatial scaler.
+    private var internalRenderScale: CGFloat = 0.66
+    private var internalColorTexture: MTLTexture?
+    private var internalDepthTexture: MTLTexture?
+    private var upscaledOutputTexture: MTLTexture?
+    private var internalRenderSize: CGSize = .zero
+#if canImport(MetalFX)
+    private var metalFXScaler: (any MTLFXSpatialScaler)?
+    private var metalFXOutputSize: CGSize = .zero
+#endif
+#endif
 
     // Animation State for Reset
     private var isAnimatingReset: Bool = false
@@ -161,6 +184,8 @@ class MetalKitSceneRenderer: NSObject, MTKViewDelegate {
             }
 
             modelRenderer = splat
+            
+            updateFrameTimeBridge()
 
             // Initialize Metal 4 bindless resources if available and enabled
             if useMetal4Bindless {
@@ -227,10 +252,10 @@ class MetalKitSceneRenderer: NSObject, MTKViewDelegate {
         }
     }
 
-    private var viewport: ModelRendererViewportDescriptor {
+    private func makeViewport(for renderSize: CGSize) -> ModelRendererViewportDescriptor {
         // Guard against zero height to prevent NaN/inf in projection matrix
-        let safeAspectRatio: Float = drawableSize.height > 0
-            ? Float(drawableSize.width / drawableSize.height)
+        let safeAspectRatio: Float = renderSize.height > 0
+            ? Float(renderSize.width / renderSize.height)
             : 1.0
         let projectionMatrix = matrix_perspective_right_hand(fovyRadians: Float(Constants.fovy.radians) / zoom,
                                                              aspectRatio: safeAspectRatio,
@@ -282,12 +307,12 @@ class MetalKitSceneRenderer: NSObject, MTKViewDelegate {
             print("MetalKitSceneRenderer: model='\(modelDescription)', isSOGS=\(isSOGS), isSOGSv2=\(isSOGSv2), isSPZ=\(isSPZ), rotation=\(isSOGSv2 ? "180°X" : (isSOGS || isSPZ ? "none" : "180°Z"))")
         }
 
-        let viewport = MTLViewport(originX: 0, originY: 0, width: drawableSize.width, height: drawableSize.height, znear: 0, zfar: 1)
+        let viewport = MTLViewport(originX: 0, originY: 0, width: renderSize.width, height: renderSize.height, znear: 0, zfar: 1)
 
         return ModelRendererViewportDescriptor(viewport: viewport,
                                                projectionMatrix: projectionMatrix,
                                                viewMatrix: translationMatrix * panMatrix * rotationMatrix * verticalMatrix * rollMatrix * scaleMatrix * commonUpCalibration,
-                                               screenSize: SIMD2(x: Int(drawableSize.width), y: Int(drawableSize.height)))
+                                               screenSize: SIMD2(x: Int(renderSize.width), y: Int(renderSize.height)))
     }
 
     private func updateRotation() {
@@ -356,11 +381,40 @@ class MetalKitSceneRenderer: NSObject, MTKViewDelegate {
         }
         // --- End Animation Handling ---
 
+        #if os(iOS) && canImport(MetalFX)
+        if #available(iOS 16.0, *),
+           internalRenderScale < 0.999,
+           prepareMetalFXResourcesIfNeeded(view: view, drawable: drawable) {
+            let internalViewport = makeViewport(for: internalRenderSize)
+            renderTraditional(modelRenderer: modelRenderer,
+                              viewport: internalViewport,
+                              colorTexture: internalColorTexture,
+                              depthTexture: internalDepthTexture,
+                              commandBuffer: commandBuffer)
+            encodeMetalFXUpscaleIfPossible(drawable: drawable, commandBuffer: commandBuffer)
+        } else {
+            let outputViewport = makeViewport(for: CGSize(width: drawable.texture.width, height: drawable.texture.height))
+            renderTraditional(modelRenderer: modelRenderer,
+                              viewport: outputViewport,
+                              colorTexture: drawable.texture,
+                              depthTexture: view.depthStencilTexture,
+                              commandBuffer: commandBuffer)
+        }
+        #elseif os(iOS)
+        let outputViewport = makeViewport(for: CGSize(width: drawable.texture.width, height: drawable.texture.height))
         renderTraditional(modelRenderer: modelRenderer,
-                        viewport: viewport,
-                        view: view,
-                        drawable: drawable,
-                        commandBuffer: commandBuffer)
+                          viewport: outputViewport,
+                          colorTexture: drawable.texture,
+                          depthTexture: view.depthStencilTexture,
+                          commandBuffer: commandBuffer)
+        #else
+        let outputViewport = makeViewport(for: CGSize(width: drawable.texture.width, height: drawable.texture.height))
+        renderTraditional(modelRenderer: modelRenderer,
+                          viewport: outputViewport,
+                          colorTexture: drawable.texture,
+                          depthTexture: view.depthStencilTexture,
+                          commandBuffer: commandBuffer)
+        #endif
 
         commandBuffer.present(drawable)
 
@@ -371,15 +425,16 @@ class MetalKitSceneRenderer: NSObject, MTKViewDelegate {
     
     /// Traditional full-resolution rendering
     private func renderTraditional(modelRenderer: any ModelRenderer,
-                                 viewport: ModelRendererViewportDescriptor,
-                                 view: MTKView,
-                                 drawable: CAMetalDrawable,
-                                 commandBuffer: MTLCommandBuffer) {
+                                   viewport: ModelRendererViewportDescriptor,
+                                   colorTexture: MTLTexture?,
+                                   depthTexture: MTLTexture?,
+                                   commandBuffer: MTLCommandBuffer) {
+        guard let colorTexture else { return }
         do {
             try modelRenderer.render(viewports: [viewport],
-                                   colorTexture: view.multisampleColorTexture ?? drawable.texture,
-                                   colorStoreAction: view.multisampleColorTexture == nil ? .store : .multisampleResolve,
-                                   depthTexture: view.depthStencilTexture,
+                                   colorTexture: colorTexture,
+                                   colorStoreAction: .store,
+                                   depthTexture: depthTexture,
                                    depthStoreAction: .dontCare,
                                    rasterizationRateMap: nil,
                                    renderTargetArrayLength: 0,
@@ -388,6 +443,133 @@ class MetalKitSceneRenderer: NSObject, MTKViewDelegate {
             Self.log.error("Unable to render scene: \(error.localizedDescription)")
         }
     }
+
+    private func updateFrameTimeBridge() {
+        guard let splat = modelRenderer as? SplatRenderer else { return }
+        guard let onFrameTimeUpdate else {
+            splat.onFrameReady = nil
+            return
+        }
+
+        let loadID = currentLoadID
+        splat.onFrameReady = { [weak self] stats in
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                guard self.currentLoadID == loadID else { return }
+                onFrameTimeUpdate(stats.frameTime)
+            }
+        }
+    }
+
+#if os(iOS) && canImport(MetalFX)
+    @available(iOS 16.0, *)
+    private func prepareMetalFXResourcesIfNeeded(view: MTKView, drawable: CAMetalDrawable) -> Bool {
+        let outputWidth = drawable.texture.width
+        let outputHeight = drawable.texture.height
+        guard outputWidth > 0, outputHeight > 0 else { return false }
+        
+        let scale = max(0.55, min(internalRenderScale, 1.0))
+        let inputWidth = max(1, Int((CGFloat(outputWidth) * scale).rounded(.down)))
+        let inputHeight = max(1, Int((CGFloat(outputHeight) * scale).rounded(.down)))
+        let newInternalSize = CGSize(width: inputWidth, height: inputHeight)
+        let newOutputSize = CGSize(width: outputWidth, height: outputHeight)
+        
+        let needsTextureRebuild = internalColorTexture == nil
+            || Int(internalRenderSize.width) != inputWidth
+            || Int(internalRenderSize.height) != inputHeight
+            || internalColorTexture?.pixelFormat != view.colorPixelFormat
+            || internalDepthTexture?.pixelFormat != view.depthStencilPixelFormat
+        
+        if needsTextureRebuild {
+            let colorDescriptor = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: view.colorPixelFormat,
+                                                                           width: inputWidth,
+                                                                           height: inputHeight,
+                                                                           mipmapped: false)
+            colorDescriptor.storageMode = .private
+            colorDescriptor.usage = [.renderTarget, .shaderRead]
+            internalColorTexture = device.makeTexture(descriptor: colorDescriptor)
+            
+            if view.depthStencilPixelFormat != .invalid {
+                let depthDescriptor = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: view.depthStencilPixelFormat,
+                                                                               width: inputWidth,
+                                                                               height: inputHeight,
+                                                                               mipmapped: false)
+                depthDescriptor.storageMode = .private
+                depthDescriptor.usage = [.renderTarget]
+                internalDepthTexture = device.makeTexture(descriptor: depthDescriptor)
+            } else {
+                internalDepthTexture = nil
+            }
+            
+            internalRenderSize = newInternalSize
+        }
+        
+        let needsScalerRebuild = metalFXScaler == nil
+            || Int(metalFXOutputSize.width) != outputWidth
+            || Int(metalFXOutputSize.height) != outputHeight
+            || needsTextureRebuild
+        
+        if needsScalerRebuild {
+            let descriptor = MTLFXSpatialScalerDescriptor()
+            descriptor.colorTextureFormat = view.colorPixelFormat
+            descriptor.outputTextureFormat = drawable.texture.pixelFormat
+            descriptor.inputWidth = inputWidth
+            descriptor.inputHeight = inputHeight
+            descriptor.outputWidth = outputWidth
+            descriptor.outputHeight = outputHeight
+            descriptor.colorProcessingMode = .perceptual
+            metalFXScaler = descriptor.makeSpatialScaler(device: device)
+            metalFXOutputSize = newOutputSize
+        }
+        
+        let needsUpscaledOutputRebuild = upscaledOutputTexture == nil
+            || upscaledOutputTexture?.width != outputWidth
+            || upscaledOutputTexture?.height != outputHeight
+            || upscaledOutputTexture?.pixelFormat != drawable.texture.pixelFormat
+        
+        if needsUpscaledOutputRebuild {
+            let outputDescriptor = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: drawable.texture.pixelFormat,
+                                                                            width: outputWidth,
+                                                                            height: outputHeight,
+                                                                            mipmapped: false)
+            outputDescriptor.storageMode = .private
+            outputDescriptor.usage = [.renderTarget, .shaderWrite, .shaderRead]
+            upscaledOutputTexture = device.makeTexture(descriptor: outputDescriptor)
+        }
+        
+        return internalColorTexture != nil && metalFXScaler != nil && upscaledOutputTexture != nil
+    }
+    
+    @available(iOS 16.0, *)
+    private func encodeMetalFXUpscaleIfPossible(drawable: CAMetalDrawable, commandBuffer: MTLCommandBuffer) {
+        guard let scaler = metalFXScaler,
+              let inputTexture = internalColorTexture,
+              let outputTexture = upscaledOutputTexture else { return }
+        
+        scaler.colorTexture = inputTexture
+        scaler.inputContentWidth = inputTexture.width
+        scaler.inputContentHeight = inputTexture.height
+        scaler.outputTexture = outputTexture
+        scaler.encode(commandBuffer: commandBuffer)
+        
+        if let blit = commandBuffer.makeBlitCommandEncoder() {
+            blit.label = "MetalFX Upscale Copy"
+            let copySize = MTLSize(width: min(outputTexture.width, drawable.texture.width),
+                                   height: min(outputTexture.height, drawable.texture.height),
+                                   depth: 1)
+            blit.copy(from: outputTexture,
+                      sourceSlice: 0,
+                      sourceLevel: 0,
+                      sourceOrigin: MTLOrigin(x: 0, y: 0, z: 0),
+                      sourceSize: copySize,
+                      to: drawable.texture,
+                      destinationSlice: 0,
+                      destinationLevel: 0,
+                      destinationOrigin: MTLOrigin(x: 0, y: 0, z: 0))
+            blit.endEncoding()
+        }
+    }
+#endif
 
     func mtkView(_ view: MTKView, drawableSizeWillChange size: CGSize) {
         drawableSize = size
@@ -600,6 +782,24 @@ class MetalKitSceneRenderer: NSObject, MTKViewDelegate {
         metalKitView.setNeedsDisplay()
         #endif
     }
+
+#if os(iOS)
+    /// Set fixed internal render scale used by MetalFX spatial upscaling.
+    func setInternalRenderScale(_ scale: CGFloat) {
+        let clamped = max(0.55, min(scale, 1.0))
+        guard abs(clamped - internalRenderScale) > 0.001 else { return }
+        internalRenderScale = clamped
+        internalColorTexture = nil
+        internalDepthTexture = nil
+        upscaledOutputTexture = nil
+#if canImport(MetalFX)
+        metalFXScaler = nil
+        metalFXOutputSize = .zero
+#endif
+        internalRenderSize = .zero
+        metalKitView.setNeedsDisplay()
+    }
+#endif
 
     /// Set sorting mode: auto, radial (distance-based), or linear (view-direction-based)
     /// - auto: Automatically selects based on camera motion (rotation vs translation)

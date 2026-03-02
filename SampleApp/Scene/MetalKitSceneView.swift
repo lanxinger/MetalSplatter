@@ -25,6 +25,8 @@ struct MetalKitSceneView: View {
     @State private var ditheredTransparencyEnabled = false // Stochastic transparency - disabled by default
     @State private var metal4SortingEnabled = true // Metal 4 GPU radix sort - enabled by default
     @State private var packedColorsEnabled = true // snorm10a2 packed colors - enabled by default
+    @State private var renderScale: CGFloat = 0.66 // iOS fill-rate control: 66% scale ~= 44% pixels
+    @State private var adaptiveRenderScaleEnabled = false // Opt-in to avoid visible resolution pumping artifacts
 
     var body: some View {
         ZStack {
@@ -38,7 +40,9 @@ struct MetalKitSceneView: View {
                 meshShaderEnabled: $meshShaderEnabled,
                 ditheredTransparencyEnabled: $ditheredTransparencyEnabled,
                 metal4SortingEnabled: $metal4SortingEnabled,
-                packedColorsEnabled: $packedColorsEnabled
+                packedColorsEnabled: $packedColorsEnabled,
+                renderScale: $renderScale,
+                adaptiveRenderScaleEnabled: $adaptiveRenderScaleEnabled
             )
             .ignoresSafeArea()
             
@@ -258,6 +262,37 @@ struct MetalKitSceneView: View {
                                 }
                             }
 
+#if os(iOS)
+                            Divider()
+
+                            VStack(alignment: .leading, spacing: 6) {
+                                Toggle(isOn: $adaptiveRenderScaleEnabled) {
+                                    VStack(alignment: .leading, spacing: 2) {
+                                        Text("Adaptive Render Scale")
+                                            .font(.subheadline)
+                                        Text("Dynamically adjusts scale to hold frame time")
+                                            .font(.caption)
+                                            .foregroundColor(.secondary)
+                                    }
+                                }
+
+                                HStack {
+                                    Text("Render Scale")
+                                        .font(.subheadline)
+                                    Spacer()
+                                    Text("\(Int(renderScale * 100))%")
+                                        .font(.caption)
+                                        .foregroundColor(.secondary)
+                                }
+
+                                Slider(value: $renderScale, in: 0.55...1.0, step: 0.05)
+
+                                Text("Lower values reduce fragment cost and thermal throttling")
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+                            }
+#endif
+
                         }
                         .padding()
 #if os(iOS)
@@ -319,6 +354,8 @@ struct MetalKitRendererView: ViewRepresentable {
     @Binding var ditheredTransparencyEnabled: Bool
     @Binding var metal4SortingEnabled: Bool
     @Binding var packedColorsEnabled: Bool
+    @Binding var renderScale: CGFloat
+    @Binding var adaptiveRenderScaleEnabled: Bool
 
     class Coordinator: NSObject {
         var renderer: MetalKitSceneRenderer?
@@ -328,9 +365,23 @@ struct MetalKitRendererView: ViewRepresentable {
         var lastRotation: Angle = .zero
         var lastRollRotation: Float = 0.0
         var zoom: Float = 1.0
+        private var pendingLoadTask: Task<Void, Never>?
+        private var lastRequestedModel: ModelIdentifier?
+#if os(iOS)
+        private var frameTimeEMA: TimeInterval = 1.0 / 60.0
+        private var hasFrameTimeSample = false
+        private var lastAdaptiveScaleAdjustmentTime: TimeInterval = 0
+        private let targetFrameTime: TimeInterval = 1.0 / 60.0
+        private let minRenderScale: CGFloat = 0.55
+        private let maxRenderScale: CGFloat = 1.0
+#endif
         
         init(_ parent: MetalKitRendererView) {
             self.parent = parent
+        }
+        
+        deinit {
+            pendingLoadTask?.cancel()
         }
         
         @MainActor
@@ -344,7 +395,86 @@ struct MetalKitRendererView: ViewRepresentable {
             renderer?.setDitheredTransparency(parent.ditheredTransparencyEnabled)
             renderer?.setMetal4Sorting(parent.metal4SortingEnabled)
             renderer?.setPackedColors(parent.packedColorsEnabled)
+#if os(iOS)
+            renderer?.setInternalRenderScale(parent.renderScale)
+#endif
         }
+        
+        @MainActor
+        func loadModelIfNeeded() {
+            guard let renderer else { return }
+            guard lastRequestedModel != parent.modelIdentifier else { return }
+            
+            let requestedModel = parent.modelIdentifier
+            lastRequestedModel = requestedModel
+            pendingLoadTask?.cancel()
+            pendingLoadTask = Task { [weak renderer] in
+                do {
+                    try await renderer?.load(requestedModel)
+                } catch is CancellationError {
+                    // Newer model request superseded this load.
+                } catch {
+                    print("Error loading model: \(error.localizedDescription)")
+                }
+            }
+        }
+        
+#if os(iOS)
+        @MainActor
+        func configureAdaptiveRenderScale() {
+            guard parent.adaptiveRenderScaleEnabled else {
+                renderer?.onFrameTimeUpdate = nil
+                hasFrameTimeSample = false
+                return
+            }
+
+            renderer?.onFrameTimeUpdate = { [weak self] frameTime in
+                self?.handleFrameTimeSample(frameTime)
+            }
+        }
+        
+        @MainActor
+        private func handleFrameTimeSample(_ frameTime: TimeInterval) {
+            guard frameTime.isFinite, frameTime > 0 else { return }
+            
+            if !hasFrameTimeSample {
+                frameTimeEMA = frameTime
+                hasFrameTimeSample = true
+                return
+            }
+            
+            let emaAlpha: TimeInterval = 0.12
+            frameTimeEMA += (frameTime - frameTimeEMA) * emaAlpha
+            
+            let now = Date.timeIntervalSinceReferenceDate
+            let currentScale = max(minRenderScale, min(parent.renderScale, maxRenderScale))
+            let overloadThreshold = targetFrameTime * 1.08
+            let recoveryThreshold = targetFrameTime * 0.82
+            
+            var adjustedScale = currentScale
+            var cooldown: TimeInterval?
+            
+            if frameTimeEMA > overloadThreshold {
+                let pressure = min((frameTimeEMA / targetFrameTime) - 1.0, 1.0)
+                let step = CGFloat(0.03 + (0.06 * pressure))
+                adjustedScale = max(minRenderScale, currentScale - step)
+                cooldown = 0.35
+            } else if frameTimeEMA < recoveryThreshold {
+                let headroom = min((targetFrameTime - frameTimeEMA) / targetFrameTime, 1.0)
+                let step = CGFloat(0.01 + (0.02 * headroom))
+                adjustedScale = min(maxRenderScale, currentScale + step)
+                cooldown = 1.20
+            }
+            
+            guard let cooldown else { return }
+            guard now - lastAdaptiveScaleAdjustmentTime >= cooldown else { return }
+            adjustedScale = (adjustedScale * 20).rounded() / 20
+            guard abs(adjustedScale - currentScale) >= 0.01 else { return }
+            
+            lastAdaptiveScaleAdjustmentTime = now
+            parent.renderScale = adjustedScale
+        }
+#endif
     }
 
     func makeCoordinator() -> Coordinator {
@@ -377,6 +507,8 @@ struct MetalKitRendererView: ViewRepresentable {
             metalKitView.device = metalDevice
         }
 #if os(iOS)
+        // MetalFX upscaler can write to drawable textures; allow non-framebuffer access.
+        metalKitView.framebufferOnly = false
         applyPreferredFrameRate(to: metalKitView)
         DispatchQueue.main.async {
             self.applyPreferredFrameRate(to: metalKitView)
@@ -396,6 +528,10 @@ struct MetalKitRendererView: ViewRepresentable {
         renderer?.setDitheredTransparency(ditheredTransparencyEnabled)
         renderer?.setMetal4Sorting(metal4SortingEnabled)
         renderer?.setPackedColors(packedColorsEnabled)
+#if os(iOS)
+        renderer?.setInternalRenderScale(renderScale)
+        coordinator.configureAdaptiveRenderScale()
+#endif
 
         // --- Interactivity: Pan (rotation) and Pinch (zoom) ---
         #if os(iOS)
@@ -429,33 +565,23 @@ struct MetalKitRendererView: ViewRepresentable {
         metalKitView.addGestureRecognizer(rotationGesture)
         #endif
 
-        Task {
-            do {
-                try await renderer?.load(modelIdentifier)
-            } catch {
-                print("Error loading model: \(error.localizedDescription)")
-            }
-        }
+        coordinator.loadModelIfNeeded()
 
         return metalKitView
     }
 
     private func updateView(_ coordinator: Coordinator) {
-        guard let renderer = coordinator.renderer else { return }
+        guard coordinator.renderer != nil else { return }
         
         // Update coordinator's parent reference to get latest state
         coordinator.parent = self
         
         // Update settings when the view updates
         coordinator.updateSettings()
-        
-        Task {
-            do {
-                try await renderer.load(modelIdentifier)
-            } catch {
-                print("Error loading model: \(error.localizedDescription)")
-            }
-        }
+#if os(iOS)
+        coordinator.configureAdaptiveRenderScale()
+#endif
+        coordinator.loadModelIfNeeded()
     }
 
 #if os(iOS)
@@ -463,15 +589,20 @@ struct MetalKitRendererView: ViewRepresentable {
         struct LogState {
             static var didLog = false
         }
-        let desiredMax = 120
+        let desiredMax = 60
+        let targetFPS: Int
         if let screen = view.window?.windowScene?.screen {
-            view.preferredFramesPerSecond = min(screen.maximumFramesPerSecond, desiredMax)
+            targetFPS = min(screen.maximumFramesPerSecond, desiredMax)
             if !LogState.didLog {
                 LogState.didLog = true
-                print("MetalKitSceneView: screen max \(screen.maximumFramesPerSecond)fps, preferred \(view.preferredFramesPerSecond)fps")
+                print("MetalKitSceneView: screen max \(screen.maximumFramesPerSecond)fps, preferred \(targetFPS)fps")
             }
         } else {
-            view.preferredFramesPerSecond = desiredMax
+            targetFPS = desiredMax
+        }
+        
+        if view.preferredFramesPerSecond != targetFPS {
+            view.preferredFramesPerSecond = targetFPS
         }
     }
 #endif
