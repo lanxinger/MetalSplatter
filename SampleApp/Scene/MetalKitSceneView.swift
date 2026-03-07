@@ -408,12 +408,18 @@ struct MetalKitRendererView: ViewRepresentable {
             let requestedModel = parent.modelIdentifier
             lastRequestedModel = requestedModel
             pendingLoadTask?.cancel()
-            pendingLoadTask = Task { [weak renderer] in
+            pendingLoadTask = Task { [weak self, weak renderer] in
                 do {
                     try await renderer?.load(requestedModel)
                 } catch is CancellationError {
                     // Newer model request superseded this load.
                 } catch {
+                    await MainActor.run {
+                        guard let self else { return }
+                        if self.lastRequestedModel == requestedModel {
+                            self.lastRequestedModel = nil
+                        }
+                    }
                     print("Error loading model: \(error.localizedDescription)")
                 }
             }
