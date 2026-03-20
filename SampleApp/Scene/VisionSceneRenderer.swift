@@ -117,8 +117,14 @@ class VisionSceneRenderer {
                 try renderer.add(cachedModel.points)
                 splat = renderer
             }
+            // Apply mip splatting blur if detected from file metadata
+            if cachedModel.isMipSplatting {
+                splat.covarianceBlur = 0.1
+                Self.log.info("Applied mip splatting covariance blur (0.1)")
+            }
+
             modelRenderer = splat
-            
+
             // Initialize Metal 4 bindless resources if available and enabled
             if useMetal4Bindless {
                 if #available(visionOS 26.0, *) {

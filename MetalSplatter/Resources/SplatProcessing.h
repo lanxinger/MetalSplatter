@@ -14,7 +14,8 @@ float3 calcCovariance2D(float3 viewPos,
                         float focalX,
                         float focalY,
                         float tanHalfFovX,
-                        float tanHalfFovY);
+                        float tanHalfFovY,
+                        float covarianceBlur);
 
 void decomposeCovariance(float3 cov2D, thread float2 &v1, thread float2 &v2);
 

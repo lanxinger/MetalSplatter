@@ -185,6 +185,12 @@ class MetalKitSceneRenderer: NSObject, MTKViewDelegate {
                 }
             }.value
 
+            // Apply mip splatting blur if detected from PLY header
+            if cachedModel.isMipSplatting {
+                splat.covarianceBlur = 0.1
+                Self.log.info("Applied mip splatting covariance blur (0.1)")
+            }
+
             // Check again after renderer creation - another load may have started
             guard currentLoadID == loadID else {
                 Self.log.info("Model load cancelled after renderer creation - another load started")

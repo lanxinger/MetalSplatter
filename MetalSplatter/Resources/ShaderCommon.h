@@ -39,6 +39,7 @@ typedef struct
     uint indexedSplatCount;
     uint debugFlags;
     float3 lodThresholds;
+    float covarianceBlur;       // Low-pass filter for 2D covariance (0.3 default, 0.1 for mip splatting)
 } Uniforms;
 
 typedef struct

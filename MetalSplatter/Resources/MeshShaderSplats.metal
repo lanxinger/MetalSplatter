@@ -64,7 +64,8 @@ inline float3 meshCalcCovariance2D(float3 viewPos,
                                     packed_half3 cov3Db,
                                     float4x4 viewMatrix,
                                     float4x4 projectionMatrix,
-                                    uint2 screenSize) {
+                                    uint2 screenSize,
+                                    float covarianceBlur) {
     // Guard against division by zero
     float safeViewPosZ = (abs(viewPos.z) < kDivisionEpsilon) ? copysign(kDivisionEpsilon, viewPos.z) : viewPos.z;
     float invViewPosZ = 1.0f / safeViewPosZ;
@@ -97,8 +98,8 @@ inline float3 meshCalcCovariance2D(float3 viewPos,
     );
     float3x3 cov = T * Vrk * transpose(T);
 
-    cov[0][0] += 0.3f;
-    cov[1][1] += 0.3f;
+    cov[0][0] += covarianceBlur;
+    cov[1][1] += covarianceBlur;
     return float3(cov[0][0], cov[0][1], cov[1][1]);
 }
 
@@ -303,7 +304,8 @@ void splatMeshShader(
 
     // Compute 2D covariance ONCE per splat (key optimization vs vertex shader)
     float3 cov2D = meshCalcCovariance2D(viewPos, splat.covA, splat.covB,
-                                         uniforms.viewMatrix, uniforms.projectionMatrix, uniforms.screenSize);
+                                         uniforms.viewMatrix, uniforms.projectionMatrix, uniforms.screenSize,
+                                         uniforms.covarianceBlur);
 
     float2 axis1, axis2;
     meshDecomposeCovariance(cov2D, axis1, axis2);

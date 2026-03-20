@@ -10,7 +10,8 @@ float3 calcCovariance2D(float3 viewPos,
                         float focalX,
                         float focalY,
                         float tanHalfFovX,
-                        float tanHalfFovY) {
+                        float tanHalfFovY,
+                        float covarianceBlur) {
     // Guard against division by zero with epsilon
     float safeViewPosZ = (abs(viewPos.z) < kDivisionEpsilon) ? copysign(kDivisionEpsilon, viewPos.z) : viewPos.z;
     float invViewPosZ = fast::divide(1.0f, safeViewPosZ);
@@ -35,10 +36,10 @@ float3 calcCovariance2D(float3 viewPos,
     );
     float3x3 cov = T * Vrk * transpose(T);
 
-    // Apply low-pass filter: every Gaussian should be at least
-    // one pixel wide/high. Discard 3rd row and column.
-    cov[0][0] += 0.3;
-    cov[1][1] += 0.3;
+    // Apply low-pass filter: every Gaussian should be at least one pixel wide/high.
+    // Default 0.3 for standard 3DGS; 0.1 for Brush mip splatting trained models.
+    cov[0][0] += covarianceBlur;
+    cov[1][1] += covarianceBlur;
     return float3(cov[0][0], cov[0][1], cov[1][1]);
 }
 
@@ -138,7 +139,8 @@ FragmentIn splatVertex(Splat splat,
     float3 cov2D = calcCovariance2D(viewPosition3, covA, covB,
                                     uniforms.viewMatrix,
                                     uniforms.focalX, uniforms.focalY,
-                                    uniforms.tanHalfFovX, uniforms.tanHalfFovY);
+                                    uniforms.tanHalfFovX, uniforms.tanHalfFovY,
+                                    uniforms.covarianceBlur);
 
     float2 axis1;
     float2 axis2;

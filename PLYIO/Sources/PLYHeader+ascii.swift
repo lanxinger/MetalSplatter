@@ -48,7 +48,12 @@ extension PLYHeader {
                     throw ASCIIDecodeError.headerUnknownKeyword(keywordString)
                 }
                 switch keyword {
-                case .ply, .comment, .obj_info:
+                case .ply, .obj_info:
+                    return
+                case .comment:
+                    // Capture comment text (everything after "comment ")
+                    let text = String(headerLine.dropFirst("comment".count)).trimmingCharacters(in: .whitespaces)
+                    header?.comments.append(text)
                     return
                 case .format:
                     guard header == nil else {

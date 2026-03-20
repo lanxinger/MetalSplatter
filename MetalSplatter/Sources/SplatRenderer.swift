@@ -207,6 +207,7 @@ public class SplatRenderer: @unchecked Sendable {
         var indexedSplatCount: UInt32
         var debugFlags: UInt32
         var lodThresholds: SIMD3<Float>
+        var covarianceBlur: Float
     }
 
     // Keep in sync with Shaders.metal : UniformsArray
@@ -318,6 +319,11 @@ public class SplatRenderer: @unchecked Sendable {
         let thresholds = Constants.lodDistanceThresholds
         return SIMD3<Float>(thresholds[0], thresholds[1], thresholds[2])
     }()
+
+    /// Low-pass filter applied to the 2D covariance diagonal.
+    /// Default 0.3 for standard 3DGS. Set to 0.1 for Brush mip splatting trained models.
+    /// Automatically detected from PLY `comment SplatRenderMode mip` header.
+    public var covarianceBlur: Float = 0.3
 
     // MARK: - Morton Ordering
 
@@ -1993,9 +1999,10 @@ public class SplatRenderer: @unchecked Sendable {
             debugFlags: 0,
             lodThresholds: SIMD3<Float>(Constants.lodDistanceThresholds[0],
                                          Constants.lodDistanceThresholds[1],
-                                         Constants.lodDistanceThresholds[2])
+                                         Constants.lodDistanceThresholds[2]),
+            covarianceBlur: covarianceBlur
         )
-        
+
         var splatCountValue = UInt32(splatCount)
         
         guard let computeEncoder = commandBuffer.makeComputeCommandEncoder() else {
@@ -2318,7 +2325,8 @@ public class SplatRenderer: @unchecked Sendable {
                                     splatCount: splatCount,
                                     indexedSplatCount: indexedSplatCount,
                                     debugFlags: debugFlags,
-                                    lodThresholds: lodThresholds)
+                                    lodThresholds: lodThresholds,
+                                    covarianceBlur: covarianceBlur)
             self.uniforms.pointee.setUniforms(index: i, uniforms)
         }
         updateSortReferenceCamera(from: viewports)

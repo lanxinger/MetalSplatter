@@ -95,11 +95,13 @@ public struct PLYHeader: Equatable, Sendable {
     public var format: Format
     public var version: String
     public var elements: [Element]
+    public var comments: [String]
 
-    public init(format: Format, version: String, elements: [Element]) {
+    public init(format: Format, version: String, elements: [Element], comments: [String] = []) {
         self.format = format
         self.version = version
         self.elements = elements
+        self.comments = comments
     }
 
     public func index(forElementNamed name: String) -> Int? {
