@@ -159,7 +159,7 @@ mesh void splatMeshShader(
             screen_pos.xy += offsets[i] * screen_pos.w;
             
             vertex.position = screen_pos;
-            vertex.color = splat.color;
+            vertex.color = unpackSplatColor(splat.packedColor);
             vertex.uv = uvs[i];
             vertex.splat_id = splat_id;
             

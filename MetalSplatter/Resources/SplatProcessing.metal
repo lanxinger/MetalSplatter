@@ -207,7 +207,7 @@ FragmentIn splatVertex(Splat splat,
                           projectedCenter.z,
                           projectedCenter.w);
     out.relativePosition = kBoundsRadius * relativeCoordinates;
-    out.color = splat.color;
+    out.color = unpackSplatColor(splat.packedColor);
 
     if ((uniforms.debugFlags & DebugFlagLodTint) != 0) {
         float distance = length(viewPosition3);

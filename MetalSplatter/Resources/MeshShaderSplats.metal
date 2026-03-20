@@ -275,7 +275,6 @@ void splatMeshShader(
     constant Splat* splatArray [[buffer(BufferIndexSplat)]],
     constant UniformsArray& uniformsArray [[buffer(BufferIndexUniforms)]],
     constant int32_t* sortedIndices [[buffer(BufferIndexSortedIndices)]],
-    constant PackedColor* packedColors [[buffer(BufferIndexPackedColors)]],
     uint threadIndex [[thread_index_in_threadgroup]]
 ) {
     Uniforms uniforms = uniformsArray.uniforms[0];
@@ -319,9 +318,7 @@ void splatMeshShader(
     half2 scaledAxis1 = half2(axis1) * scaleFactor;
     half2 scaledAxis2 = half2(axis2) * scaleFactor;
 
-    // Pre-compute common vertex attributes
-    // Use packed colors if enabled (via function constant), otherwise use splat.color
-    half4 splatColor = getSplatColor(actualSplatIndex, splatArray, packedColors);
+    half4 splatColor = unpackSplatColor(splat.packedColor);
     uint debugFlags = uniforms.debugFlags;
     float projW = projectedCenter.w;
 
@@ -424,7 +421,6 @@ void splatMeshShaderPrecomputed(
     constant UniformsArray& uniformsArray [[buffer(BufferIndexUniforms)]],
     constant int32_t* sortedIndices [[buffer(BufferIndexSortedIndices)]],
     constant PrecomputedSplat* precomputed [[buffer(BufferIndexPrecomputed)]],
-    constant PackedColor* packedColors [[buffer(BufferIndexPackedColors)]],
     uint threadIndex [[thread_index_in_threadgroup]]
 ) {
     Uniforms uniforms = uniformsArray.uniforms[0];
@@ -461,8 +457,7 @@ void splatMeshShaderPrecomputed(
     float2 axis2 = pre.axis2;
     float4 projectedCenter = pre.clipPosition;
 
-    // Get color using packed buffer if enabled, otherwise from splat data
-    half4 splatColor = getSplatColor(actualSplatIndex, splatArray, packedColors);
+    half4 splatColor = unpackSplatColor(splatArray[actualSplatIndex].packedColor);
     uint debugFlags = uniforms.debugFlags;
     float projW = projectedCenter.w;
 

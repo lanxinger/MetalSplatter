@@ -7,23 +7,23 @@ import os
 /// Swift representation of the Metal Splat structure for profiling purposes
 struct Splat {
     var position: (Float, Float, Float)
-    var color: (Float16, Float16, Float16, Float16)
+    var packedColor: UInt32  // RGBA8 unorm
     var covA: (Float16, Float16, Float16)
     var covB: (Float16, Float16, Float16)
-    
+
     init() {
         position = (0, 0, 0)
-        color = (1, 1, 1, 1)
+        packedColor = 0xFFFFFFFF  // white, fully opaque
         covA = (0.1, 0, 0.1)
         covB = (0, 0.1, 0)
     }
-    
+
     init(position: (Float, Float, Float),
-         color: (Float16, Float16, Float16, Float16),
+         packedColor: UInt32,
          covA: (Float16, Float16, Float16),
          covB: (Float16, Float16, Float16)) {
         self.position = position
-        self.color = color
+        self.packedColor = packedColor
         self.covA = covA
         self.covB = covB
     }
@@ -235,7 +235,7 @@ public class GPUPerformanceProfiler {
             // Create splat with data format matching ShaderCommon.h
             let splat = Splat(
                 position: (position.x, position.y, position.z),
-                color: (1, 1, 1, 1),
+                packedColor: 0xFFFFFFFF,  // white, fully opaque
                 covA: (0.1, 0.0, 0.1),
                 covB: (0.0, 0.1, 0.0)
             )

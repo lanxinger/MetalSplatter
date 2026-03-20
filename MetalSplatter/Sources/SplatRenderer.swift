@@ -189,7 +189,6 @@ public class SplatRenderer: @unchecked Sendable {
         case splat          = 1
         case sortedIndices  = 2  // GPU-side sorted indices for indirect rendering
         case precomputed    = 3  // Precomputed splat data (Metal 4 TensorOps)
-        case packedColors   = 4  // Optional packed colors (snorm10a2)
     }
 
     // Keep in sync with Shaders.metal : Uniforms
@@ -252,19 +251,20 @@ public class SplatRenderer: @unchecked Sendable {
         var z: Float16
     }
 
-    struct PackedRGBHalf4 {
-        var r: Float16
-        var g: Float16
-        var b: Float16
-        var a: Float16
-    }
-
     // Keep in sync with Shaders.metal : Splat
     struct Splat {
         var position: MTLPackedFloat3
-        var color: PackedRGBHalf4
+        var packedColor: UInt32  // RGBA8 unorm
         var covA: PackedHalf3
         var covB: PackedHalf3
+    }
+
+    static func packRGBA8(_ r: Float, _ g: Float, _ b: Float, _ a: Float) -> UInt32 {
+        let rb = UInt32(max(0, min(255, (r * 255).rounded())))
+        let gb = UInt32(max(0, min(255, (g * 255).rounded())))
+        let bb = UInt32(max(0, min(255, (b * 255).rounded())))
+        let ab = UInt32(max(0, min(255, (a * 255).rounded())))
+        return rb | (gb << 8) | (bb << 16) | (ab << 24)
     }
 
     struct SplatIndexAndDepth {
@@ -721,25 +721,6 @@ public class SplatRenderer: @unchecked Sendable {
     /// Minimum splat count to use Metal 4 sorting (below this, counting sort is faster)
     public var metal4SortingThreshold: Int = 100_000
 
-    // snorm10a2 color packing for bandwidth optimization
-    // When enabled, colors are stored in 4 bytes instead of 8 bytes (50% reduction)
-    // Note: May cause visible precision loss with SH data - test before enabling
-    private var packedColorBuffer: MTLBuffer?
-
-    /// When true, uses snorm10a2 packed colors (4 bytes) instead of half4 (8 bytes).
-    /// This reduces memory bandwidth by 50% for color data but may cause
-    /// precision loss that's visible with spherical harmonics. Opt-in only.
-    /// Requires rebuilding splat buffer after changing this setting.
-    public var usePackedColors: Bool = false {
-        didSet {
-            if usePackedColors != oldValue {
-                rebuildPackedColorBufferIfNeeded()
-                // Rebuild pipeline states with updated function constants
-                resetPipelineStates()
-                setupMeshShaders()  // Rebuild mesh shader pipeline with new constants
-            }
-        }
-    }
 
     // MARK: - Thread-safe sort state accessors
 
@@ -1066,13 +1047,9 @@ public class SplatRenderer: @unchecked Sendable {
         }
         
         do {
-            // Set function constants for packed colors and 2DGS mode
+            // Set function constants for 2DGS mode
             let functionConstants = MTLFunctionConstantValues()
-            var usePackedColorsValue = usePackedColors
-            var hasPackedColorsBufferValue = packedColorBuffer != nil
             var use2DGSValue = use2DGSMode
-            functionConstants.setConstantValue(&usePackedColorsValue, type: .bool, index: 10)
-            functionConstants.setConstantValue(&hasPackedColorsBufferValue, type: .bool, index: 11)
             functionConstants.setConstantValue(&use2DGSValue, type: .bool, index: 12)
 
             // Try to load mesh shader functions with function constants
@@ -1253,9 +1230,6 @@ public class SplatRenderer: @unchecked Sendable {
             if let sortedIndices = sortedIndicesBuffer {
                 manager.registerAdditionalBuffer(sortedIndices.buffer)
             }
-            if let packedColorBuffer {
-                manager.registerAdditionalBuffer(packedColorBuffer)
-            }
             if let visibleIndicesBuffer {
                 manager.registerAdditionalBuffer(visibleIndicesBuffer)
             }
@@ -1310,13 +1284,9 @@ public class SplatRenderer: @unchecked Sendable {
 
         pipelineDescriptor.label = "SingleStagePipeline"
 
-        // Set function constants for packed colors and 2DGS mode
+        // Set function constants for 2DGS mode
         let functionConstants = MTLFunctionConstantValues()
-        var usePackedColorsValue = usePackedColors
-        var hasPackedColorsBufferValue = packedColorBuffer != nil
         var use2DGSValue = use2DGSMode
-        functionConstants.setConstantValue(&usePackedColorsValue, type: .bool, index: 10)
-        functionConstants.setConstantValue(&hasPackedColorsBufferValue, type: .bool, index: 11)
         functionConstants.setConstantValue(&use2DGSValue, type: .bool, index: 12)
 
         pipelineDescriptor.vertexFunction = try library.makeFunction(name: "singleStageSplatVertexShader", constantValues: functionConstants)
@@ -1369,13 +1339,9 @@ public class SplatRenderer: @unchecked Sendable {
 
         pipelineDescriptor.label = "DitheredTransparencyPipeline"
 
-        // Set function constants for packed colors and 2DGS mode
+        // Set function constants for 2DGS mode
         let functionConstants = MTLFunctionConstantValues()
-        var usePackedColorsValue = usePackedColors
-        var hasPackedColorsBufferValue = packedColorBuffer != nil
         var use2DGSValue = use2DGSMode
-        functionConstants.setConstantValue(&usePackedColorsValue, type: .bool, index: 10)
-        functionConstants.setConstantValue(&hasPackedColorsBufferValue, type: .bool, index: 11)
         functionConstants.setConstantValue(&use2DGSValue, type: .bool, index: 12)
 
         pipelineDescriptor.vertexFunction = try library.makeFunction(name: "singleStageSplatVertexShader", constantValues: functionConstants)
@@ -1430,13 +1396,9 @@ public class SplatRenderer: @unchecked Sendable {
 
         pipelineDescriptor.label = "DrawSplatPipeline"
 
-        // Set function constants for packed colors and 2DGS mode
+        // Set function constants for 2DGS mode
         let functionConstants = MTLFunctionConstantValues()
-        var usePackedColorsValue = usePackedColors
-        var hasPackedColorsBufferValue = packedColorBuffer != nil
         var use2DGSValue = use2DGSMode
-        functionConstants.setConstantValue(&usePackedColorsValue, type: .bool, index: 10)
-        functionConstants.setConstantValue(&hasPackedColorsBufferValue, type: .bool, index: 11)
         functionConstants.setConstantValue(&use2DGSValue, type: .bool, index: 12)
 
         pipelineDescriptor.vertexFunction = try library.makeFunction(name: "multiStageSplatVertexShader", constantValues: functionConstants)
@@ -1750,23 +1712,16 @@ public class SplatRenderer: @unchecked Sendable {
                 case .full(let colors):
                     for i in 0..<min(colors.count, bufferCount) {
                         let c = colors[i]
-                        values[i].color = PackedRGBHalf4(
-                            r: Float16(c.x), g: Float16(c.y), b: Float16(c.z), a: Float16(c.w)
-                        )
+                        values[i].packedColor = SplatRenderer.packRGBA8(c.x, c.y, c.z, c.w)
                     }
                 case .range(let colors, let range):
                     for (i, colorIndex) in range.enumerated() where colorIndex < bufferCount {
                         let c = colors[i]
-                        values[colorIndex].color = PackedRGBHalf4(
-                            r: Float16(c.x), g: Float16(c.y), b: Float16(c.z), a: Float16(c.w)
-                        )
+                        values[colorIndex].packedColor = SplatRenderer.packRGBA8(c.x, c.y, c.z, c.w)
                     }
                 case .single(let color, let index):
                     guard index < bufferCount else { continue }
-                    values[index].color = PackedRGBHalf4(
-                        r: Float16(color.x), g: Float16(color.y),
-                        b: Float16(color.z), a: Float16(color.w)
-                    )
+                    values[index].packedColor = SplatRenderer.packRGBA8(color.x, color.y, color.z, color.w)
                 }
             }
         }
@@ -2071,72 +2026,6 @@ public class SplatRenderer: @unchecked Sendable {
     private func invalidatePrecomputedData() {
         precomputedDataDirty = true
         lastPrecomputeViewMatrix = nil
-    }
-
-    // MARK: - Packed Color Buffer (snorm10a2 bandwidth optimization)
-
-    /// Rebuild the packed color buffer from current splat data
-    /// Called when usePackedColors is enabled or splat data changes
-    private func rebuildPackedColorBufferIfNeeded() {
-        guard usePackedColors, splatBuffer.count > 0 else {
-            packedColorBuffer = nil
-            return
-        }
-
-        // Each packed color is 4 bytes (uint)
-        // Use local capture to avoid TOCTOU race (buffer could be nil'd between check and use)
-        let bufferSize = splatBuffer.count * MemoryLayout<UInt32>.stride
-        var currentBuffer = packedColorBuffer
-        if currentBuffer == nil || currentBuffer!.length < bufferSize {
-            currentBuffer = device.makeBuffer(length: bufferSize, options: .storageModeShared)
-            currentBuffer?.label = "Packed Colors (snorm10a2)"
-            packedColorBuffer = currentBuffer
-        }
-
-        guard let buffer = currentBuffer else {
-            Self.log.error("Failed to create packed color buffer")
-            return
-        }
-
-        // Pack colors from splat buffer to packed buffer
-        let bufferCount = splatBuffer.count
-        let packedPtr = buffer.contents().bindMemory(to: UInt32.self, capacity: bufferCount)
-
-        splatBuffer.withLockedValues { values, count in
-            let actualCount = min(count, bufferCount)
-            for i in 0..<actualCount {
-                let color = values[i].color
-                // Pack half4 color to snorm10a2
-                // Format: [A:2][B:10][G:10][R:10]
-                let r = packSnorm10(Float(color.r))
-                let g = packSnorm10(Float(color.g))
-                let b = packSnorm10(Float(color.b))
-                let a = packUnorm2(Float(color.a))
-
-                packedPtr[i] = r | (g << 10) | (b << 20) | (a << 30)
-            }
-        }
-
-        Self.log.debug("Packed \(self.splatBuffer.count) colors to snorm10a2 format")
-    }
-
-    /// Pack a float value to signed normalized 10-bit integer
-    private func packSnorm10(_ value: Float) -> UInt32 {
-        let clamped = max(-1.0, min(1.0, value))
-        let scaled = clamped * 511.0
-        let signed = Int(scaled.rounded())
-        // Convert to two's complement 10-bit representation
-        if signed < 0 {
-            return UInt32(bitPattern: Int32(1024 + signed)) & 0x3FF
-        } else {
-            return UInt32(signed) & 0x3FF
-        }
-    }
-
-    /// Pack a float value to unsigned normalized 2-bit integer
-    private func packUnorm2(_ value: Float) -> UInt32 {
-        let clamped = max(0.0, min(1.0, value))
-        return UInt32((clamped * 3.0).rounded()) & 0x3
     }
 
     // MARK: - Frustum Culling
@@ -2546,20 +2435,6 @@ public class SplatRenderer: @unchecked Sendable {
         let indexedSplatCount = min(splatCount, Constants.maxIndexedSplatCount)
         let instanceCount = (splatCount + indexedSplatCount - 1) / indexedSplatCount
 
-        // Rebuild packed color buffer if enabled and splat data has changed
-        if usePackedColors && colorsDirty {
-            let hadPackedBuffer = packedColorBuffer != nil
-            rebuildPackedColorBufferIfNeeded()
-            colorsDirty = false
-
-            // If packed buffer was just created, rebuild pipelines with updated function constants
-            // This handles the case where usePackedColors was set before splats were loaded
-            if !hadPackedBuffer && packedColorBuffer != nil {
-                resetPipelineStates()
-                setupMeshShaders()
-            }
-        }
-
         if #available(iOS 26.0, macOS 26.0, tvOS 26.0, visionOS 26.0, *) {
             updateMetal4ResidencyForFrame(commandBuffer: commandBuffer)
         }
@@ -2640,13 +2515,6 @@ public class SplatRenderer: @unchecked Sendable {
             // Bind precomputed buffer if TensorOps precompute is enabled and data is valid
             if batchPrecomputeEnabled, let precomputedBuffer = precomputedSplatBuffer, !precomputedDataDirty {
                 renderEncoder.setMeshBuffer(precomputedBuffer, offset: 0, index: BufferIndex.precomputed.rawValue)
-            }
-
-            // Bind packed colors buffer (or placeholder for shader compatibility)
-            if let packedColors = packedColorBuffer {
-                renderEncoder.setMeshBuffer(packedColors, offset: 0, index: BufferIndex.packedColors.rawValue)
-            } else {
-                renderEncoder.setMeshBuffer(splatBuffer.buffer, offset: 0, index: BufferIndex.packedColors.rawValue)
             }
 
             // Calculate number of meshlets needed
@@ -2760,15 +2628,6 @@ public class SplatRenderer: @unchecked Sendable {
 
         renderEncoder.setVertexBuffer(dynamicUniformBuffers, offset: uniformBufferOffset, index: BufferIndex.uniforms.rawValue)
         renderEncoder.setVertexBuffer(splatBuffer.buffer, offset: 0, index: BufferIndex.splat.rawValue)
-
-        // Bind packed colors buffer if enabled (or a dummy buffer for shader compatibility)
-        // The shader uses function constants to decide whether to use packed colors
-        if let packedColors = packedColorBuffer {
-            renderEncoder.setVertexBuffer(packedColors, offset: 0, index: BufferIndex.packedColors.rawValue)
-        } else {
-            // Bind splat buffer as placeholder (shader won't access it when function constant is false)
-            renderEncoder.setVertexBuffer(splatBuffer.buffer, offset: 0, index: BufferIndex.packedColors.rawValue)
-        }
 
         // Dithered + Frustum Culling: use culled indices directly (order-independent)
         // This avoids sorting entirely while still benefiting from frustum culling
@@ -3328,7 +3187,7 @@ extension SplatRenderer.Splat {
         let transform = simd_float3x3(rotation) * simd_float3x3(diagonal: scale)
         let cov3D = transform * transform.transpose
         self.init(position: MTLPackedFloat3Make(position.x, position.y, position.z),
-                  color: SplatRenderer.PackedRGBHalf4(r: Float16(color.x), g: Float16(color.y), b: Float16(color.z), a: Float16(color.w)),
+                  packedColor: SplatRenderer.packRGBA8(color.x, color.y, color.z, color.w),
                   covA: SplatRenderer.PackedHalf3(x: Float16(cov3D[0, 0]), y: Float16(cov3D[0, 1]), z: Float16(cov3D[0, 2])),
                   covB: SplatRenderer.PackedHalf3(x: Float16(cov3D[1, 1]), y: Float16(cov3D[1, 2]), z: Float16(cov3D[2, 2])))
     }

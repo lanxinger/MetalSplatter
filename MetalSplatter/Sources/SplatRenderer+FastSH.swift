@@ -31,7 +31,7 @@ extension SplatRenderer {
     /// Extended Splat structure that includes SH information
     struct SplatSH {
         var position: MTLPackedFloat3
-        var baseColor: PackedRGBHalf4      // Base color (DC term) + opacity
+        var baseColor: UInt32              // Base color (DC term) + opacity, RGBA8 unorm
         var rotation: simd_float4          // Quaternion (x,y,z,w)
         var covA: PackedHalf3
         var covB: PackedHalf3
@@ -42,7 +42,7 @@ extension SplatRenderer {
         /// Convert from regular Splat + SH info
         init(splat: Splat, rotation: simd_quatf, shIndex: UInt32 = 0, shDegree: UInt16 = 0) {
             self.position = splat.position
-            self.baseColor = splat.color
+            self.baseColor = splat.packedColor
             self.rotation = rotation.vector
             self.covA = splat.covA
             self.covB = splat.covB
@@ -158,11 +158,7 @@ public class FastSHSplatRenderer: SplatRenderer, @unchecked Sendable {
         do {
             // Set function constants (required for shaders including ShaderCommon.h)
             let functionConstants = MTLFunctionConstantValues()
-            var usePackedColorsValue = false
-            var hasPackedColorsBufferValue = false
             var use2DGSValue = use2DGSMode
-            functionConstants.setConstantValue(&usePackedColorsValue, type: .bool, index: 10)
-            functionConstants.setConstantValue(&hasPackedColorsBufferValue, type: .bool, index: 11)
             functionConstants.setConstantValue(&use2DGSValue, type: .bool, index: 12)
 
             // Buffer-based fast SH pipeline

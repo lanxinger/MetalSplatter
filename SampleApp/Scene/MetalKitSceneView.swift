@@ -24,7 +24,6 @@ struct MetalKitSceneView: View {
     @State private var meshShaderEnabled = true // Metal 3+ mesh shader rendering - enabled by default
     @State private var ditheredTransparencyEnabled = false // Stochastic transparency - disabled by default
     @State private var metal4SortingEnabled = true // Metal 4 GPU radix sort - enabled by default
-    @State private var packedColorsEnabled = true // snorm10a2 packed colors - enabled by default
     @State private var renderScale: CGFloat = 0.66 // iOS fill-rate control: 66% scale ~= 44% pixels
     @State private var adaptiveRenderScaleEnabled = false // Opt-in to avoid visible resolution pumping artifacts
 
@@ -40,7 +39,6 @@ struct MetalKitSceneView: View {
                 meshShaderEnabled: $meshShaderEnabled,
                 ditheredTransparencyEnabled: $ditheredTransparencyEnabled,
                 metal4SortingEnabled: $metal4SortingEnabled,
-                packedColorsEnabled: $packedColorsEnabled,
                 renderScale: $renderScale,
                 adaptiveRenderScaleEnabled: $adaptiveRenderScaleEnabled
             )
@@ -244,24 +242,6 @@ struct MetalKitSceneView: View {
                                 }
                             }
 
-                            Divider()
-
-                            // Packed Colors Toggle
-                            Toggle(isOn: $packedColorsEnabled) {
-                                VStack(alignment: .leading, spacing: 2) {
-                                    HStack {
-                                        Text("Packed Colors")
-                                            .font(.subheadline)
-                                        Text("(iOS 26+)")
-                                            .font(.caption2)
-                                            .foregroundColor(.orange)
-                                    }
-                                    Text("50% color bandwidth reduction via snorm10a2")
-                                        .font(.caption)
-                                        .foregroundColor(.secondary)
-                                }
-                            }
-
 #if os(iOS)
                             Divider()
 
@@ -353,7 +333,6 @@ struct MetalKitRendererView: ViewRepresentable {
     @Binding var meshShaderEnabled: Bool
     @Binding var ditheredTransparencyEnabled: Bool
     @Binding var metal4SortingEnabled: Bool
-    @Binding var packedColorsEnabled: Bool
     @Binding var renderScale: CGFloat
     @Binding var adaptiveRenderScaleEnabled: Bool
 
@@ -394,7 +373,7 @@ struct MetalKitRendererView: ViewRepresentable {
             renderer?.setMeshShader(parent.meshShaderEnabled)
             renderer?.setDitheredTransparency(parent.ditheredTransparencyEnabled)
             renderer?.setMetal4Sorting(parent.metal4SortingEnabled)
-            renderer?.setPackedColors(parent.packedColorsEnabled)
+
 #if os(iOS)
             renderer?.setInternalRenderScale(parent.renderScale)
 #endif
@@ -533,7 +512,7 @@ struct MetalKitRendererView: ViewRepresentable {
         renderer?.setMeshShader(meshShaderEnabled)
         renderer?.setDitheredTransparency(ditheredTransparencyEnabled)
         renderer?.setMetal4Sorting(metal4SortingEnabled)
-        renderer?.setPackedColors(packedColorsEnabled)
+
 #if os(iOS)
         renderer?.setInternalRenderScale(renderScale)
         coordinator.configureAdaptiveRenderScale()

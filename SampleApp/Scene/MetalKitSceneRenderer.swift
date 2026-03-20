@@ -770,26 +770,6 @@ class MetalKitSceneRenderer: NSObject, MTKViewDelegate {
         #endif
     }
 
-    /// Enable or disable snorm10a2 packed colors for bandwidth optimization
-    /// Packs RGBA into 4 bytes (10-10-10-2) instead of 8 bytes (half4)
-    /// May have minor precision loss visible with high SH data
-    func setPackedColors(_ enabled: Bool) {
-        if let splat = modelRenderer as? SplatRenderer {
-            splat.usePackedColors = enabled
-            if enabled {
-                Self.log.info("Packed colors enabled - 50% bandwidth reduction")
-            } else {
-                Self.log.info("Packed colors disabled - using full precision half4")
-            }
-        }
-
-        // Request redraw
-        #if os(macOS)
-        metalKitView.setNeedsDisplay(metalKitView.bounds)
-        #else
-        metalKitView.setNeedsDisplay()
-        #endif
-    }
 
 #if os(iOS)
     /// Set fixed internal render scale used by MetalFX spatial upscaling.

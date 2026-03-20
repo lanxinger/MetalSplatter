@@ -16,7 +16,6 @@ enum BufferIndex: int32_t
     BufferIndexSplat          = 1,
     BufferIndexSortedIndices  = 2,  // GPU-side sorted indices for indirect rendering
     BufferIndexPrecomputed    = 3,  // Precomputed splat data (Metal 4 TensorOps)
-    BufferIndexPackedColors   = 4,  // Optional packed colors (snorm10a2)
 };
 
 typedef struct
@@ -47,13 +46,20 @@ typedef struct
     Uniforms uniforms[kMaxViewCount];
 } UniformsArray;
 
+// Compact splat struct — 28 bytes per splat.
+// Color stored as RGBA8 (4 bytes) instead of half4 (8 bytes) for 12.5% less memory.
 typedef struct
 {
-    packed_float3 position;
-    packed_half4 color;
-    packed_half3 covA;
-    packed_half3 covB;
-} Splat;
+    packed_float3 position;     // 12 bytes
+    uint packedColor;           // 4 bytes — RGBA8 unorm
+    packed_half3 covA;          // 6 bytes
+    packed_half3 covB;          // 6 bytes
+} Splat;                        // Total: 28 bytes
+
+// Unpack RGBA8 color from Splat struct
+inline half4 unpackSplatColor(uint packed) {
+    return unpack_unorm4x8_to_half(packed);
+}
 
 // Pre-computed splat data for Metal 4 TensorOps optimization
 // Must match layout in Metal4TensorOperations.metal
@@ -67,54 +73,10 @@ typedef struct
     uint visible;           // 4 bytes - frustum culling result (0 = culled, 1 = visible)
 } PrecomputedSplat;         // Total: 64 bytes aligned
 
-// Packed color for bandwidth optimization (snorm10a2)
-// Use function constant to select between packed/unpacked paths
-typedef struct
-{
-    uint packedColor;       // 4 bytes - RGB10 + A2 (snorm10a2 format)
-} PackedColor;
-
-// Function constants for packed color path
-// Using indices 10-11 to avoid conflict with SH function constants (0-3)
-// Set via MTLFunctionConstantValues when creating pipeline
-constant bool usePackedColors [[function_constant(10)]];
-constant bool hasPackedColorsBuffer [[function_constant(11)]];
-
 // Function constant for 2DGS rendering mode
 // When enabled, uses simplified screen-space quads instead of full 3D covariance projection
-// Using index 12 to avoid conflict with packed colors (10-11) and SH (0-3)
+// Using index 12 to avoid conflict with SH (0-3)
 constant bool use2DGS [[function_constant(12)]];
-
-// Helper to unpack snorm10a2 to half4
-// Format: [A:2][B:10][G:10][R:10] (standard snorm10a2 layout)
-inline half4 unpackSnorm10a2ToHalf(uint packed) {
-    // Extract components (10 bits each for RGB, 2 bits for A)
-    int r = int(packed & 0x3FF);
-    int g = int((packed >> 10) & 0x3FF);
-    int b = int((packed >> 20) & 0x3FF);
-    int a = int((packed >> 30) & 0x3);
-
-    // Convert signed 10-bit to -1..1 range
-    // For snorm: if value >= 512, it's negative (two's complement for 10 bits)
-    float rf = (r >= 512) ? float(r - 1024) / 511.0f : float(r) / 511.0f;
-    float gf = (g >= 512) ? float(g - 1024) / 511.0f : float(g) / 511.0f;
-    float bf = (b >= 512) ? float(b - 1024) / 511.0f : float(b) / 511.0f;
-    // Alpha is 2-bit unsigned: 0, 1, 2, 3 -> 0.0, 0.33, 0.67, 1.0
-    float af = float(a) / 3.0f;
-
-    return half4(half(rf), half(gf), half(bf), half(af));
-}
-
-// Helper to get splat color, using packed buffer if available
-inline half4 getSplatColor(uint splatIndex,
-                           constant Splat* splats,
-                           constant PackedColor* packedColors) {
-    if (usePackedColors && hasPackedColorsBuffer) {
-        return unpackSnorm10a2ToHalf(packedColors[splatIndex].packedColor);
-    } else {
-        return splats[splatIndex].color;
-    }
-}
 
 typedef struct
 {

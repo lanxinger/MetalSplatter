@@ -140,13 +140,6 @@ public class ARSplatRenderer: NSObject {
         set { splatRenderer.useMetal4Sorting = newValue }
     }
 
-    /// Enable/disable snorm10a2 packed colors for bandwidth optimization
-    /// Packs RGBA into 4 bytes instead of 8 bytes (half4)
-    public var usePackedColors: Bool {
-        get { splatRenderer.usePackedColors }
-        set { splatRenderer.usePackedColors = newValue }
-    }
-
     /// Enable/disable high-quality depth (multi-stage pipeline)
     /// When false, enables mesh shaders for 2-4x faster geometry generation
     /// High-quality depth is mainly beneficial for visionOS reprojection

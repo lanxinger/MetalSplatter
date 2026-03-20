@@ -59,11 +59,7 @@ extension SplatRenderer {
     private func createBindlessPipelineState() throws -> MTLRenderPipelineState {
         // Set function constants (required for shaders including ShaderCommon.h with use2DGS)
         let functionConstants = MTLFunctionConstantValues()
-        var usePackedColorsValue = usePackedColors
-        var hasPackedColorsBufferValue = usePackedColors
         var use2DGSValue = use2DGSMode
-        functionConstants.setConstantValue(&usePackedColorsValue, type: .bool, index: 10)
-        functionConstants.setConstantValue(&hasPackedColorsBufferValue, type: .bool, index: 11)
         functionConstants.setConstantValue(&use2DGSValue, type: .bool, index: 12)
 
         guard let vertexFunction = try? library.makeFunction(name: "metal4_splatVertex", constantValues: functionConstants),
@@ -106,11 +102,7 @@ extension SplatRenderer {
 
         // Use function constants for consistency with pipeline creation
         let functionConstants = MTLFunctionConstantValues()
-        var usePackedColorsValue = usePackedColors
-        var hasPackedColorsBufferValue = usePackedColors
         var use2DGSValue = use2DGSMode
-        functionConstants.setConstantValue(&usePackedColorsValue, type: .bool, index: 10)
-        functionConstants.setConstantValue(&hasPackedColorsBufferValue, type: .bool, index: 11)
         functionConstants.setConstantValue(&use2DGSValue, type: .bool, index: 12)
 
         guard let vertexFunction = try? library.makeFunction(name: "metal4_splatVertex", constantValues: functionConstants) else {
@@ -137,11 +129,7 @@ extension SplatRenderer {
 
         // Use function constants for consistency with pipeline creation
         let functionConstants = MTLFunctionConstantValues()
-        var usePackedColorsValue = usePackedColors
-        var hasPackedColorsBufferValue = usePackedColors
         var use2DGSValue = use2DGSMode
-        functionConstants.setConstantValue(&usePackedColorsValue, type: .bool, index: 10)
-        functionConstants.setConstantValue(&hasPackedColorsBufferValue, type: .bool, index: 11)
         functionConstants.setConstantValue(&use2DGSValue, type: .bool, index: 12)
 
         guard let vertexFunction = try? library.makeFunction(name: "metal4_splatVertex", constantValues: functionConstants) else {

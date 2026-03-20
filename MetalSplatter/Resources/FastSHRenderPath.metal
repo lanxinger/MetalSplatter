@@ -28,7 +28,7 @@ struct FastSHParams {
 // Extended Splat structure for SH support
 typedef struct {
     packed_float3 position;
-    packed_half4 baseColor;      // Base color (DC term) + opacity
+    uint packedBaseColor;        // Base color (DC term) + opacity, RGBA8 unorm
     float4 rotation;             // Quaternion (x,y,z,w)
     packed_half3 covA;
     packed_half3 covB;
@@ -65,7 +65,7 @@ Splat evaluateSplatWithSH(SplatSH splatSH,
     // Skip SH evaluation if flag is set (camera hasn't moved enough to warrant update)
     // This reuses cached base colors from previous evaluation
     if (params.skipSHEvaluation != 0) {
-        splat.color = splatSH.baseColor;
+        splat.packedColor = splatSH.packedBaseColor;
         return splat;
     }
 
@@ -89,9 +89,11 @@ Splat evaluateSplatWithSH(SplatSH splatSH,
         float3 localDirection = normalize(rotateVectorByQuaternion(qConjugate, viewDirection));
 
         half4 shColor = evaluateSHHalf(localDirection, coeffs, params.degree);
-        splat.color = packed_half4(half4(shColor.rgb, splatSH.baseColor.w));
+        // Preserve original alpha from base color, combine with SH-evaluated RGB
+        half baseAlpha = unpackSplatColor(splatSH.packedBaseColor).a;
+        splat.packedColor = pack_half_to_unorm4x8(half4(shColor.rgb, baseAlpha));
     } else {
-        splat.color = splatSH.baseColor;
+        splat.packedColor = splatSH.packedBaseColor;
     }
 
     return splat;
