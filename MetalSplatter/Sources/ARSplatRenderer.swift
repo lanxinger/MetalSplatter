@@ -162,6 +162,12 @@ public class ARSplatRenderer: NSObject {
         set { splatRenderer.useDitheredTransparency = newValue }
     }
 
+    /// Covariance low-pass filter (0.3 default, 0.1 for Brush mip splatting)
+    public var covarianceBlur: Float {
+        get { splatRenderer.covarianceBlur }
+        set { splatRenderer.covarianceBlur = newValue }
+    }
+
     /// Enable/disable Fast SH evaluation (if FastSHSplatRenderer is in use)
     public var fastSHEnabled: Bool {
         get { fastSHRenderer?.fastSHConfig.enabled ?? false }
