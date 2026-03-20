@@ -3,6 +3,7 @@
 import CompositorServices
 import Metal
 import MetalSplatter
+import SplatIO
 import os
 import SampleBoxRenderer
 import simd
@@ -87,14 +88,35 @@ class VisionSceneRenderer {
         case .gaussianSplat(let url):
             // Get cached model data
             let cachedModel = try await ModelCache.shared.getModel(.gaussianSplat(url))
-            
-            let splat = try SplatRenderer(device: device,
-                                          colorFormat: layerRenderer.configuration.colorFormat,
-                                          depthFormat: layerRenderer.configuration.depthFormat,
-                                          sampleCount: 1,
-                                          maxViewCount: layerRenderer.properties.viewCount,
-                                          maxSimultaneousRenders: Constants.maxSimultaneousRenders)
-            try splat.add(cachedModel.points)
+
+            // Auto-detect SH data — use FastSH renderer when present for view-dependent lighting
+            let hasSHData = cachedModel.points.contains { point in
+                if case .sphericalHarmonic(let coeffs) = point.color, coeffs.count > 1 {
+                    return true
+                }
+                return false
+            }
+
+            let splat: SplatRenderer
+            if hasSHData {
+                let renderer = try FastSHSplatRenderer(device: device,
+                                                       colorFormat: layerRenderer.configuration.colorFormat,
+                                                       depthFormat: layerRenderer.configuration.depthFormat,
+                                                       sampleCount: 1,
+                                                       maxViewCount: layerRenderer.properties.viewCount,
+                                                       maxSimultaneousRenders: Constants.maxSimultaneousRenders)
+                try await renderer.loadSplatsWithSH(cachedModel.points)
+                splat = renderer
+            } else {
+                let renderer = try SplatRenderer(device: device,
+                                                 colorFormat: layerRenderer.configuration.colorFormat,
+                                                 depthFormat: layerRenderer.configuration.depthFormat,
+                                                 sampleCount: 1,
+                                                 maxViewCount: layerRenderer.properties.viewCount,
+                                                 maxSimultaneousRenders: Constants.maxSimultaneousRenders)
+                try renderer.add(cachedModel.points)
+                splat = renderer
+            }
             modelRenderer = splat
             
             // Initialize Metal 4 bindless resources if available and enabled

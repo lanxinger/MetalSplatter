@@ -149,7 +149,15 @@ class MetalKitSceneRenderer: NSObject, MTKViewDelegate {
             let colorPixelFormat = metalKitView.colorPixelFormat
             let depthStencilPixelFormat = metalKitView.depthStencilPixelFormat
             let sampleCount = metalKitView.sampleCount
-            let useFastSH = fastSHSettings.enabled
+
+            // Auto-detect SH data in the loaded model — use FastSH when present
+            let hasSHData = cachedModel.points.contains { point in
+                if case .sphericalHarmonic(let coeffs) = point.color, coeffs.count > 1 {
+                    return true
+                }
+                return false
+            }
+            let useFastSH = hasSHData || fastSHSettings.enabled
             
             // Create and load splat entirely in nonisolated context
             let points = cachedModel.points // Explicit copy for isolation

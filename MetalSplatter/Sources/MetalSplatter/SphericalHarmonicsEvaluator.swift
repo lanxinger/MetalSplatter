@@ -82,7 +82,8 @@ public class SphericalHarmonicsEvaluator {
         try createSpecializedPipelines(library: library)
     }
 
-    /// Creates 4 specialized pipeline states (one per SH degree) using function constants
+    /// Creates 4 specialized pipeline states (one per SH degree) using function constants.
+    /// Prefers half-precision kernels (50% less palette bandwidth); falls back to float if unavailable.
     private func createSpecializedPipelines(library: MTLLibrary) throws {
         for degree in 0...3 {
             // Create function constant values for this degree
@@ -90,23 +91,31 @@ public class SphericalHarmonicsEvaluator {
             var degreeValue = UInt32(degree)
             constants.setConstantValue(&degreeValue, type: .uint, index: Self.shDegreeConstantIndex)
 
-            // Create specialized palette evaluation pipeline
-            if let function = try? library.makeFunction(name: "evaluateSphericalHarmonicsPaletteSpecialized",
+            // Prefer half-precision kernel, fall back to float
+            if let function = try? library.makeFunction(name: "evaluateSphericalHarmonicsPaletteHalf",
                                                         constantValues: constants) {
+                let pipeline = try device.makeComputePipelineState(function: function)
+                specializedPipelines.append(pipeline)
+            } else if let function = try? library.makeFunction(name: "evaluateSphericalHarmonicsPaletteSpecialized",
+                                                               constantValues: constants) {
                 let pipeline = try device.makeComputePipelineState(function: function)
                 specializedPipelines.append(pipeline)
             }
 
-            // Create specialized directional pipeline
-            if let function = try? library.makeFunction(name: "evaluateSphericalHarmonicsDirectionalSpecialized",
+            // Prefer half-precision directional kernel, fall back to float
+            if let function = try? library.makeFunction(name: "evaluateSphericalHarmonicsDirectionalHalf",
                                                         constantValues: constants) {
+                let pipeline = try device.makeComputePipelineState(function: function)
+                specializedDirectionalPipelines.append(pipeline)
+            } else if let function = try? library.makeFunction(name: "evaluateSphericalHarmonicsDirectionalSpecialized",
+                                                               constantValues: constants) {
                 let pipeline = try device.makeComputePipelineState(function: function)
                 specializedDirectionalPipelines.append(pipeline)
             }
         }
 
         if !specializedPipelines.isEmpty {
-            print("SphericalHarmonicsEvaluator: Created \(specializedPipelines.count) specialized pipelines (function constants enabled)")
+            print("SphericalHarmonicsEvaluator: Created \(specializedPipelines.count) specialized pipelines (half-precision)")
         }
     }
 
@@ -138,7 +147,8 @@ public class SphericalHarmonicsEvaluator {
         commandBuffer: MTLCommandBuffer
     ) -> MTLBuffer? {
         if paletteSize > 0 {
-            let coeffCount = (shPalette.length / MemoryLayout<SIMD3<Float>>.stride) / max(paletteSize, 1)
+            // Palette uses half-precision storage (half3 = 8 bytes stride per coefficient)
+            let coeffCount = (shPalette.length / MemoryLayout<SIMD3<Float16>>.stride) / max(paletteSize, 1)
             guard Self.validateLayout(degree: degree, coefficientCount: coeffCount) else {
                 return nil
             }

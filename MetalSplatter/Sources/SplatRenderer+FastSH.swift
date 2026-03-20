@@ -228,30 +228,33 @@ public class FastSHSplatRenderer: SplatRenderer, @unchecked Sendable {
         }
         
         // Create SH palette buffer if we have SH data
+        // Uses half-precision (Float16) storage — 50% less memory and bandwidth vs float32.
+        // Half precision is sufficient for SH coefficients (low-frequency lighting).
         if !uniqueSHSets.isEmpty {
             // Use actual coefficient count from the data, not theoretical count
             let actualCoeffsPerEntry = uniqueSHSets[0].count
             let coeffsPerEntry = actualCoeffsPerEntry // Use actual data structure
-            let paletteSize = uniqueSHSets.count * coeffsPerEntry * MemoryLayout<SIMD3<Float>>.stride
-            
-            print("Fast SH: Creating palette buffer - \(uniqueSHSets.count) sets × \(coeffsPerEntry) coeffs = \(paletteSize) bytes")
-            
-            shPaletteBuffer = device.makeBuffer(length: paletteSize, options: .storageModeShared)
-            shPaletteBuffer?.label = "SH Palette Buffer"
-            
-            // Fill palette buffer
+            let paletteSizeBytes = uniqueSHSets.count * coeffsPerEntry * MemoryLayout<SIMD3<Float16>>.stride
+
+            print("Fast SH: Creating half-precision palette buffer - \(uniqueSHSets.count) sets × \(coeffsPerEntry) coeffs = \(paletteSizeBytes) bytes")
+
+            shPaletteBuffer = device.makeBuffer(length: paletteSizeBytes, options: .storageModeShared)
+            shPaletteBuffer?.label = "SH Palette Buffer (half)"
+
+            // Fill palette buffer with half-precision coefficients
             if let buffer = shPaletteBuffer {
-                let contents = buffer.contents().bindMemory(to: SIMD3<Float>.self, capacity: uniqueSHSets.count * coeffsPerEntry)
+                let contents = buffer.contents().bindMemory(to: SIMD3<Float16>.self, capacity: uniqueSHSets.count * coeffsPerEntry)
                 for (setIndex, coeffSet) in uniqueSHSets.enumerated() {
                     let offset = setIndex * coeffsPerEntry
                     // Safety check: only copy available coefficients
                     let coeffsToCopy = min(coeffSet.count, coeffsPerEntry)
                     for coeffIndex in 0..<coeffsToCopy {
-                        contents[offset + coeffIndex] = coeffSet[coeffIndex]
+                        let f = coeffSet[coeffIndex]
+                        contents[offset + coeffIndex] = SIMD3<Float16>(Float16(f.x), Float16(f.y), Float16(f.z))
                     }
                     // Pad with zeros if coefficient set is shorter than expected
                     for coeffIndex in coeffsToCopy..<coeffsPerEntry {
-                        contents[offset + coeffIndex] = SIMD3<Float>(0, 0, 0)
+                        contents[offset + coeffIndex] = SIMD3<Float16>(0, 0, 0)
                     }
                 }
             }

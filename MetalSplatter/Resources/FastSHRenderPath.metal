@@ -2,10 +2,13 @@
 #include "SplatProcessing.h"
 
 // Forward declarations from spherical_harmonics_evaluate.metal
-// Legacy version with runtime degree parameter
+// Legacy version with runtime degree parameter (float precision)
 float4 evaluateSH(float3 dir, device const float3* sh_coeffs, uint degree);
-// Specialized version using function constants (compile-time branching)
+// Specialized version using function constants (float precision)
 float4 evaluateSHSpecialized(float3 dir, device const float3* sh_coeffs);
+// Half-precision versions — read half3 palette, compute in half
+half4 evaluateSHHalf(float3 dir, device const half3* sh_coeffs, uint degree);
+half4 evaluateSHSpecializedHalf(float3 dir, device const half3* sh_coeffs);
 // Coefficients follow the Graphdeco/gsplat ordering documented in spherical_harmonics_evaluate.metal.
 
 // Import function constants from spherical_harmonics_evaluate.metal
@@ -52,7 +55,7 @@ inline float3 rotateVectorByQuaternion(float4 q, float3 v) {
 
 Splat evaluateSplatWithSH(SplatSH splatSH,
                          Uniforms uniforms,
-                         device const float3* shPalette,
+                         device const half3* shPalette,
                          constant FastSHParams& params) {
     Splat splat;
     splat.position = splatSH.position;
@@ -73,7 +76,7 @@ Splat evaluateSplatWithSH(SplatSH splatSH,
                  (splatSH.shPaletteIndex < params.paletteSize);
 
     if (hasSH) {
-        device const float3* coeffs = shPalette + params.coeffsPerEntry * splatSH.shPaletteIndex;
+        device const half3* coeffs = shPalette + params.coeffsPerEntry * splatSH.shPaletteIndex;
 
         float3 worldPosition = float3(splatSH.position);
         float3 cameraPosition = cameraWorldPosition(uniforms.viewMatrix);
@@ -85,9 +88,8 @@ Splat evaluateSplatWithSH(SplatSH splatSH,
 
         float3 localDirection = normalize(rotateVectorByQuaternion(qConjugate, viewDirection));
 
-        float4 shColor = evaluateSH(localDirection, coeffs, params.degree);
-        float3 rgb = shColor.rgb;
-        splat.color = packed_half4(half4(half3(rgb), splatSH.baseColor.w));
+        half4 shColor = evaluateSHHalf(localDirection, coeffs, params.degree);
+        splat.color = packed_half4(half4(shColor.rgb, splatSH.baseColor.w));
     } else {
         splat.color = splatSH.baseColor;
     }
@@ -103,7 +105,7 @@ vertex FragmentIn fastSHSplatVertexShader(uint vertexID [[vertex_id]],
                                          constant SplatSH* splatArray [[ buffer(BufferIndexSplat) ]],
                                          constant UniformsArray & uniformsArray [[ buffer(BufferIndexUniforms) ]],
                                          constant int32_t* sortedIndices [[ buffer(BufferIndexSortedIndices) ]],
-                                         device const float3* shPalette [[ buffer(3) ]],
+                                         device const half3* shPalette [[ buffer(3) ]],
                                          constant FastSHParams& params [[ buffer(4) ]]) {
     Uniforms uniforms = uniformsArray.uniforms[min(int(amplificationID), kMaxViewCount - 1)];
     
@@ -152,7 +154,7 @@ vertex FragmentIn textureSHSplatVertexShader(uint vertexID [[vertex_id]],
                                             constant SplatSH* splatArray [[ buffer(BufferIndexSplat) ]],
                                             constant UniformsArray & uniformsArray [[ buffer(BufferIndexUniforms) ]],
                                             constant int32_t* sortedIndices [[ buffer(BufferIndexSortedIndices) ]],
-                                            device const float3* shPalette [[ buffer(3) ]],
+                                            device const half3* shPalette [[ buffer(3) ]],
                                             constant FastSHParams& params [[ buffer(4) ]]) {
     Uniforms uniforms = uniformsArray.uniforms[min(int(amplificationID), kMaxViewCount - 1)];
     

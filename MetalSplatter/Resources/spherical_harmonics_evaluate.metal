@@ -43,11 +43,120 @@ constant float SH_C3[7] = {
     -0.5900435899266435f
 };
 
+// Half-precision SH constants — halves bandwidth for SH coefficient loads.
+// Inspired by PlayCanvas engine commit 10fbc632b.
+constant half SH_C0_H = half(0.28209479177387814f);
+constant half SH_C1_H = half(0.4886025119029199f);
+constant half SH_C2_H[5] = {
+    half(1.0925484305920792f),
+    half(-1.0925484305920792f),
+    half(0.31539156525252005f),
+    half(-1.0925484305920792f),
+    half(0.5462742152960396f)
+};
+constant half SH_C3_H[7] = {
+    half(-0.5900435899266435f),
+    half(2.890611442640554f),
+    half(-0.4570457994644658f),
+    half(0.3731763325901154f),
+    half(-0.4570457994644658f),
+    half(1.445305721320277f),
+    half(-0.5900435899266435f)
+};
+
 struct SHEvaluateParams {
     float3 viewDirection;  // Normalized view direction (camera forward)
     uint paletteSize;      // Number of unique SH coefficient sets (e.g., 64K)
     uint degree;           // SH degree (0-3) - kept for compatibility, but function constants are preferred
 };
+
+// ============================================================================
+// Half-precision SH evaluation using function constants (compile-time branching)
+// Reads half3 coefficients, computes in half precision — halves memory bandwidth.
+// Output is half4 for direct use in half-precision color pipelines.
+// ============================================================================
+half4 evaluateSHSpecializedHalf(float3 dir, device const half3* sh_coeffs) {
+    half3 d = half3(normalize(dir));
+
+    // Band 0 (DC term) plus ambient offset
+    half3 result = half3(0.5h) + SH_C0_H * sh_coeffs[0];
+
+    // Band 1
+    if (HAS_SH_BAND_1) {
+        result += SH_C1_H * d.y * sh_coeffs[1];
+        result += SH_C1_H * d.z * sh_coeffs[2];
+        result += SH_C1_H * d.x * sh_coeffs[3];
+    }
+
+    // Band 2
+    if (HAS_SH_BAND_2) {
+        half xx = d.x * d.x, yy = d.y * d.y, zz = d.z * d.z;
+        half xy = d.x * d.y, yz = d.y * d.z, xz = d.x * d.z;
+
+        result += SH_C2_H[0] * xy * sh_coeffs[4];
+        result += SH_C2_H[1] * yz * sh_coeffs[5];
+        result += SH_C2_H[2] * (2.0h * zz - xx - yy) * sh_coeffs[6];
+        result += SH_C2_H[3] * xz * sh_coeffs[7];
+        result += SH_C2_H[4] * (xx - yy) * sh_coeffs[8];
+    }
+
+    // Band 3
+    if (HAS_SH_BAND_3) {
+        half xx = d.x * d.x, yy = d.y * d.y, zz = d.z * d.z;
+        half xy = d.x * d.y;
+
+        result += SH_C3_H[0] * d.y * (3.0h * xx - yy) * sh_coeffs[9];
+        result += SH_C3_H[1] * xy * d.z * sh_coeffs[10];
+        result += SH_C3_H[2] * d.y * (4.0h * zz - xx - yy) * sh_coeffs[11];
+        result += SH_C3_H[3] * d.z * (2.0h * zz - 3.0h * xx - 3.0h * yy) * sh_coeffs[12];
+        result += SH_C3_H[4] * d.x * (4.0h * zz - xx - yy) * sh_coeffs[13];
+        result += SH_C3_H[5] * d.z * (xx - yy) * sh_coeffs[14];
+        result += SH_C3_H[6] * d.x * (xx - 3.0h * yy) * sh_coeffs[15];
+    }
+
+    result = clamp(result, 0.0h, 1.0h);
+    return half4(result, 1.0h);
+}
+
+// Half-precision SH evaluation with runtime degree parameter (legacy half path)
+half4 evaluateSHHalf(float3 dir, device const half3* sh_coeffs, uint degree) {
+    half3 d = half3(normalize(dir));
+
+    half3 result = half3(0.5h) + SH_C0_H * sh_coeffs[0];
+
+    if (degree >= 1) {
+        result += SH_C1_H * d.y * sh_coeffs[1];
+        result += SH_C1_H * d.z * sh_coeffs[2];
+        result += SH_C1_H * d.x * sh_coeffs[3];
+    }
+
+    if (degree >= 2) {
+        half xx = d.x * d.x, yy = d.y * d.y, zz = d.z * d.z;
+        half xy = d.x * d.y, yz = d.y * d.z, xz = d.x * d.z;
+
+        result += SH_C2_H[0] * xy * sh_coeffs[4];
+        result += SH_C2_H[1] * yz * sh_coeffs[5];
+        result += SH_C2_H[2] * (2.0h * zz - xx - yy) * sh_coeffs[6];
+        result += SH_C2_H[3] * xz * sh_coeffs[7];
+        result += SH_C2_H[4] * (xx - yy) * sh_coeffs[8];
+    }
+
+    if (degree >= 3) {
+        half xx = d.x * d.x, yy = d.y * d.y, zz = d.z * d.z;
+        half xy = d.x * d.y;
+
+        result += SH_C3_H[0] * d.y * (3.0h * xx - yy) * sh_coeffs[9];
+        result += SH_C3_H[1] * xy * d.z * sh_coeffs[10];
+        result += SH_C3_H[2] * d.y * (4.0h * zz - xx - yy) * sh_coeffs[11];
+        result += SH_C3_H[3] * d.z * (2.0h * zz - 3.0h * xx - 3.0h * yy) * sh_coeffs[12];
+        result += SH_C3_H[4] * d.x * (4.0h * zz - xx - yy) * sh_coeffs[13];
+        result += SH_C3_H[5] * d.z * (xx - yy) * sh_coeffs[14];
+        result += SH_C3_H[6] * d.x * (xx - 3.0h * yy) * sh_coeffs[15];
+    }
+
+    result = clamp(result, 0.0h, 1.0h);
+    return half4(result, 1.0h);
+}
 
 // ============================================================================
 // Specialized SH evaluation using function constants (compile-time branching)
@@ -256,4 +365,45 @@ kernel void evaluateSphericalHarmonicsDirectional(
 
     // Write to texture
     evaluated_sh.write(color, tid);
+}
+
+// ============================================================================
+// Half-precision compute kernels — read half3 palette, write float4 output.
+// 50% less bandwidth for palette reads vs float3 versions.
+// ============================================================================
+
+kernel void evaluateSphericalHarmonicsPaletteHalf(
+    device const half3* sh_palette [[buffer(0)]],
+    device float4* evaluated_sh [[buffer(1)]],
+    constant SHEvaluateParams& params [[buffer(2)]],
+    uint idx [[thread_position_in_grid]])
+{
+    if (idx >= params.paletteSize) return;
+
+    uint coeffsPerEntry = (SH_DEGREE + 1) * (SH_DEGREE + 1);
+    device const half3* sh_coeffs = sh_palette + (idx * coeffsPerEntry);
+
+    half4 color = evaluateSHSpecializedHalf(params.viewDirection, sh_coeffs);
+    evaluated_sh[idx] = float4(color);
+}
+
+kernel void evaluateSphericalHarmonicsDirectionalHalf(
+    device const half3* sh_palette [[buffer(0)]],
+    texture2d<float, access::write> evaluated_sh [[texture(0)]],
+    constant SHEvaluateParams& params [[buffer(2)]],
+    uint2 tid [[thread_position_in_grid]])
+{
+    uint width = evaluated_sh.get_width();
+    uint height = evaluated_sh.get_height();
+
+    if (tid.x >= width || tid.y >= height) return;
+
+    uint idx = tid.y * width + tid.x;
+    if (idx >= params.paletteSize) return;
+
+    uint coeffsPerEntry = (SH_DEGREE + 1) * (SH_DEGREE + 1);
+    device const half3* sh_coeffs = sh_palette + (idx * coeffsPerEntry);
+
+    half4 color = evaluateSHSpecializedHalf(params.viewDirection, sh_coeffs);
+    evaluated_sh.write(float4(color), tid);
 }
