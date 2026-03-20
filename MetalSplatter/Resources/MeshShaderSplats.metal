@@ -48,6 +48,12 @@ struct MeshVertexOutput {
     half lodBand;
     uint debugFlags;
     uint splatID [[flat]];  // For temporal noise in Bayer dithering
+
+    // 2DGS ray-splat intersection data (flat-interpolated, same for all 4 quad vertices)
+    float3 viewCenter [[flat]];
+    float3 viewNormal [[flat]];
+    float3 viewTangentU [[flat]];
+    float3 viewTangentV [[flat]];
 };
 
 // Mesh type alias
@@ -324,6 +330,45 @@ void splatMeshShader(
     uint debugFlags = uniforms.debugFlags;
     float projW = projectedCenter.w;
 
+    // 2DGS: extract normal from view-space covariance (same as splatVertex path)
+    float3 meshViewCenter = float3(0);
+    float3 meshViewNormal = float3(0);
+    if (use2DGS) {
+        float3x3 Vrk = float3x3(
+            splat.covA.x, splat.covA.y, splat.covA.z,
+            splat.covA.y, splat.covB.x, splat.covB.y,
+            splat.covA.z, splat.covB.y, splat.covB.z
+        );
+        float3x3 W = float3x3(uniforms.viewMatrix[0].xyz,
+                               uniforms.viewMatrix[1].xyz,
+                               uniforms.viewMatrix[2].xyz);
+        float3x3 covView = W * Vrk * transpose(W);
+
+        float3 c0 = float3(covView[1][1]*covView[2][2] - covView[1][2]*covView[1][2],
+                            covView[0][2]*covView[1][2] - covView[0][1]*covView[2][2],
+                            covView[0][1]*covView[1][2] - covView[0][2]*covView[1][1]);
+        float3 c1 = float3(covView[0][2]*covView[1][2] - covView[0][1]*covView[2][2],
+                            covView[0][0]*covView[2][2] - covView[0][2]*covView[0][2],
+                            covView[0][1]*covView[0][2] - covView[0][0]*covView[1][2]);
+        float3 c2 = float3(covView[0][1]*covView[1][2] - covView[0][2]*covView[1][1],
+                            covView[0][1]*covView[0][2] - covView[0][0]*covView[1][2],
+                            covView[0][0]*covView[1][1] - covView[0][1]*covView[0][1]);
+
+        float n0 = dot(c0, c0), n1 = dot(c1, c1), n2 = dot(c2, c2);
+        float3 normal_view;
+        if (n0 >= n1 && n0 >= n2) {
+            normal_view = c0 * fast::rsqrt(max(n0, 1e-12f));
+        } else if (n1 >= n2) {
+            normal_view = c1 * fast::rsqrt(max(n1, 1e-12f));
+        } else {
+            normal_view = c2 * fast::rsqrt(max(n2, 1e-12f));
+        }
+        if (normal_view.z > 0.0f) normal_view = -normal_view;
+
+        meshViewCenter = viewPos;
+        meshViewNormal = normal_view;
+    }
+
     uint vertexBase = threadIndex * VERTICES_PER_SPLAT;
 
     // Generate 4 vertices for this splat's quad (unrolled)
@@ -342,6 +387,10 @@ void splatMeshShader(
         v0.lodBand = half(0);
         v0.debugFlags = debugFlags;
         v0.splatID = actualSplatIndex;
+        v0.viewCenter = meshViewCenter;
+        v0.viewNormal = meshViewNormal;
+        v0.viewTangentU = float3(0);
+        v0.viewTangentV = float3(0);
         outputMesh.set_vertex(vertexBase + 0, v0);
     }
 
@@ -358,6 +407,10 @@ void splatMeshShader(
         v1.lodBand = half(0);
         v1.debugFlags = debugFlags;
         v1.splatID = actualSplatIndex;
+        v1.viewCenter = meshViewCenter;
+        v1.viewNormal = meshViewNormal;
+        v1.viewTangentU = float3(0);
+        v1.viewTangentV = float3(0);
         outputMesh.set_vertex(vertexBase + 1, v1);
     }
 
@@ -374,6 +427,10 @@ void splatMeshShader(
         v2.lodBand = half(0);
         v2.debugFlags = debugFlags;
         v2.splatID = actualSplatIndex;
+        v2.viewCenter = meshViewCenter;
+        v2.viewNormal = meshViewNormal;
+        v2.viewTangentU = float3(0);
+        v2.viewTangentV = float3(0);
         outputMesh.set_vertex(vertexBase + 2, v2);
     }
 
@@ -390,6 +447,10 @@ void splatMeshShader(
         v3.lodBand = half(0);
         v3.debugFlags = debugFlags;
         v3.splatID = actualSplatIndex;
+        v3.viewCenter = meshViewCenter;
+        v3.viewNormal = meshViewNormal;
+        v3.viewTangentU = float3(0);
+        v3.viewTangentV = float3(0);
         outputMesh.set_vertex(vertexBase + 3, v3);
     }
 
@@ -471,6 +532,7 @@ void splatMeshShaderPrecomputed(
     uint vertexBase = threadIndex * VERTICES_PER_SPLAT;
 
     // Generate 4 vertices for this splat's quad (unrolled, same as standard mesh shader)
+    // Precomputed path: 2DGS fields zeroed (normal extraction requires raw covariance)
 
     // Vertex 0: bottom-left (-1, -1)
     {
@@ -484,6 +546,8 @@ void splatMeshShaderPrecomputed(
         v0.lodBand = half(0);
         v0.debugFlags = debugFlags;
         v0.splatID = actualSplatIndex;
+        v0.viewCenter = float3(0); v0.viewNormal = float3(0);
+        v0.viewTangentU = float3(0); v0.viewTangentV = float3(0);
         outputMesh.set_vertex(vertexBase + 0, v0);
     }
 
@@ -499,6 +563,8 @@ void splatMeshShaderPrecomputed(
         v1.lodBand = half(0);
         v1.debugFlags = debugFlags;
         v1.splatID = actualSplatIndex;
+        v1.viewCenter = float3(0); v1.viewNormal = float3(0);
+        v1.viewTangentU = float3(0); v1.viewTangentV = float3(0);
         outputMesh.set_vertex(vertexBase + 1, v1);
     }
 
@@ -514,6 +580,8 @@ void splatMeshShaderPrecomputed(
         v2.lodBand = half(0);
         v2.debugFlags = debugFlags;
         v2.splatID = actualSplatIndex;
+        v2.viewCenter = float3(0); v2.viewNormal = float3(0);
+        v2.viewTangentU = float3(0); v2.viewTangentV = float3(0);
         outputMesh.set_vertex(vertexBase + 2, v2);
     }
 
@@ -529,6 +597,8 @@ void splatMeshShaderPrecomputed(
         v3.lodBand = half(0);
         v3.debugFlags = debugFlags;
         v3.splatID = actualSplatIndex;
+        v3.viewCenter = float3(0); v3.viewNormal = float3(0);
+        v3.viewTangentU = float3(0); v3.viewTangentV = float3(0);
         outputMesh.set_vertex(vertexBase + 3, v3);
     }
 

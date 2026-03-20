@@ -1189,7 +1189,7 @@ public class SplatRenderer: @unchecked Sendable {
         try add(newPoints.points)
     }
 
-    private func resetPipelineStates() {
+    internal func resetPipelineStates() {
         singleStagePipelineState = nil
         ditheredPipelineState = nil
         ditheredDepthState = nil

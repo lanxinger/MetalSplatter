@@ -136,6 +136,7 @@ extension PLYHeader: CustomStringConvertible {
     public var description: String {
         "ply\n" +
         "format \(format.rawValue) \(version)\n" +
+        comments.map { "comment \($0)\n" }.joined() +
         elements.map(\.description).reduce("", +)
     }
 }

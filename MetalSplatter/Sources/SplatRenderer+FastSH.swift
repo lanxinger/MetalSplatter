@@ -101,6 +101,11 @@ public class FastSHSplatRenderer: SplatRenderer, @unchecked Sendable {
 
     private var shaderParameters = FastSHShaderParameters()
 
+    internal override func resetPipelineStates() {
+        super.resetPipelineStates()
+        fastSHPipelineState = nil
+    }
+
     public override func prepareForSorting(count: Int) throws {
         try super.prepareForSorting(count: count)
         if splatSHBufferPrime.capacity < count {
