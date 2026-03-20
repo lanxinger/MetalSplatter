@@ -24,6 +24,7 @@ struct MetalKitSceneView: View {
     @State private var meshShaderEnabled = true // Metal 3+ mesh shader rendering - enabled by default
     @State private var ditheredTransparencyEnabled = false // Stochastic transparency - disabled by default
     @State private var metal4SortingEnabled = true // Metal 4 GPU radix sort - enabled by default
+    @State private var use2DGSMode = false // 2DGS planar rendering - disabled by default
     @State private var renderScale: CGFloat = 0.66 // iOS fill-rate control: 66% scale ~= 44% pixels
     @State private var adaptiveRenderScaleEnabled = false // Opt-in to avoid visible resolution pumping artifacts
 
@@ -39,6 +40,7 @@ struct MetalKitSceneView: View {
                 meshShaderEnabled: $meshShaderEnabled,
                 ditheredTransparencyEnabled: $ditheredTransparencyEnabled,
                 metal4SortingEnabled: $metal4SortingEnabled,
+                use2DGSMode: $use2DGSMode,
                 renderScale: $renderScale,
                 adaptiveRenderScaleEnabled: $adaptiveRenderScaleEnabled
             )
@@ -242,6 +244,19 @@ struct MetalKitSceneView: View {
                                 }
                             }
 
+                            Divider()
+
+                            // 2DGS Mode Toggle
+                            Toggle(isOn: $use2DGSMode) {
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text("2DGS Rendering Mode")
+                                        .font(.subheadline)
+                                    Text("Flat oriented splats with normal extraction")
+                                        .font(.caption)
+                                        .foregroundColor(.secondary)
+                                }
+                            }
+
 #if os(iOS)
                             Divider()
 
@@ -333,6 +348,7 @@ struct MetalKitRendererView: ViewRepresentable {
     @Binding var meshShaderEnabled: Bool
     @Binding var ditheredTransparencyEnabled: Bool
     @Binding var metal4SortingEnabled: Bool
+    @Binding var use2DGSMode: Bool
     @Binding var renderScale: CGFloat
     @Binding var adaptiveRenderScaleEnabled: Bool
 
@@ -373,6 +389,7 @@ struct MetalKitRendererView: ViewRepresentable {
             renderer?.setMeshShader(parent.meshShaderEnabled)
             renderer?.setDitheredTransparency(parent.ditheredTransparencyEnabled)
             renderer?.setMetal4Sorting(parent.metal4SortingEnabled)
+            renderer?.set2DGSMode(parent.use2DGSMode)
 
 #if os(iOS)
             renderer?.setInternalRenderScale(parent.renderScale)
@@ -512,6 +529,7 @@ struct MetalKitRendererView: ViewRepresentable {
         renderer?.setMeshShader(meshShaderEnabled)
         renderer?.setDitheredTransparency(ditheredTransparencyEnabled)
         renderer?.setMetal4Sorting(metal4SortingEnabled)
+        renderer?.set2DGSMode(use2DGSMode)
 
 #if os(iOS)
         renderer?.setInternalRenderScale(renderScale)

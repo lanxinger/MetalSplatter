@@ -815,15 +815,15 @@ class MetalKitSceneRenderer: NSObject, MTKViewDelegate {
     }
 
     /// Enable or disable 2DGS rendering mode
-    /// 2DGS uses simplified uniform circular splats for faster rendering
-    /// Less accurate for anisotropic splats but significantly faster
+    /// 2DGS uses proper oriented elliptical splats with normal extraction from covariance.
+    /// Best for scenes trained with 2D Gaussian Splatting (flat/planar splats).
     func set2DGSMode(_ enabled: Bool) {
         if let splat = modelRenderer as? SplatRenderer {
             splat.use2DGSMode = enabled
             if enabled {
-                Self.log.info("2DGS mode enabled - simplified circular splats (faster)")
+                Self.log.info("2DGS mode enabled - oriented splats with normal extraction")
             } else {
-                Self.log.info("2DGS mode disabled - full 3D covariance projection (accurate)")
+                Self.log.info("2DGS mode disabled - standard 3DGS rendering")
             }
         }
 

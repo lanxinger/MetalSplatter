@@ -110,12 +110,12 @@ struct RenderSettings: View {
 
             Divider()
 
-            // 2DGS Mode Toggle - simplified rendering
+            // 2DGS Mode Toggle - planar Gaussian rendering
             Toggle(isOn: $use2DGSMode) {
                 VStack(alignment: .leading, spacing: 2) {
                     Text("2DGS Rendering Mode")
                         .font(.subheadline)
-                    Text("Faster circular splats (less accurate for anisotropic)")
+                    Text("Flat oriented splats with normal extraction (for 2DGS-trained scenes)")
                         .font(.caption)
                         .foregroundColor(.secondary)
                 }

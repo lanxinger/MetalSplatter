@@ -131,61 +131,78 @@ FragmentIn splatVertex(Splat splat,
         return out;
     }
 
+    // Pre-load covariance data
+    packed_half3 covA = splat.covA;
+    packed_half3 covB = splat.covB;
+
+    float3 cov2D = calcCovariance2D(viewPosition3, covA, covB,
+                                    uniforms.viewMatrix,
+                                    uniforms.focalX, uniforms.focalY,
+                                    uniforms.tanHalfFovX, uniforms.tanHalfFovY);
+
     float2 axis1;
     float2 axis2;
+    decomposeCovariance(cov2D, axis1, axis2);
 
-    // 2DGS mode: simplified screen-space quads without full 3D covariance projection
-    // Uses uniform circular splats based on maximum covariance component
-    // Faster but less accurate for anisotropic splats
+    // Screen-space LOD culling - cull sub-pixel splats
+    float pixelRadius = max(length(axis1 + axis2), length(axis1 - axis2)) * kBoundsRadius;
+    if (pixelRadius < 0.5f) {
+        out.position = float4(1, 1, 0, 1);
+        out.relativePosition = half2(0);
+        out.color = half4(0);
+        out.splatID = splatID;
+        return out;
+    }
+
+    // 2DGS: extract splat normal from 3D covariance for future ray-splat intersection.
+    // For 2DGS splats (rank-2 covariance), the normal is the null-space direction.
+    // We find it via the cofactor matrix of the view-space covariance.
     if (use2DGS) {
-        // Estimate radius from covariance diagonal (maximum eigenvalue approximation)
-        packed_half3 covA = splat.covA;
-        packed_half3 covB = splat.covB;
+        // Transform covariance to view space: W * Vrk * W^T
+        float3x3 Vrk = float3x3(
+            covA.x, covA.y, covA.z,
+            covA.y, covB.x, covB.y,
+            covA.z, covB.y, covB.z
+        );
+        float3x3 W = float3x3(uniforms.viewMatrix[0].xyz,
+                               uniforms.viewMatrix[1].xyz,
+                               uniforms.viewMatrix[2].xyz);
+        float3x3 covView = W * Vrk * transpose(W);
 
-        // Use max of diagonal covariance as radius estimate
-        float maxCov = max(max(float(covA.x), float(covB.x)), float(covB.z));
-        float radius = fast::sqrt(maxCov);
+        // Cofactor rows — for a rank-2 matrix, the cofactor with largest norm
+        // gives the null-space direction (splat normal).
+        float3 c0 = float3(covView[1][1]*covView[2][2] - covView[1][2]*covView[1][2],
+                            covView[0][2]*covView[1][2] - covView[0][1]*covView[2][2],
+                            covView[0][1]*covView[1][2] - covView[0][2]*covView[1][1]);
+        float3 c1 = float3(covView[0][2]*covView[1][2] - covView[0][1]*covView[2][2],
+                            covView[0][0]*covView[2][2] - covView[0][2]*covView[0][2],
+                            covView[0][1]*covView[0][2] - covView[0][0]*covView[1][2]);
+        float3 c2 = float3(covView[0][1]*covView[1][2] - covView[0][2]*covView[1][1],
+                            covView[0][1]*covView[0][2] - covView[0][0]*covView[1][2],
+                            covView[0][0]*covView[1][1] - covView[0][1]*covView[0][1]);
 
-        // Project radius to screen space
-        float focalX = float(uniforms.screenSize.x) * uniforms.projectionMatrix[0][0] * 0.5f;
-        float screenRadius = radius * focalX * invW;
-
-        // Sub-pixel culling
-        if (screenRadius < 0.5f) {
-            out.position = float4(1, 1, 0, 1);
-            out.relativePosition = half2(0);
-            out.color = half4(0);
-            out.splatID = splatID;
-            return out;
+        float n0 = dot(c0, c0), n1 = dot(c1, c1), n2 = dot(c2, c2);
+        float3 normal_view;
+        if (n0 >= n1 && n0 >= n2) {
+            normal_view = c0 * fast::rsqrt(max(n0, 1e-12f));
+        } else if (n1 >= n2) {
+            normal_view = c1 * fast::rsqrt(max(n1, 1e-12f));
+        } else {
+            normal_view = c2 * fast::rsqrt(max(n2, 1e-12f));
         }
 
-        // Set uniform circular splat axes
-        axis1 = float2(screenRadius, 0);
-        axis2 = float2(0, screenRadius);
+        // Ensure normal faces the camera (view space: camera looks along -Z)
+        if (normal_view.z > 0.0f) normal_view = -normal_view;
+
+        out.viewCenter = viewPosition3;
+        out.viewNormal = normal_view;
+        out.viewTangentU = float3(0);  // Reserved for future ray-splat intersection
+        out.viewTangentV = float3(0);
     } else {
-        // Full 3DGS: complete covariance projection and decomposition
-
-        // Pre-load covariance data for coalesced memory access
-        packed_half3 covA = splat.covA;
-        packed_half3 covB = splat.covB;
-
-        float3 cov2D = calcCovariance2D(viewPosition3, covA, covB,
-                                        uniforms.viewMatrix,
-                                        uniforms.focalX, uniforms.focalY,
-                                        uniforms.tanHalfFovX, uniforms.tanHalfFovY);
-
-        decomposeCovariance(cov2D, axis1, axis2);
-
-        // Screen-space LOD culling - cull sub-pixel splats
-        // Compute pixel radius from 2D covariance axes (matches actual quad size)
-        float pixelRadius = max(length(axis1 + axis2), length(axis1 - axis2)) * kBoundsRadius;
-        if (pixelRadius < 0.5f) {
-            out.position = float4(1, 1, 0, 1);
-            out.relativePosition = half2(0);
-            out.color = half4(0);
-            out.splatID = splatID;
-            return out;
-        }
+        out.viewCenter = float3(0);
+        out.viewNormal = float3(0);
+        out.viewTangentU = float3(0);
+        out.viewTangentV = float3(0);
     }
 
     // Pre-compute lookup table data for better cache utilization

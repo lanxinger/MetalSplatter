@@ -40,6 +40,11 @@ inline half3 lodTintForBand(half band) {
 }
 
 inline half4 shadeSplat(FragmentIn in) {
+    // Both 3DGS and 2DGS use the same screen-space Gaussian alpha evaluation.
+    // For 2DGS, the vertex shader produces properly oriented elliptical quads from
+    // the full covariance projection, so the UV-based evaluation is correct.
+    // The flat viewCenter/viewNormal/viewTangent* attributes are available for
+    // future per-fragment depth correction via ray-plane intersection.
     half alpha = splatFragmentAlpha(in.relativePosition, in.color.a);
     half3 rgb = in.color.rgb;
 
