@@ -312,8 +312,12 @@ public class FastSHSplatRenderer: SplatRenderer, @unchecked Sendable {
     
     /// Override read method to use Fast SH loading pipeline
     public override func read(from url: URL) async throws {
+        let reader = try AutodetectSceneReader(url)
         var newPoints = SplatMemoryBuffer()
-        try await newPoints.read(from: try AutodetectSceneReader(url))
+        try await newPoints.read(from: reader)
+        if reader.isMipSplatting {
+            covarianceBlur = 0.1
+        }
         try await loadSplatsWithSH(newPoints.points)
     }
     
