@@ -56,6 +56,18 @@ public enum SplatRendererError: LocalizedError {
 }
 
 public class SplatRenderer: @unchecked Sendable {
+    public enum SplatRenderMode: UInt32, Sendable {
+        case standard = 0
+        case mip = 1
+
+        var defaultCovarianceBlur: Float {
+            switch self {
+            case .standard: 0.3
+            case .mip: 0.1
+            }
+        }
+    }
+
     /// Sorting mode selection for gaussian splat depth ordering
     /// - radial: Sort by squared distance from camera (better for rotation-heavy views like 360°)
     /// - linear: Sort by dot product with view direction (better for translation-heavy movement)
@@ -152,8 +164,9 @@ public class SplatRenderer: @unchecked Sendable {
     public var batchPrecomputeEnabled = false  // Enable for large scenes
     
     // PrecomputedSplat structure size (must match Metal shader with proper alignment)
-    // Metal alignment: float4 (16) + float3 (12+4 padding) + float2 (8) + float2 (8) + float (4) + uint (4)
-    // = 56 bytes, rounded to 64 due to struct's 16-byte alignment (from float4/float3)
+    // Metal alignment: float4 (16) + float3 (12+4 padding) + float2 (8) + float2 (8)
+    // + float depth (4) + float opacityScale (4) + uint visible (4) = 60 bytes,
+    // rounded to 64 due to the struct's 16-byte alignment.
     internal static let precomputedSplatStride = 64
 
     internal struct Metal4SIMDOutputs {
@@ -206,6 +219,9 @@ public class SplatRenderer: @unchecked Sendable {
         var splatCount: UInt32
         var indexedSplatCount: UInt32
         var debugFlags: UInt32
+        var renderMode: UInt32
+        var padding0: UInt32
+        var padding1: UInt32
         var lodThresholds: SIMD3<Float>
         var covarianceBlur: Float
     }
@@ -320,10 +336,23 @@ public class SplatRenderer: @unchecked Sendable {
         return SIMD3<Float>(thresholds[0], thresholds[1], thresholds[2])
     }()
 
+    /// Rendering behavior for Brush-style covariance filtering.
+    /// Updating the mode resets `covarianceBlur` to the mode default.
+    public var renderMode: SplatRenderMode = .standard {
+        didSet {
+            covarianceBlur = renderMode.defaultCovarianceBlur
+            invalidatePrecomputedData()
+        }
+    }
+
     /// Low-pass filter applied to the 2D covariance diagonal.
-    /// Default 0.3 for standard 3DGS. Set to 0.1 for Brush mip splatting trained models.
-    /// Automatically detected from PLY `comment SplatRenderMode mip` header.
-    public var covarianceBlur: Float = 0.3
+    /// Derived from `renderMode` by default.
+    /// Override only for compatibility experiments; MIP compensation still comes from `renderMode`.
+    public var covarianceBlur: Float = SplatRenderMode.standard.defaultCovarianceBlur {
+        didSet {
+            invalidatePrecomputedData()
+        }
+    }
 
     // MARK: - Morton Ordering
 
@@ -1187,9 +1216,7 @@ public class SplatRenderer: @unchecked Sendable {
         let reader = try AutodetectSceneReader(url)
         var newPoints = SplatMemoryBuffer()
         try await newPoints.read(from: reader)
-        if reader.isMipSplatting {
-            covarianceBlur = 0.1
-        }
+        renderMode = Self.renderMode(from: reader.renderMode)
         try add(newPoints.points)
     }
 
@@ -1953,6 +1980,61 @@ public class SplatRenderer: @unchecked Sendable {
         }
         return currentBuffer
     }
+
+    internal func makeUniforms(for viewport: ViewportDescriptor,
+                               splatCount: UInt32,
+                               indexedSplatCount: UInt32,
+                               debugFlags: UInt32) -> Uniforms {
+        Self.makeUniforms(for: viewport,
+                          splatCount: splatCount,
+                          indexedSplatCount: indexedSplatCount,
+                          debugFlags: debugFlags,
+                          renderMode: renderMode,
+                          covarianceBlur: covarianceBlur,
+                          lodThresholds: lodThresholds)
+    }
+
+    static func makeUniforms(for viewport: ViewportDescriptor,
+                             splatCount: UInt32,
+                             indexedSplatCount: UInt32,
+                             debugFlags: UInt32,
+                             renderMode: SplatRenderMode,
+                             covarianceBlur: Float,
+                             lodThresholds: SIMD3<Float>) -> Uniforms {
+        let proj00 = viewport.projectionMatrix[0][0]
+        let proj11 = viewport.projectionMatrix[1][1]
+        let focalX = Float(viewport.screenSize.x) * proj00 / 2
+        let focalY = Float(viewport.screenSize.y) * proj11 / 2
+        let tanHalfFovX = 1 / proj00
+        let tanHalfFovY = 1 / proj11
+
+        return Uniforms(
+            projectionMatrix: viewport.projectionMatrix,
+            viewMatrix: viewport.viewMatrix,
+            screenSize: SIMD2(x: UInt32(viewport.screenSize.x), y: UInt32(viewport.screenSize.y)),
+            focalX: focalX,
+            focalY: focalY,
+            tanHalfFovX: tanHalfFovX,
+            tanHalfFovY: tanHalfFovY,
+            splatCount: splatCount,
+            indexedSplatCount: indexedSplatCount,
+            debugFlags: debugFlags,
+            renderMode: renderMode.rawValue,
+            padding0: 0,
+            padding1: 0,
+            lodThresholds: lodThresholds,
+            covarianceBlur: covarianceBlur
+        )
+    }
+
+    static func renderMode(from mode: AutodetectSceneReader.RenderMode) -> SplatRenderMode {
+        switch mode {
+        case .standard:
+            return .standard
+        case .mip:
+            return .mip
+        }
+    }
     
     /// Pre-compute covariance and transforms for all splats on GPU
     /// This moves expensive per-vertex math to a one-time batch operation
@@ -1981,31 +2063,10 @@ public class SplatRenderer: @unchecked Sendable {
         let requiredSize = splatCount * Self.precomputedSplatStride
         guard let precomputedBuffer = ensurePrecomputedSplatBuffer(requiredSize: requiredSize) else { return }
         
-        // Create uniform buffer for this computation
-        // Precompute values for covariance projection (avoids per-splat division in shader)
-        let proj00 = viewport.projectionMatrix[0][0]
-        let proj11 = viewport.projectionMatrix[1][1]
-        let focalX = Float(viewport.screenSize.x) * proj00 / 2
-        let focalY = Float(viewport.screenSize.y) * proj11 / 2
-        let tanHalfFovX = 1 / proj00
-        let tanHalfFovY = 1 / proj11
-
-        var uniforms = Uniforms(
-            projectionMatrix: viewport.projectionMatrix,
-            viewMatrix: viewport.viewMatrix,
-            screenSize: SIMD2<UInt32>(UInt32(viewport.screenSize.x), UInt32(viewport.screenSize.y)),
-            focalX: focalX,
-            focalY: focalY,
-            tanHalfFovX: tanHalfFovX,
-            tanHalfFovY: tanHalfFovY,
-            splatCount: UInt32(splatCount),
-            indexedSplatCount: UInt32(min(splatCount, Constants.maxIndexedSplatCount)),
-            debugFlags: 0,
-            lodThresholds: SIMD3<Float>(Constants.lodDistanceThresholds[0],
-                                         Constants.lodDistanceThresholds[1],
-                                         Constants.lodDistanceThresholds[2]),
-            covarianceBlur: covarianceBlur
-        )
+        var uniforms = makeUniforms(for: viewport,
+                                    splatCount: UInt32(splatCount),
+                                    indexedSplatCount: UInt32(min(splatCount, Constants.maxIndexedSplatCount)),
+                                    debugFlags: 0)
 
         var splatCountValue = UInt32(splatCount)
         
@@ -2310,27 +2371,10 @@ public class SplatRenderer: @unchecked Sendable {
         // Clamp to maxViewCount to avoid buffer overrun (off-by-one fix: use < not <=)
         for (i, viewport) in viewports.prefix(maxViewCount).enumerated() {
             let debugFlags = debugOptions.rawValue
-
-            // Precompute values for covariance projection (avoids per-splat division in shader)
-            let proj00 = viewport.projectionMatrix[0][0]
-            let proj11 = viewport.projectionMatrix[1][1]
-            let focalX = Float(viewport.screenSize.x) * proj00 / 2
-            let focalY = Float(viewport.screenSize.y) * proj11 / 2
-            let tanHalfFovX = 1 / proj00
-            let tanHalfFovY = 1 / proj11
-
-            let uniforms = Uniforms(projectionMatrix: viewport.projectionMatrix,
-                                    viewMatrix: viewport.viewMatrix,
-                                    screenSize: SIMD2(x: UInt32(viewport.screenSize.x), y: UInt32(viewport.screenSize.y)),
-                                    focalX: focalX,
-                                    focalY: focalY,
-                                    tanHalfFovX: tanHalfFovX,
-                                    tanHalfFovY: tanHalfFovY,
-                                    splatCount: splatCount,
-                                    indexedSplatCount: indexedSplatCount,
-                                    debugFlags: debugFlags,
-                                    lodThresholds: lodThresholds,
-                                    covarianceBlur: covarianceBlur)
+            let uniforms = makeUniforms(for: viewport,
+                                        splatCount: splatCount,
+                                        indexedSplatCount: indexedSplatCount,
+                                        debugFlags: debugFlags)
             self.uniforms.pointee.setUniforms(index: i, uniforms)
         }
         updateSortReferenceCamera(from: viewports)

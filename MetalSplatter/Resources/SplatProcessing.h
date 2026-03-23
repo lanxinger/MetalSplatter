@@ -4,9 +4,6 @@
 constant uint DebugFlagOverdraw = 1u;
 constant uint DebugFlagLodTint = 2u;
 
-// Render mode flags (passed via uniforms.renderModeFlags)
-constant uint RenderModeDitheredTransparency = 1u;
-
 float3 calcCovariance2D(float3 viewPos,
                         packed_half3 cov3Da,
                         packed_half3 cov3Db,
@@ -15,7 +12,9 @@ float3 calcCovariance2D(float3 viewPos,
                         float focalY,
                         float tanHalfFovX,
                         float tanHalfFovY,
-                        float covarianceBlur);
+                        float covarianceBlur,
+                        uint renderMode,
+                        thread float &opacityScale);
 
 void decomposeCovariance(float3 cov2D, thread float2 &v1, thread float2 &v2);
 

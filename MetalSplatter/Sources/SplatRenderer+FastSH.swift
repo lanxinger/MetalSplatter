@@ -315,9 +315,7 @@ public class FastSHSplatRenderer: SplatRenderer, @unchecked Sendable {
         let reader = try AutodetectSceneReader(url)
         var newPoints = SplatMemoryBuffer()
         try await newPoints.read(from: reader)
-        if reader.isMipSplatting {
-            covarianceBlur = 0.1
-        }
+        renderMode = Self.renderMode(from: reader.renderMode)
         try await loadSplatsWithSH(newPoints.points)
     }
     
@@ -443,27 +441,15 @@ extension FastSHSplatRenderer {
 
         // Set up viewports and draw
         for (viewportIndex, viewport) in viewports.prefix(maxViewCount).enumerated() {
-            // Precompute values for covariance projection (avoids per-splat division in shader)
-            let proj00 = viewport.projectionMatrix[0][0]
-            let proj11 = viewport.projectionMatrix[1][1]
-            let focalX = Float(viewport.screenSize.x) * proj00 / 2
-            let focalY = Float(viewport.screenSize.y) * proj11 / 2
-            let tanHalfFovX = 1 / proj00
-            let tanHalfFovY = 1 / proj11
-
-            uniforms.pointee.setUniforms(index: viewportIndex, Uniforms(
-                projectionMatrix: viewport.projectionMatrix,
-                viewMatrix: viewport.viewMatrix,
-                screenSize: SIMD2<UInt32>(UInt32(viewport.screenSize.x), UInt32(viewport.screenSize.y)),
-                focalX: focalX,
-                focalY: focalY,
-                tanHalfFovX: tanHalfFovX,
-                tanHalfFovY: tanHalfFovY,
+            let splatViewport = ViewportDescriptor(viewport: viewport.viewport,
+                                                   projectionMatrix: viewport.projectionMatrix,
+                                                   viewMatrix: viewport.viewMatrix,
+                                                   screenSize: viewport.screenSize)
+            uniforms.pointee.setUniforms(index: viewportIndex, makeUniforms(
+                for: splatViewport,
                 splatCount: UInt32(splatCount),
                 indexedSplatCount: UInt32(min(splatCount, Constants.maxIndexedSplatCount)),
-                debugFlags: debugOptions.rawValue,
-                lodThresholds: lodThresholds,
-                covarianceBlur: covarianceBlur
+                debugFlags: debugOptions.rawValue
             ))
         }
 

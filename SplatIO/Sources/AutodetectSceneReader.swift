@@ -5,9 +5,16 @@ public class AutodetectSceneReader: SplatSceneReader {
         case cannotDetermineFormat
     }
 
-    /// Whether the loaded PLY was trained with Brush mip splatting (COV_BLUR = 0.1).
-    /// Check this after init to set `SplatRenderer.covarianceBlur` accordingly.
-    public private(set) var isMipSplatting: Bool = false
+    public enum RenderMode: Sendable, Equatable {
+        case standard
+        case mip
+    }
+
+    /// Brush metadata-derived render mode.
+    public private(set) var renderMode: RenderMode = .standard
+
+    /// Whether the loaded asset should use Brush MIP rendering semantics.
+    public var isMipSplatting: Bool { renderMode == .mip }
 
     private let reader: SplatSceneReader
 
@@ -88,27 +95,40 @@ public class AutodetectSceneReader: SplatSceneReader {
             throw Error.cannotDetermineFormat
         }
 
-        // Detect Brush mip splatting render mode from file metadata.
-        // Scans the first 8 KB for the marker string — works across all formats
-        // since conversion tools may preserve the original PLY comment/metadata.
-        isMipSplatting = Self.detectMipSplatting(url: url)
+        // Detect Brush render mode from file metadata.
+        // Scans the first 8 KB for the marker string since conversion tools may preserve
+        // the original PLY comment/metadata across container formats.
+        renderMode = Self.detectRenderMode(url: url)
     }
 
-    /// Scan the first bytes of any splat file for Brush's `SplatRenderMode mip` marker.
-    /// In PLY this lives in the ASCII header; converters may preserve it in other formats.
-    private static func detectMipSplatting(url: URL) -> Bool {
+    /// Scan for Brush's `SplatRenderMode: ...` marker.
+    /// For binary PLYs, only decode the ASCII header bytes up to `end_header` so
+    /// binary payload data cannot break UTF-8/ASCII decoding.
+    private static func detectRenderMode(url: URL) -> RenderMode {
         let scanSize = 8192
-        guard let handle = try? FileHandle(forReadingFrom: url) else { return false }
+        guard let handle = try? FileHandle(forReadingFrom: url) else { return .standard }
         defer { try? handle.close() }
-        guard let data = try? handle.read(upToCount: scanSize), !data.isEmpty else { return false }
-        guard let text = String(data: data, encoding: .ascii) ?? String(data: data, encoding: .utf8) else {
-            return false
+        guard let data = try? handle.read(upToCount: scanSize), !data.isEmpty else { return .standard }
+
+        let headerData: Data
+        if let range = data.range(of: Data("end_header".utf8)) {
+            let upperBound = min(data.count, range.upperBound + 1)
+            headerData = data.subdata(in: 0..<upperBound)
+        } else {
+            headerData = data
         }
-        let isMip = text.contains("SplatRenderMode mip")
-        if isMip {
-            print("AutodetectSceneReader: Detected Brush mip splatting render mode")
+
+        guard let text = String(data: headerData, encoding: .ascii) ?? String(data: headerData, encoding: .utf8) else {
+            return .standard
         }
-        return isMip
+
+        // Brush currently exports `SplatRenderMode: mip`; accept the legacy marker
+        // without the colon as well to remain permissive with converted assets.
+        if text.contains("SplatRenderMode: mip") || text.contains("SplatRenderMode mip") {
+            print("AutodetectSceneReader: Detected Brush mip render mode")
+            return .mip
+        }
+        return .standard
     }
 
     public func readScene() throws -> [SplatScenePoint] {

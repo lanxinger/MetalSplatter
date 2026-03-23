@@ -70,10 +70,12 @@ final class ModelCache {
         switch identifier {
         case .gaussianSplat(let url):
             // Perform file I/O and parsing off the main actor
-            let (points, isMip) = try await Task.detached(priority: .userInitiated) {
+            let (points, renderMode) = try await Task.detached(priority: .userInitiated) {
                 let reader = try AutodetectSceneReader(url)
                 let pts = try reader.readScene()
-                return (pts, reader.isMipSplatting)
+                let renderMode: SplatRenderer.SplatRenderMode =
+                    reader.renderMode == .mip ? .mip : .standard
+                return (pts, renderMode)
             }.value
 
             return CachedModel(
@@ -82,7 +84,7 @@ final class ModelCache {
                 lastAccessed: Date(),
                 securityScopedURL: securityScopedURL,
                 hasSecurityScopedAccess: hasSecurityScopedAccess,
-                isMipSplatting: isMip
+                renderMode: renderMode
             )
 
         case .sampleBox:
@@ -156,6 +158,6 @@ struct CachedModel {
     let securityScopedURL: URL?
     /// Whether security-scoped access was started for this URL
     let hasSecurityScopedAccess: Bool
-    /// Whether this model was trained with Brush mip splatting (affects covariance blur)
-    var isMipSplatting: Bool = false
+    /// Brush-compatible render mode derived from source metadata.
+    var renderMode: SplatRenderer.SplatRenderMode = .standard
 }

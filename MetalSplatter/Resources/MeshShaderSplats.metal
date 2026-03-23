@@ -71,7 +71,9 @@ inline float3 meshCalcCovariance2D(float3 viewPos,
                                     float4x4 viewMatrix,
                                     float4x4 projectionMatrix,
                                     uint2 screenSize,
-                                    float covarianceBlur) {
+                                    float covarianceBlur,
+                                    uint renderMode,
+                                    thread float &opacityScale) {
     // Guard against division by zero
     float safeViewPosZ = (abs(viewPos.z) < kDivisionEpsilon) ? copysign(kDivisionEpsilon, viewPos.z) : viewPos.z;
     float invViewPosZ = 1.0f / safeViewPosZ;
@@ -103,10 +105,10 @@ inline float3 meshCalcCovariance2D(float3 viewPos,
         cov3Da.z, cov3Db.y, cov3Db.z
     );
     float3x3 cov = T * Vrk * transpose(T);
-
-    cov[0][0] += covarianceBlur;
-    cov[1][1] += covarianceBlur;
-    return float3(cov[0][0], cov[0][1], cov[1][1]);
+    float3 covStart = float3(cov[0][0], cov[0][1], cov[1][1]);
+    float3 covEnd = applyCovarianceBlur(covStart, covarianceBlur);
+    opacityScale = opacityCompensation(covStart, covEnd, renderMode);
+    return covEnd;
 }
 
 inline void meshDecomposeCovariance(float3 cov2D, thread float2 &v1, thread float2 &v2) {
@@ -309,9 +311,10 @@ void splatMeshShader(
     float3 viewPos = payload.viewPositions[threadIndex];
 
     // Compute 2D covariance ONCE per splat (key optimization vs vertex shader)
+    float opacityScale = 1.0f;
     float3 cov2D = meshCalcCovariance2D(viewPos, splat.covA, splat.covB,
-                                         uniforms.viewMatrix, uniforms.projectionMatrix, uniforms.screenSize,
-                                         uniforms.covarianceBlur);
+                                        uniforms.viewMatrix, uniforms.projectionMatrix, uniforms.screenSize,
+                                        uniforms.covarianceBlur, uniforms.renderMode, opacityScale);
 
     float2 axis1, axis2;
     meshDecomposeCovariance(cov2D, axis1, axis2);
@@ -327,6 +330,7 @@ void splatMeshShader(
     half2 scaledAxis2 = half2(axis2) * scaleFactor;
 
     half4 splatColor = unpackSplatColor(splat.packedColor);
+    splatColor.a = min(splatColor.a * half(opacityScale), half(1.0));
     uint debugFlags = uniforms.debugFlags;
     float projW = projectedCenter.w;
 
@@ -521,6 +525,7 @@ void splatMeshShaderPrecomputed(
     float4 projectedCenter = pre.clipPosition;
 
     half4 splatColor = unpackSplatColor(splatArray[actualSplatIndex].packedColor);
+    splatColor.a = min(splatColor.a * half(pre.opacityScale), half(1.0));
     uint debugFlags = uniforms.debugFlags;
     float projW = projectedCenter.w;
 

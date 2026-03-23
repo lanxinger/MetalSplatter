@@ -117,10 +117,9 @@ class VisionSceneRenderer {
                 try renderer.add(cachedModel.points)
                 splat = renderer
             }
-            // Apply mip splatting blur if detected from file metadata
-            if cachedModel.isMipSplatting {
-                splat.covarianceBlur = 0.1
-                Self.log.info("Applied mip splatting covariance blur (0.1)")
+            if cachedModel.renderMode == .mip {
+                splat.renderMode = .mip
+                Self.log.info("Applied Brush MIP render mode")
             }
 
             modelRenderer = splat

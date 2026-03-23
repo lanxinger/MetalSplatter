@@ -84,12 +84,63 @@ final class SplatIOTests: XCTestCase {
     let plyURL = Bundle.module.url(forResource: "test-splat.3-points-from-train", withExtension: "ply", subdirectory: "TestData")!
     let dotSplatURL = Bundle.module.url(forResource: "test-splat.3-points-from-train", withExtension: "splat", subdirectory: "TestData")!
 
+    private func makeTemporaryPLY(comment: String?) throws -> URL {
+        let commentLine = comment.map { "\($0)\n" } ?? ""
+        let data = Data(
+            """
+            ply
+            format ascii 1.0
+            \(commentLine)element vertex 1
+            property float x
+            property float y
+            property float z
+            property float f_dc_0
+            property float f_dc_1
+            property float f_dc_2
+            property float scale_0
+            property float scale_1
+            property float scale_2
+            property float opacity
+            property float rot_0
+            property float rot_1
+            property float rot_2
+            property float rot_3
+            end_header
+            0 0 0 0.1 0.2 0.3 1 1 1 0.5 1 0 0 0
+            """.utf8
+        )
+
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+            .appendingPathExtension("ply")
+        try data.write(to: url)
+        return url
+    }
+
     func testReadPLY() throws {
         try testRead(plyURL)
     }
 
     func testReadDotSplat() throws {
         try testRead(dotSplatURL)
+    }
+
+    func testAutodetectRenderModeMipMarker() throws {
+        let url = try makeTemporaryPLY(comment: "comment SplatRenderMode: mip")
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        let reader = try AutodetectSceneReader(url)
+        XCTAssertEqual(reader.renderMode, .mip)
+        XCTAssertTrue(reader.isMipSplatting)
+    }
+
+    func testAutodetectRenderModeDefaultsToStandard() throws {
+        let url = try makeTemporaryPLY(comment: nil)
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        let reader = try AutodetectSceneReader(url)
+        XCTAssertEqual(reader.renderMode, .standard)
+        XCTAssertFalse(reader.isMipSplatting)
     }
 
     func testReadPLYWithPartialSphericalHarmonicsProperties() {

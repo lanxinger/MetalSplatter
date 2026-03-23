@@ -11,7 +11,9 @@ float3 calcCovariance2D(float3 viewPos,
                         float focalY,
                         float tanHalfFovX,
                         float tanHalfFovY,
-                        float covarianceBlur) {
+                        float covarianceBlur,
+                        uint renderMode,
+                        thread float &opacityScale) {
     // Guard against division by zero with epsilon
     float safeViewPosZ = (abs(viewPos.z) < kDivisionEpsilon) ? copysign(kDivisionEpsilon, viewPos.z) : viewPos.z;
     float invViewPosZ = fast::divide(1.0f, safeViewPosZ);
@@ -36,11 +38,10 @@ float3 calcCovariance2D(float3 viewPos,
     );
     float3x3 cov = T * Vrk * transpose(T);
 
-    // Apply low-pass filter: every Gaussian should be at least one pixel wide/high.
-    // Default 0.3 for standard 3DGS; 0.1 for Brush mip splatting trained models.
-    cov[0][0] += covarianceBlur;
-    cov[1][1] += covarianceBlur;
-    return float3(cov[0][0], cov[0][1], cov[1][1]);
+    float3 covStart = float3(cov[0][0], cov[0][1], cov[1][1]);
+    float3 covEnd = applyCovarianceBlur(covStart, covarianceBlur);
+    opacityScale = opacityCompensation(covStart, covEnd, renderMode);
+    return covEnd;
 }
 
 // cov2D is a flattened 2d covariance matrix. Given
@@ -136,11 +137,14 @@ FragmentIn splatVertex(Splat splat,
     packed_half3 covA = splat.covA;
     packed_half3 covB = splat.covB;
 
+    float opacityScale = 1.0f;
     float3 cov2D = calcCovariance2D(viewPosition3, covA, covB,
                                     uniforms.viewMatrix,
                                     uniforms.focalX, uniforms.focalY,
                                     uniforms.tanHalfFovX, uniforms.tanHalfFovY,
-                                    uniforms.covarianceBlur);
+                                    uniforms.covarianceBlur,
+                                    uniforms.renderMode,
+                                    opacityScale);
 
     float2 axis1;
     float2 axis2;
@@ -227,6 +231,7 @@ FragmentIn splatVertex(Splat splat,
                           projectedCenter.w);
     out.relativePosition = kBoundsRadius * relativeCoordinates;
     out.color = unpackSplatColor(splat.packedColor);
+    out.color.a = min(out.color.a * half(opacityScale), half(1.0));
 
     if ((uniforms.debugFlags & DebugFlagLodTint) != 0) {
         float distance = length(viewPosition3);

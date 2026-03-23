@@ -198,8 +198,9 @@ extension SplatRenderer {
         //   float2 axis1:        offset 32, size 8  (8-byte aligned)
         //   float2 axis2:        offset 40, size 8
         //   float depth:         offset 48, size 4
-        //   uint visible:        offset 52, size 4
-        //   Total: 56 bytes, rounded to 64 due to struct's 16-byte alignment requirement
+        //   float opacityScale:  offset 52, size 4
+        //   uint visible:        offset 56, size 4
+        //   Total: 60 bytes, rounded to 64 due to struct's 16-byte alignment requirement
         let requiredSize = splatCount * Self.precomputedSplatStride
         guard let precomputedBuffer = ensurePrecomputedSplatBuffer(requiredSize: requiredSize) else {
             Self.log.error("Metal 4.0: Failed to create precomputed buffer")

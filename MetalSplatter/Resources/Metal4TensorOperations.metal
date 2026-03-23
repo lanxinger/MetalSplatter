@@ -39,7 +39,10 @@ inline float3 computeCovariance2D(float3 viewPos,
                                    packed_half3 cov3Db,
                                    float4x4 viewMatrix,
                                    float4x4 projectionMatrix,
-                                   uint2 screenSize) {
+                                   uint2 screenSize,
+                                   float covarianceBlur,
+                                   uint renderMode,
+                                   thread float &opacityScale) {
     // Guard against division by zero
     float safeViewPosZ = (abs(viewPos.z) < kDivisionEpsilon) ? copysign(kDivisionEpsilon, viewPos.z) : viewPos.z;
     float invViewPosZ = 1.0f / safeViewPosZ;
@@ -71,12 +74,10 @@ inline float3 computeCovariance2D(float3 viewPos,
         cov3Da.z, cov3Db.y, cov3Db.z
     );
     float3x3 cov = T * Vrk * transpose(T);
-    
-    // Add small regularization
-    cov[0][0] += 0.3f;
-    cov[1][1] += 0.3f;
-    
-    return float3(cov[0][0], cov[0][1], cov[1][1]);
+    float3 covStart = float3(cov[0][0], cov[0][1], cov[1][1]);
+    float3 covEnd = applyCovarianceBlur(covStart, covarianceBlur);
+    opacityScale = opacityCompensation(covStart, covEnd, renderMode);
+    return covEnd;
 }
 
 // Decompose 2D covariance into ellipse axes
@@ -145,6 +146,7 @@ kernel void batchPrecomputeSplats(
     if (viewPos.z >= 0.0f) {
         output.visible = 0;
         output.depth = 1e10f;
+        output.opacityScale = 0.0f;
         outputSplats[index] = output;
         return;
     }
@@ -159,6 +161,7 @@ kernel void batchPrecomputeSplats(
     float3 ndc = clipPos.xyz / safeClipW;
     if (ndc.z > 1.0f || any(abs(ndc.xy) > 1.5f)) {
         output.visible = 0;
+        output.opacityScale = 0.0f;
         outputSplats[index] = output;
         return;
     }
@@ -166,9 +169,11 @@ kernel void batchPrecomputeSplats(
     output.visible = 1;
     
     // Compute 2D covariance
+    output.opacityScale = 1.0f;
     output.cov2D = computeCovariance2D(viewPos, splat.covA, splat.covB,
-                                        uniforms.viewMatrix, uniforms.projectionMatrix, 
-                                        uniforms.screenSize);
+                                        uniforms.viewMatrix, uniforms.projectionMatrix,
+                                        uniforms.screenSize, uniforms.covarianceBlur,
+                                        uniforms.renderMode, output.opacityScale);
     
     // Decompose into axes
     decomposeCovariance(output.cov2D, output.axis1, output.axis2);
@@ -249,9 +254,11 @@ kernel void batchComputeCovarianceSIMD(
     
     Splat splat = inputSplats[index];
     
+    float opacityScale = 1.0f;
     float3 cov2D = computeCovariance2D(viewPos, splat.covA, splat.covB,
                                         uniforms.viewMatrix, uniforms.projectionMatrix,
-                                        uniforms.screenSize);
+                                        uniforms.screenSize, uniforms.covarianceBlur,
+                                        uniforms.renderMode, opacityScale);
     
     float2 axis1, axis2;
     decomposeCovariance(cov2D, axis1, axis2);

@@ -6,6 +6,8 @@ using namespace metal;
 constant const int kMaxViewCount = 2;
 constant static const half kBoundsRadius = 3;
 constant static const half kBoundsRadiusSquared = kBoundsRadius*kBoundsRadius;
+constant static const uint RenderModeStandard = 0u;
+constant static const uint RenderModeMip = 1u;
 
 // Small epsilon to prevent division by zero in projection calculations
 constant static const float kDivisionEpsilon = 1e-6f;
@@ -38,8 +40,11 @@ typedef struct
     uint splatCount;
     uint indexedSplatCount;
     uint debugFlags;
+    uint renderMode;
+    uint padding0;
+    uint padding1;
     float3 lodThresholds;
-    float covarianceBlur;       // Low-pass filter for 2D covariance (0.3 default, 0.1 for mip splatting)
+    float covarianceBlur;       // Low-pass filter for 2D covariance (derived from render mode by default)
 } Uniforms;
 
 typedef struct
@@ -62,6 +67,24 @@ inline half4 unpackSplatColor(uint packed) {
     return unpack_unorm4x8_to_half(packed);
 }
 
+inline float covarianceDeterminant(float3 cov2D) {
+    return cov2D.x * cov2D.z - cov2D.y * cov2D.y;
+}
+
+inline float3 applyCovarianceBlur(float3 cov2D, float blur) {
+    return float3(cov2D.x + blur, cov2D.y, cov2D.z + blur);
+}
+
+inline float opacityCompensation(float3 covStart, float3 covEnd, uint renderMode) {
+    if (renderMode != RenderModeMip) {
+        return 1.0f;
+    }
+
+    float detStart = max(covarianceDeterminant(covStart), 0.0f);
+    float detEnd = covarianceDeterminant(covEnd);
+    return detEnd > 0.0f ? sqrt(detStart / detEnd) : 0.0f;
+}
+
 // Pre-computed splat data for Metal 4 TensorOps optimization
 // Must match layout in Metal4TensorOperations.metal
 typedef struct
@@ -71,6 +94,7 @@ typedef struct
     float2 axis1;           // 8 bytes - decomposed covariance axis 1
     float2 axis2;           // 8 bytes - decomposed covariance axis 2
     float depth;            // 4 bytes - for sorting
+    float opacityScale;     // 4 bytes - Brush MIP opacity compensation
     uint visible;           // 4 bytes - frustum culling result (0 = culled, 1 = visible)
 } PrecomputedSplat;         // Total: 64 bytes aligned
 

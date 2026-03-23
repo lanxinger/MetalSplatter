@@ -162,7 +162,13 @@ public class ARSplatRenderer: NSObject {
         set { splatRenderer.useDitheredTransparency = newValue }
     }
 
-    /// Covariance low-pass filter (0.3 default, 0.1 for Brush mip splatting)
+    /// Brush-compatible covariance filtering mode.
+    public var renderMode: SplatRenderer.SplatRenderMode {
+        get { splatRenderer.renderMode }
+        set { splatRenderer.renderMode = newValue }
+    }
+
+    /// Covariance low-pass filter override.
     public var covarianceBlur: Float {
         get { splatRenderer.covarianceBlur }
         set { splatRenderer.covarianceBlur = newValue }
