@@ -117,6 +117,35 @@ final class SplatIOTests: XCTestCase {
         return url
     }
 
+    private func makeTemporarySPZ(antialiased: Bool) throws -> URL {
+        var data = Data()
+
+        func appendUInt32(_ value: UInt32) {
+            var littleEndian = value.littleEndian
+            withUnsafeBytes(of: &littleEndian) { data.append(contentsOf: $0) }
+        }
+
+        appendUInt32(0x5053474e) // NGSP
+        appendUInt32(1)          // version 1 to keep the payload minimal
+        appendUInt32(1)          // numPoints
+        data.append(0)           // shDegree
+        data.append(0)           // fractionalBits
+        data.append(antialiased ? 0x01 : 0x00)
+        data.append(0)           // reserved
+
+        data.append(contentsOf: [0, 0, 0, 0, 0, 0]) // position (float16 x/y/z)
+        data.append(255)                             // alpha
+        data.append(contentsOf: [128, 128, 128])     // color
+        data.append(contentsOf: [160, 160, 160])     // scale
+        data.append(contentsOf: [127, 127, 127])     // rotation (version 1 uses 3 bytes)
+
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+            .appendingPathExtension("spz")
+        try data.write(to: url)
+        return url
+    }
+
     func testReadPLY() throws {
         try testRead(plyURL)
     }
@@ -141,6 +170,15 @@ final class SplatIOTests: XCTestCase {
         let reader = try AutodetectSceneReader(url)
         XCTAssertEqual(reader.renderMode, .standard)
         XCTAssertFalse(reader.isMipSplatting)
+    }
+
+    func testAutodetectRenderModeUsesSPZAntialiasingFlag() throws {
+        let url = try makeTemporarySPZ(antialiased: true)
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        let reader = try AutodetectSceneReader(url)
+        XCTAssertEqual(reader.renderMode, .mip)
+        XCTAssertTrue(reader.isMipSplatting)
     }
 
     func testReadPLYWithPartialSphericalHarmonicsProperties() {

@@ -19,6 +19,7 @@ private let spzLog = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.meta
  */
 public class SPZSceneReader: SplatSceneReader {
     private var data: Data
+    public private(set) var isAntialiased = false
     
     public init(data: Data) {
         self.data = data
@@ -40,6 +41,7 @@ public class SPZSceneReader: SplatSceneReader {
             
             // Initialize with original data first
             self.init(data: fileData)
+            defer { self.refreshMetadata() }
             
             // Special handling for iOS files from Downloads folder (they're often gzipped)
             if url.path.contains("/Containers/Shared/AppGroup/") && url.path.contains("/File Provider Storage/Downloads/") {
@@ -181,6 +183,14 @@ public class SPZSceneReader: SplatSceneReader {
     }
     
     // MARK: - Private helpers
+
+    private func refreshMetadata() {
+        guard let header = try? PackedGaussiansHeader(data: data) else {
+            isAntialiased = false
+            return
+        }
+        isAntialiased = (header.flags & PackedGaussiansHeader.FlagAntialiased) != 0
+    }
     
     private func unpackGaussians(_ packedGaussians: PackedGaussians) -> [SplatScenePoint] {
         // Implementation based on the original C++ code with SIMD optimizations

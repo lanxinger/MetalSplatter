@@ -32,6 +32,7 @@ public class AutodetectSceneReader: SplatSceneReader {
         print("AutodetectSceneReader: File extension: \(url.pathExtension)")
         
         let format = SplatFileFormat(for: url)
+        var detectedRenderMode: RenderMode = .standard
         print("AutodetectSceneReader: Detected format: \(String(describing: format))")
         
         switch format {
@@ -44,7 +45,9 @@ public class AutodetectSceneReader: SplatSceneReader {
         case .spz: 
             print("AutodetectSceneReader: Loading as SPZ")
             do {
-                reader = try SPZSceneReader(contentsOf: url)
+                let spzReader = try SPZSceneReader(contentsOf: url)
+                reader = spzReader
+                detectedRenderMode = spzReader.isAntialiased ? .mip : .standard
                 print("AutodetectSceneReader: Successfully created SPZSceneReader")
             } catch {
                 print("AutodetectSceneReader: Failed to create SPZSceneReader: \(error)")
@@ -98,7 +101,11 @@ public class AutodetectSceneReader: SplatSceneReader {
         // Detect Brush render mode from file metadata.
         // Scans the first 8 KB for the marker string since conversion tools may preserve
         // the original PLY comment/metadata across container formats.
-        renderMode = Self.detectRenderMode(url: url)
+        if detectedRenderMode == .mip {
+            renderMode = .mip
+        } else {
+            renderMode = Self.detectRenderMode(url: url)
+        }
     }
 
     /// Scan for Brush's `SplatRenderMode: ...` marker.
