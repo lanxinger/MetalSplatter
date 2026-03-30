@@ -341,7 +341,7 @@ public struct SOGSIteratorV2 {
         let b = (Float(quatPixel.y) / 255.0 - 0.5) * norm
         let c = (Float(quatPixel.z) / 255.0 - 0.5) * norm
         let d = sqrt(max(0, 1 - (a * a + b * b + c * c)))
-        let mode = UInt32(quatPixel.w) - 252
+        let mode = Int(quatPixel.w) - 252
         
         switch mode {
         case 0: return simd_quatf(ix: a, iy: b, iz: c, r: d)

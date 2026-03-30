@@ -181,6 +181,16 @@ final class SplatIOTests: XCTestCase {
         XCTAssertTrue(reader.isMipSplatting)
     }
 
+    func testSPZReaderDataInitializerRefreshesAntialiasMetadata() throws {
+        let url = try makeTemporarySPZ(antialiased: true)
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        let data = try Data(contentsOf: url)
+        let reader = SPZSceneReader(data: data)
+
+        XCTAssertTrue(reader.isAntialiased)
+    }
+
     func testReadPLYWithPartialSphericalHarmonicsProperties() {
         let plyData = Data(
             """
@@ -535,21 +545,15 @@ final class SplatIOTests: XCTestCase {
         
         let iterator = SOGSIteratorV2(compressedData)
         
-        // Test reading a point (this would normally fail without real WebP data,
-        // but we're testing the codebook processing logic)
-        do {
-            let point = iterator.readPoint(at: 0)
-            
-            // Basic validation - the point should be created without errors
-            XCTAssertNotNil(point.position)
-            XCTAssertNotNil(point.rotation)
-            XCTAssertNotNil(point.scale)
-            XCTAssertNotNil(point.color)
-            XCTAssertNotNil(point.opacity)
-        } catch {
-            // This is expected since we're using mock data
-            // The test validates that the iterator can be created and doesn't crash
-        }
+        // Test reading a point from intentionally non-spec mock pixels.
+        // The iterator should fall back safely instead of trapping.
+        let point = iterator.readPoint(at: 0)
+
+        XCTAssertNotNil(point.position)
+        XCTAssertNotNil(point.rotation)
+        XCTAssertNotNil(point.scale)
+        XCTAssertNotNil(point.color)
+        XCTAssertNotNil(point.opacity)
     }
     
     func testSOGSV2BundledFormatDetection() throws {

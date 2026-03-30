@@ -23,6 +23,7 @@ public class SPZSceneReader: SplatSceneReader {
     
     public init(data: Data) {
         self.data = data
+        refreshMetadata()
     }
     
     public convenience init(contentsOf url: URL) throws {

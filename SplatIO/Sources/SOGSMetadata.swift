@@ -177,7 +177,9 @@ public struct SOGSIterator {
         let b = (Float(quatPixel.y) / 255.0 - 0.5) * norm
         let c = (Float(quatPixel.z) / 255.0 - 0.5) * norm
         let d = sqrt(max(0, 1 - (a * a + b * b + c * c)))
-        let mode = UInt32(quatPixel.w) - 252  // Direct integer access - matches JavaScript exactly
+        // Valid packed quaternion modes occupy the 252...255 range.
+        // Preserve that mapping without trapping on malformed input.
+        let mode = Int(quatPixel.w) - 252
         
         // Reconstruct quaternion based on mode
         switch mode {
