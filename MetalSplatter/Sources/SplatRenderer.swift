@@ -1967,6 +1967,57 @@ public class SplatRenderer: @unchecked Sendable {
             return (min: minBounds, max: maxBounds)
         }
     }
+
+    internal static func estimateCountingSortDepthBounds(
+        from bounds: (min: SIMD3<Float>, max: SIMD3<Float>),
+        cameraPosition: SIMD3<Float>,
+        cameraForward: SIMD3<Float>,
+        sortByDistance: Bool
+    ) -> (min: Float, max: Float) {
+        let minimumDepth: Float
+        let maximumDepth: Float
+
+        if sortByDistance {
+            let nearestPoint = SIMD3<Float>(
+                min(max(cameraPosition.x, bounds.min.x), bounds.max.x),
+                min(max(cameraPosition.y, bounds.min.y), bounds.max.y),
+                min(max(cameraPosition.z, bounds.min.z), bounds.max.z)
+            )
+            minimumDepth = simd_distance(cameraPosition, nearestPoint)
+
+            let minBounds = bounds.min
+            let maxBounds = bounds.max
+            let corners: [SIMD3<Float>] = [
+                SIMD3<Float>(minBounds.x, minBounds.y, minBounds.z),
+                SIMD3<Float>(minBounds.x, minBounds.y, maxBounds.z),
+                SIMD3<Float>(minBounds.x, maxBounds.y, minBounds.z),
+                SIMD3<Float>(minBounds.x, maxBounds.y, maxBounds.z),
+                SIMD3<Float>(maxBounds.x, minBounds.y, minBounds.z),
+                SIMD3<Float>(maxBounds.x, minBounds.y, maxBounds.z),
+                SIMD3<Float>(maxBounds.x, maxBounds.y, minBounds.z),
+                SIMD3<Float>(maxBounds.x, maxBounds.y, maxBounds.z)
+            ]
+
+            maximumDepth = corners.reduce(into: Float.zero) { currentMax, corner in
+                currentMax = max(currentMax, simd_distance(cameraPosition, corner))
+            }
+        } else {
+            let center = (bounds.min + bounds.max) * 0.5
+            let extents = (bounds.max - bounds.min) * 0.5
+            let offsetCenter = center - cameraPosition
+            let projectedCenter = simd_dot(offsetCenter, cameraForward)
+            let absoluteForward = SIMD3<Float>(abs(cameraForward.x), abs(cameraForward.y), abs(cameraForward.z))
+            let projectedRadius = simd_dot(absoluteForward, extents)
+
+            minimumDepth = projectedCenter - projectedRadius
+            maximumDepth = projectedCenter + projectedRadius
+        }
+
+        let range = max(maximumDepth - minimumDepth, 0.001)
+        let padding = max(range * 0.001, 0.001)
+        let paddedMinimum = sortByDistance ? max(0, minimumDepth - padding) : minimumDepth - padding
+        return (min: paddedMinimum, max: maximumDepth + padding)
+    }
     
     // MARK: - Metal 4 TensorOps Batch Precompute
 
@@ -3018,16 +3069,13 @@ public class SplatRenderer: @unchecked Sendable {
 
                     // Compute depth bounds for proper bin distribution
                     // For large scenes, this could be cached and updated incrementally
-                    let depthBounds: (min: Float, max: Float)?
-                    if let cached = self.cachedBounds {
-                        // Use cached AABB bounds as depth range estimate
-                        // This is an approximation but avoids per-frame bounds computation
-                        let cameraPos = cameraWorldPosition
-                        let minDist = simd_distance(cameraPos, cached.min)
-                        let maxDist = simd_distance(cameraPos, cached.max)
-                        depthBounds = (min(0.1, minDist * 0.5), max(maxDist * 1.5, 100.0))
-                    } else {
-                        depthBounds = nil  // Use default range
+                    let depthBounds = (self.getBounds() ?? self.getBoundsBlocking()).map {
+                        Self.estimateCountingSortDepthBounds(
+                            from: $0,
+                            cameraPosition: cameraWorldPosition,
+                            cameraForward: cameraWorldForward,
+                            sortByDistance: effectiveSortByDistance
+                        )
                     }
 
                     do {
