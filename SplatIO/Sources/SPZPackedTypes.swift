@@ -13,7 +13,7 @@ private let spzTypesLog = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com
  */
 struct PackedGaussiansHeader {
     static let magic: UInt32 = 0x5053474e  // NGSP = Niantic gaussian splat
-    static let version: UInt32 = 3
+    static let version: UInt32 = 4
     
     var magic: UInt32 = PackedGaussiansHeader.magic
     var version: UInt32 = PackedGaussiansHeader.version
@@ -66,8 +66,8 @@ struct PackedGaussiansHeader {
             throw SplatFileFormatError.invalidHeader
         }
         
-        // Validate version (support versions 1-3)
-        guard version >= 1 && version <= 3 else {
+        // Validate version (support versions 1-4)
+        guard version >= 1 && version <= 4 else {
             throw SplatFileFormatError.unsupportedVersion
         }
         
@@ -245,6 +245,7 @@ struct PackedGaussian {
  * Represents a full set of packed gaussians
  */
 struct PackedGaussians {
+    var version: UInt32 = PackedGaussiansHeader.version
     var numPoints: Int = 0
     var shDegree: Int = 0
     var fractionalBits: Int = 0
@@ -379,6 +380,7 @@ struct PackedGaussians {
     
     func serialize() -> Data {
         var header = PackedGaussiansHeader()
+        header.version = version
         header.numPoints = UInt32(numPoints)
         header.shDegree = UInt8(shDegree)
         header.fractionalBits = UInt8(fractionalBits)
@@ -576,6 +578,7 @@ struct PackedGaussians {
         }
         
         var result = PackedGaussians()
+        result.version = header.version
         result.numPoints = numPoints
         result.shDegree = Int(header.shDegree)
         result.fractionalBits = Int(header.fractionalBits)
@@ -853,95 +856,82 @@ func unpackQuaternionFirstThreeUnsafe(_ result: inout simd_quatf, _ base: Unsafe
 /// Unpacks quaternion using smallest-three encoding from 4 bytes
 func unpackQuaternionSmallestThree(_ result: inout simd_quatf, _ rotation: [UInt8], _ c: CoordinateConverter) {
     guard rotation.count >= 4 else { return }
-
-    // Extract the largest component index (2 bits)
-    let largestIdx = Int(rotation[3] >> 6)
-
-    // Extract 10-bit signed values for the three smallest components
-    var components = [Float](repeating: 0, count: 4)
-
-    // First component: bits 0-9 from bytes 0-1
-    var val1 = Int16(rotation[0]) | (Int16(rotation[1] & 0x03) << 8)
-    if val1 >= 512 { val1 -= 1024 } // Sign extension
-
-    // Second component: bits 2-11 from bytes 1-2
-    var val2 = Int16((rotation[1] >> 2) | ((rotation[2] & 0x0F) << 6))
-    if val2 >= 512 { val2 -= 1024 } // Sign extension
-
-    // Third component: bits 4-13 from bytes 2-3
-    var val3 = Int16((rotation[2] >> 4) | ((rotation[3] & 0x3F) << 4))
-    if val3 >= 512 { val3 -= 1024 } // Sign extension
-
-    // Convert to normalized float values
-    let vals = [Float(val1), Float(val2), Float(val3)]
-    let sqrt1_2: Float = sqrt(0.5)
-
-    // Place the three smallest components
-    var compIdx = 0
-    for i in 0..<4 {
-        if i != largestIdx {
-            let normalizedVal = sqrt1_2 * Float(vals[compIdx]) / Float((1 << 9) - 1)
-            components[i] = normalizedVal * c.flipQ[i]
-            compIdx += 1
-        }
+    let packed = rotation.withUnsafeBytes { rawBuffer -> UInt32 in
+        var value: UInt32 = 0
+        _ = withUnsafeMutableBytes(of: &value) { rawBuffer.copyBytes(to: $0) }
+        return value
     }
-
-    // Compute the largest component using quaternion normalization
-    let sumSquares = components[0] * components[0] + components[1] * components[1] +
-                    components[2] * components[2] + components[3] * components[3]
-    components[largestIdx] = sqrt(max(0.0, 1.0 - sumSquares))
-
-    result = simd_quatf(ix: components[0], iy: components[1], iz: components[2], r: components[3])
+    unpackQuaternionSmallestThreePacked(&result, packed, c)
 }
 
 /// Zero-allocation version using UnsafeRawPointer (for hot paths)
 func unpackQuaternionSmallestThreeUnsafe(_ result: inout simd_quatf, _ base: UnsafeRawPointer, _ c: CoordinateConverter) {
-    let bytes = base.assumingMemoryBound(to: UInt8.self)
+    unpackQuaternionSmallestThreePacked(&result, base.loadUnaligned(as: UInt32.self), c)
+}
 
-    // Extract the largest component index (2 bits)
-    let largestIdx = Int(bytes[3] >> 6)
+func packQuaternionSmallestThree(_ rotation: simd_quatf) -> [UInt8] {
+    let normalized = rotation.normalized
+    var components = [normalized.imag.x, normalized.imag.y, normalized.imag.z, normalized.real]
 
-    // Extract 10-bit signed values for the three smallest components
-    // Using SIMD4 for fixed-size storage (stack allocation)
-    var components = SIMD4<Float>(0, 0, 0, 0)
+    var largestIndex = 0
+    for index in 1..<components.count where abs(components[index]) > abs(components[largestIndex]) {
+        largestIndex = index
+    }
 
-    // First component: bits 0-9 from bytes 0-1
-    var val1 = Int16(bytes[0]) | (Int16(bytes[1] & 0x03) << 8)
-    if val1 >= 512 { val1 -= 1024 } // Sign extension
-
-    // Second component: bits 2-11 from bytes 1-2
-    var val2 = Int16((bytes[1] >> 2) | ((bytes[2] & 0x0F) << 6))
-    if val2 >= 512 { val2 -= 1024 } // Sign extension
-
-    // Third component: bits 4-13 from bytes 2-3
-    var val3 = Int16((bytes[2] >> 4) | ((bytes[3] & 0x3F) << 4))
-    if val3 >= 512 { val3 -= 1024 } // Sign extension
-
-    // Convert to normalized float values
-    let sqrt1_2: Float = sqrt(0.5)
-    let scale = sqrt1_2 / Float((1 << 9) - 1)
-    let vals = (Float(val1) * scale, Float(val2) * scale, Float(val3) * scale)
-
-    // Place the three smallest components (using conditional assignment to avoid array)
-    var compIdx = 0
-    for i in 0..<4 {
-        if i != largestIdx {
-            let normalizedVal: Float
-            switch compIdx {
-            case 0: normalizedVal = vals.0
-            case 1: normalizedVal = vals.1
-            default: normalizedVal = vals.2
-            }
-            components[i] = normalizedVal * c.flipQ[i]
-            compIdx += 1
+    if components[largestIndex] < 0 {
+        for index in components.indices {
+            components[index].negate()
         }
     }
 
-    // Compute the largest component using quaternion normalization
-    let sumSquares = components[0] * components[0] + components[1] * components[1] +
-                    components[2] * components[2] + components[3] * components[3]
-    components[largestIdx] = sqrt(max(0.0, 1.0 - sumSquares))
+    let mask: UInt32 = 0x1FF
+    let scale = Float(mask) / sqrt(0.5)
+    var packed = UInt32(largestIndex) << 30
+    var shift: UInt32 = 0
 
+    for index in stride(from: 3, through: 0, by: -1) where index != largestIndex {
+        let component = min(abs(components[index]), sqrt(0.5))
+        let magnitude = UInt32((component * scale).rounded())
+        let sign: UInt32 = components[index] < 0 ? 1 : 0
+        packed |= ((sign << 9) | min(magnitude, mask)) << shift
+        shift += 10
+    }
+
+    var littleEndian = packed.littleEndian
+    return withUnsafeBytes(of: &littleEndian) { Array($0) }
+}
+
+private func unpackQuaternionSmallestThreePacked(_ result: inout simd_quatf, _ packedValue: UInt32, _ c: CoordinateConverter) {
+    let mask: UInt32 = 0x1FF
+    let scale = sqrt(Float(0.5)) / Float(mask)
+    let largestIndex = Int(packedValue >> 30)
+    var remaining = packedValue
+    var components = SIMD4<Float>(0, 0, 0, 0)
+    var sumSquares: Float = 0
+
+    for index in stride(from: 3, through: 0, by: -1) where index != largestIndex {
+        let encoded = remaining & 0x3FF
+        remaining >>= 10
+
+        let sign: Float = (encoded & 0x200) == 0 ? 1 : -1
+        let magnitude = Float(encoded & mask) * scale
+        let value = sign * magnitude
+
+        switch index {
+        case 0:
+            components[0] = value * c.flipQ.x
+        case 1:
+            components[1] = value * c.flipQ.y
+        case 2:
+            components[2] = value * c.flipQ.z
+        default:
+            components[3] = value
+        }
+
+        sumSquares += value * value
+    }
+
+    components[largestIndex] = sqrt(max(0.0, 1.0 - sumSquares))
     result = simd_quatf(ix: components[0], iy: components[1], iz: components[2], r: components[3])
 }
 

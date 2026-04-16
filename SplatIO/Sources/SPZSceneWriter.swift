@@ -14,12 +14,18 @@ public class SPZSceneWriter: SplatSceneWriter {
     private let antialiased: Bool
     private let fractionalBits: Int
     private let compress: Bool
+    private let outputVersion: UInt32
     
-    public init(useFloat16: Bool = true, antialiased: Bool = false, fractionalBits: Int = 10, compress: Bool = true) {
+    public init(useFloat16: Bool = true,
+                antialiased: Bool = false,
+                fractionalBits: Int = 10,
+                compress: Bool = true,
+                outputVersion: UInt32 = 4) {
         self.useFloat16 = useFloat16
         self.antialiased = antialiased
         self.fractionalBits = fractionalBits
         self.compress = compress
+        self.outputVersion = min(max(outputVersion, 1), PackedGaussiansHeader.version)
     }
     
     private var outputURL: URL?
@@ -69,16 +75,19 @@ public class SPZSceneWriter: SplatSceneWriter {
     
     private func packGaussians(_ points: [SplatScenePoint]) -> PackedGaussians {
         var result = PackedGaussians()
+        result.version = outputVersion
         result.numPoints = points.count
         result.shDegree = 0 // Only supporting SH degree 0 for now
         result.fractionalBits = fractionalBits
         result.antialiased = antialiased
+        result.usesQuaternionSmallestThree = outputVersion >= 3
         
         // Pre-allocate arrays
         let positionComponents = useFloat16 ? 6 : 9 // 2 bytes per component for float16, 3 bytes for fixed-point
         result.positions = [UInt8](repeating: 0, count: points.count * positionComponents)
         result.scales = [UInt8](repeating: 0, count: points.count * 3)
-        result.rotations = [UInt8](repeating: 0, count: points.count * 3)
+        let rotationComponents = result.usesQuaternionSmallestThree ? 4 : 3
+        result.rotations = [UInt8](repeating: 0, count: points.count * rotationComponents)
         result.alphas = [UInt8](repeating: 0, count: points.count)
         result.colors = [UInt8](repeating: 0, count: points.count * 3)
         
@@ -124,21 +133,26 @@ public class SPZSceneWriter: SplatSceneWriter {
         
         // Pack rotation using C++ reference algorithm (load-spz.cc:251-263)
         let rotation = normalizedPoint.rotation
-        let rotationBaseIdx = index * 3
-        
-        // C++ reference: normalize quaternion, make w positive, then store xyz
-        var q = rotation.normalized
-        // Make w component positive (C++: q = times(q, (q[3] < 0 ? -127.5f : 127.5f)))
-        if q.real < 0 {
-            q = simd_quatf(ix: -q.imag.x, iy: -q.imag.y, iz: -q.imag.z, r: -q.real)
+        if packed.usesQuaternionSmallestThree {
+            let rotationBaseIdx = index * 4
+            let encoded = packQuaternionSmallestThree(rotation)
+            for component in 0..<4 {
+                packed.rotations[rotationBaseIdx + component] = encoded[component]
+            }
+        } else {
+            let rotationBaseIdx = index * 3
+
+            // C++ reference: normalize quaternion, make w positive, then store xyz
+            var q = rotation.normalized
+            if q.real < 0 {
+                q = simd_quatf(ix: -q.imag.x, iy: -q.imag.y, iz: -q.imag.z, r: -q.real)
+            }
+
+            let xyz = q.imag * 127.5 + SIMD3<Float>(127.5, 127.5, 127.5)
+            packed.rotations[rotationBaseIdx + 0] = UInt8(min(255, max(0, Int(xyz.x))))
+            packed.rotations[rotationBaseIdx + 1] = UInt8(min(255, max(0, Int(xyz.y))))
+            packed.rotations[rotationBaseIdx + 2] = UInt8(min(255, max(0, Int(xyz.z))))
         }
-        
-        // Pack xyz components: q = times(q, 127.5f) then q = plus(q, {127.5, 127.5, 127.5, 127.5})
-        let xyz = q.imag * 127.5 + SIMD3<Float>(127.5, 127.5, 127.5)
-        
-        packed.rotations[rotationBaseIdx + 0] = UInt8(min(255, max(0, Int(xyz.x))))
-        packed.rotations[rotationBaseIdx + 1] = UInt8(min(255, max(0, Int(xyz.y))))
-        packed.rotations[rotationBaseIdx + 2] = UInt8(min(255, max(0, Int(xyz.z))))
         
         // Pack alpha (opacity)
         let alpha = normalizedPoint.opacity.asLinearFloat

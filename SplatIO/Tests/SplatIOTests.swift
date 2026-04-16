@@ -1,6 +1,7 @@
 import XCTest
 import Spatial
 import SplatIO
+import simd
 
 final class SplatIOTests: XCTestCase {
     class ContentCounter: SplatSceneReaderDelegate {
@@ -117,7 +118,12 @@ final class SplatIOTests: XCTestCase {
         return url
     }
 
-    private func makeTemporarySPZ(antialiased: Bool) throws -> URL {
+    private func makeTemporarySPZ(antialiased: Bool,
+                                  version: UInt32 = 1,
+                                  fractionalBits: UInt8 = 0,
+                                  flags: UInt8? = nil,
+                                  positionBytes: [UInt8]? = nil,
+                                  rotationBytes: [UInt8]? = nil) throws -> URL {
         var data = Data()
 
         func appendUInt32(_ value: UInt32) {
@@ -126,24 +132,58 @@ final class SplatIOTests: XCTestCase {
         }
 
         appendUInt32(0x5053474e) // NGSP
-        appendUInt32(1)          // version 1 to keep the payload minimal
+        appendUInt32(version)
         appendUInt32(1)          // numPoints
         data.append(0)           // shDegree
-        data.append(0)           // fractionalBits
-        data.append(antialiased ? 0x01 : 0x00)
+        data.append(fractionalBits)
+        data.append(flags ?? (antialiased ? 0x01 : 0x00))
         data.append(0)           // reserved
 
-        data.append(contentsOf: [0, 0, 0, 0, 0, 0]) // position (float16 x/y/z)
+        let defaultPositions = version >= 2 ? Array(repeating: UInt8(0), count: 9) : Array(repeating: UInt8(0), count: 6)
+        data.append(contentsOf: positionBytes ?? defaultPositions)
         data.append(255)                             // alpha
         data.append(contentsOf: [128, 128, 128])     // color
         data.append(contentsOf: [160, 160, 160])     // scale
-        data.append(contentsOf: [127, 127, 127])     // rotation (version 1 uses 3 bytes)
+        let defaultRotation = version >= 3 ? encodeSPZQuaternionSmallestThree(simd_quatf(angle: 0, axis: SIMD3<Float>(1, 0, 0))) : [127, 127, 127]
+        data.append(contentsOf: rotationBytes ?? defaultRotation)
 
         let url = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString)
             .appendingPathExtension("spz")
         try data.write(to: url)
         return url
+    }
+
+    private func encodeSPZQuaternionSmallestThree(_ rotation: simd_quatf) -> [UInt8] {
+        let normalized = rotation.normalized
+        var components = [normalized.imag.x, normalized.imag.y, normalized.imag.z, normalized.real]
+
+        var largestIndex = 0
+        for index in 1..<components.count where abs(components[index]) > abs(components[largestIndex]) {
+            largestIndex = index
+        }
+
+        if components[largestIndex] < 0 {
+            for index in components.indices {
+                components[index].negate()
+            }
+        }
+
+        let mask: UInt32 = 0x1FF
+        let scale = Float(mask) / sqrt(Float(0.5))
+        var packed = UInt32(largestIndex) << 30
+        var shift: UInt32 = 0
+
+        for index in stride(from: 3, through: 0, by: -1) where index != largestIndex {
+            let component = min(abs(components[index]), sqrt(Float(0.5)))
+            let magnitude = UInt32((component * scale).rounded())
+            let sign: UInt32 = components[index] < 0 ? 1 : 0
+            packed |= ((sign << 9) | min(magnitude, mask)) << shift
+            shift += 10
+        }
+
+        var littleEndian = packed.littleEndian
+        return withUnsafeBytes(of: &littleEndian) { Array($0) }
     }
 
     func testReadPLY() throws {
@@ -189,6 +229,60 @@ final class SplatIOTests: XCTestCase {
         let reader = SPZSceneReader(data: data)
 
         XCTAssertTrue(reader.isAntialiased)
+    }
+
+    func testSPZReaderAcceptsVersion4Headers() throws {
+        let url = try makeTemporarySPZ(antialiased: true, version: 4, fractionalBits: 12)
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        let reader = try SPZSceneReader(contentsOf: url)
+        let points = try reader.readScene()
+
+        XCTAssertTrue(reader.isAntialiased)
+        XCTAssertEqual(points.count, 1)
+    }
+
+    func testSPZReaderDecodesVersion4SmallestThreeQuaternion() throws {
+        let expectedRotation = simd_quatf(angle: .pi / 3, axis: SIMD3<Float>(1, 0, 0))
+        let url = try makeTemporarySPZ(
+            antialiased: false,
+            version: 4,
+            fractionalBits: 12,
+            rotationBytes: encodeSPZQuaternionSmallestThree(expectedRotation)
+        )
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        let reader = try SPZSceneReader(contentsOf: url)
+        let points = try reader.readScene()
+
+        XCTAssertEqual(points.count, 1)
+        let similarity = abs(simd_dot(points[0].rotation.vector, expectedRotation.normalized.vector))
+        XCTAssertGreaterThan(similarity, 0.999)
+    }
+
+    func testSPZWriterRoundTripsVersion4QuaternionEncoding() throws {
+        let point = SplatScenePoint(
+            position: SIMD3<Float>(0, 0, 0),
+            color: .linearFloat(SIMD3<Float>(0.5, 0.5, 0.5)),
+            opacity: .linearFloat(1.0),
+            scale: .linearFloat(SIMD3<Float>(1, 1, 1)),
+            rotation: simd_quatf(angle: .pi / 3, axis: SIMD3<Float>(1, 0, 0))
+        )
+
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+            .appendingPathExtension("spz")
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        let writer = SPZSceneWriter(useFloat16: false, fractionalBits: 12, compress: false, outputVersion: 4)
+        try writer.writeScene([point], to: url)
+
+        let reader = try SPZSceneReader(contentsOf: url)
+        let points = try reader.readScene()
+
+        XCTAssertEqual(points.count, 1)
+        let similarity = abs(simd_dot(points[0].rotation.vector, point.rotation.normalized.vector))
+        XCTAssertGreaterThan(similarity, 0.999)
     }
 
     func testReadPLYWithPartialSphericalHarmonicsProperties() {
