@@ -120,6 +120,13 @@ actor SplatEditHistory {
 }
 
 struct EditableSplatStore: Sendable {
+    struct ProjectedCandidate: Sendable {
+        var index: Int
+        var normalized: SIMD2<Float>
+        var opacity: Float
+        var radius: Float
+    }
+
     var points: [SplatScenePoint]
     var states: [EditableSplatState]
 
@@ -203,8 +210,7 @@ struct EditableSplatStore: Sendable {
 
     mutating func applySelection(indices: [Int], mode: SelectionCombineMode) {
         let selectable = Set(indices.filter { index in
-            let state = states[index]
-            return !state.contains(.hidden) && !state.contains(.deleted) && !state.contains(.locked)
+            isSelectable(index)
         })
 
         switch mode {
@@ -258,6 +264,134 @@ struct EditableSplatStore: Sendable {
         }
 
         return selected
+    }
+
+    func colorMatchIndices(referenceIndex: Int, threshold: Float) -> [Int] {
+        guard points.indices.contains(referenceIndex), isSelectable(referenceIndex) else { return [] }
+
+        let clampedThreshold = max(0, min(threshold, 1))
+        let reference = points[referenceIndex].color.asLinearFloat
+
+        return points.indices.filter { index in
+            guard isSelectable(index) else { return false }
+            let color = points[index].color.asLinearFloat
+            let delta = simd_abs(color - reference)
+            return delta.x <= clampedThreshold && delta.y <= clampedThreshold && delta.z <= clampedThreshold
+        }
+    }
+
+    func floodFillIndices(seedIndex: Int,
+                          threshold: Float,
+                          viewport: SplatRenderer.ViewportDescriptor) -> [Int] {
+        let candidates = projectedCandidates(viewport: viewport)
+        guard let seed = candidates.first(where: { $0.index == seedIndex }) else { return [] }
+
+        let clampedThreshold = max(0.001, min(threshold, 1))
+        let cellSize = max(seed.radius * 1.5, 0.01)
+        let candidateLookup = Dictionary(uniqueKeysWithValues: candidates.indices.map { (candidates[$0].index, $0) })
+
+        var cells: [SIMD2<Int32>: [Int]] = [:]
+        cells.reserveCapacity(candidates.count)
+
+        for candidateIndex in candidates.indices {
+            let cell = Self.gridCell(for: candidates[candidateIndex].normalized, cellSize: cellSize)
+            cells[cell, default: []].append(candidateIndex)
+        }
+
+        var visited: Set<Int> = [seed.index]
+        var pending: [Int] = [seed.index]
+        var result: [Int] = []
+
+        while let currentPointIndex = pending.popLast(),
+              let currentCandidateIndex = candidateLookup[currentPointIndex] {
+            let current = candidates[currentCandidateIndex]
+            result.append(current.index)
+
+            let searchRadius = max(current.radius * 2.5, cellSize)
+            let cellRange = max(1, Int(ceil(Double(searchRadius / cellSize))))
+            let currentCell = Self.gridCell(for: current.normalized, cellSize: cellSize)
+
+            for deltaY in -cellRange...cellRange {
+                for deltaX in -cellRange...cellRange {
+                    let neighborCell = SIMD2<Int32>(
+                        currentCell.x + Int32(deltaX),
+                        currentCell.y + Int32(deltaY)
+                    )
+                    guard let neighborIndices = cells[neighborCell] else { continue }
+
+                    for neighborCandidateIndex in neighborIndices {
+                        let neighbor = candidates[neighborCandidateIndex]
+                        guard !visited.contains(neighbor.index) else { continue }
+                        guard abs(neighbor.opacity - current.opacity) <= clampedThreshold else { continue }
+
+                        let combinedRadius = max(searchRadius, neighbor.radius * 2.5)
+                        guard simd_distance(current.normalized, neighbor.normalized) <= combinedRadius else { continue }
+
+                        visited.insert(neighbor.index)
+                        pending.append(neighbor.index)
+                    }
+                }
+            }
+        }
+
+        return result
+    }
+
+    private func isSelectable(_ index: Int) -> Bool {
+        let state = states[index]
+        return !state.contains(.hidden) && !state.contains(.deleted) && !state.contains(.locked)
+    }
+
+    private func projectedCandidates(viewport: SplatRenderer.ViewportDescriptor) -> [ProjectedCandidate] {
+        let cameraRight = Self.cameraRightAxis(viewMatrix: viewport.viewMatrix)
+
+        return points.indices.compactMap { index in
+            guard isSelectable(index),
+                  let normalized = Self.project(points[index].position, viewport: viewport) else {
+                return nil
+            }
+
+            let scale = max(
+                points[index].scale.asLinearFloat.x,
+                max(points[index].scale.asLinearFloat.y, points[index].scale.asLinearFloat.z)
+            )
+            let offsetPosition = points[index].position + cameraRight * max(scale, 0.001)
+            let offsetNormalized = Self.project(offsetPosition, viewport: viewport) ?? normalized
+            let radius = max(simd_distance(normalized, offsetNormalized), 0.008)
+
+            return ProjectedCandidate(
+                index: index,
+                normalized: normalized,
+                opacity: points[index].opacity.asLinearFloat,
+                radius: radius
+            )
+        }
+    }
+
+    private static func project(_ position: SIMD3<Float>,
+                                viewport: SplatRenderer.ViewportDescriptor) -> SIMD2<Float>? {
+        let clip = viewport.projectionMatrix * viewport.viewMatrix * SIMD4<Float>(position, 1)
+        guard abs(clip.w) > .ulpOfOne else { return nil }
+
+        let ndc = clip / clip.w
+        return SIMD2<Float>(
+            (ndc.x + 1) * 0.5,
+            1 - ((ndc.y + 1) * 0.5)
+        )
+    }
+
+    private static func cameraRightAxis(viewMatrix: simd_float4x4) -> SIMD3<Float> {
+        let inverseView = simd_inverse(viewMatrix)
+        let axis = SIMD3<Float>(inverseView.columns.0.x, inverseView.columns.0.y, inverseView.columns.0.z)
+        let length = simd_length(axis)
+        return length > .ulpOfOne ? axis / length : SIMD3<Float>(1, 0, 0)
+    }
+
+    private static func gridCell(for normalized: SIMD2<Float>, cellSize: Float) -> SIMD2<Int32> {
+        SIMD2<Int32>(
+            Int32(floor(normalized.x / cellSize)),
+            Int32(floor(normalized.y / cellSize))
+        )
     }
 }
 
@@ -402,31 +536,52 @@ public actor SplatEditor {
         store.snapshotSummary()
     }
 
+    public func selectFloodFill(normalized: SIMD2<Float>,
+                                threshold: Float,
+                                mode: SelectionCombineMode,
+                                viewport: SplatRenderer.ViewportDescriptor) async throws {
+        guard let seedIndex = try await pickNearestIndex(
+            normalized: normalized,
+            radius: 0.04,
+            viewport: viewport
+        ) else { return }
+
+        let before = store.snapshot
+        let selected = store.floodFillIndices(
+            seedIndex: seedIndex,
+            threshold: threshold,
+            viewport: viewport
+        )
+        store.applySelection(indices: selected, mode: mode)
+        await history.pushUndo(before)
+        try syncRendererState()
+    }
+
+    public func selectColorMatch(normalized: SIMD2<Float>,
+                                 threshold: Float,
+                                 mode: SelectionCombineMode,
+                                 viewport: SplatRenderer.ViewportDescriptor) async throws {
+        guard let referenceIndex = try await pickNearestIndex(
+            normalized: normalized,
+            radius: 0.04,
+            viewport: viewport
+        ) else { return }
+
+        let before = store.snapshot
+        let selected = store.colorMatchIndices(referenceIndex: referenceIndex, threshold: threshold)
+        store.applySelection(indices: selected, mode: mode)
+        await history.pushUndo(before)
+        try syncRendererState()
+    }
+
     public func pickPoint(normalized: SIMD2<Float>,
                           radius: Float,
                           viewport: SplatRenderer.ViewportDescriptor) async throws -> SplatScenePoint? {
-        let indices = try await selectionEngine.select(
-            query: .point(normalized: normalized, radius: radius),
-            viewport: viewport,
-            renderer: renderer
+        let nearestIndex = try await pickNearestIndex(
+            normalized: normalized,
+            radius: radius,
+            viewport: viewport
         )
-
-        guard !indices.isEmpty else { return nil }
-
-        let nearestIndex = indices.min { lhs, rhs in
-            let lhsDistance = projectedDistanceSquared(
-                point: store.points[lhs],
-                target: normalized,
-                viewport: viewport
-            )
-            let rhsDistance = projectedDistanceSquared(
-                point: store.points[rhs],
-                target: normalized,
-                viewport: viewport
-            )
-            return lhsDistance < rhsDistance
-        }
-
         guard let nearestIndex else { return nil }
         return store.points[nearestIndex]
     }
@@ -453,6 +608,32 @@ public actor SplatEditor {
         )
         let delta = normalized - target
         return simd_dot(delta, delta)
+    }
+
+    private func pickNearestIndex(normalized: SIMD2<Float>,
+                                  radius: Float,
+                                  viewport: SplatRenderer.ViewportDescriptor) async throws -> Int? {
+        let indices = try await selectionEngine.select(
+            query: .point(normalized: normalized, radius: radius),
+            viewport: viewport,
+            renderer: renderer
+        )
+
+        guard !indices.isEmpty else { return nil }
+
+        return indices.min { lhs, rhs in
+            let lhsDistance = projectedDistanceSquared(
+                point: store.points[lhs],
+                target: normalized,
+                viewport: viewport
+            )
+            let rhsDistance = projectedDistanceSquared(
+                point: store.points[rhs],
+                target: normalized,
+                viewport: viewport
+            )
+            return lhsDistance < rhsDistance
+        }
     }
 }
 

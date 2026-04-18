@@ -308,6 +308,46 @@ class MetalKitSceneRenderer: NSObject, MTKViewDelegate {
         )
     }
 
+    func selectEditableFlood(screenPoint: CGPoint,
+                             threshold: Float,
+                             mode: SelectionCombineMode,
+                             renderSize: CGSize) async throws -> SplatEditorSnapshot? {
+        guard let splatEditor, modelRenderer is SplatRenderer else { return nil }
+        let viewport = makeSplatViewport(for: renderSize)
+        let normalized = SIMD2<Float>(
+            Float(min(max(screenPoint.x / max(renderSize.width, 1), 0), 1)),
+            Float(min(max(screenPoint.y / max(renderSize.height, 1), 0), 1))
+        )
+        try await splatEditor.selectFloodFill(
+            normalized: normalized,
+            threshold: threshold,
+            mode: mode,
+            viewport: viewport
+        )
+        requestRedraw()
+        return await splatEditor.snapshot()
+    }
+
+    func selectEditableColorMatch(screenPoint: CGPoint,
+                                  threshold: Float,
+                                  mode: SelectionCombineMode,
+                                  renderSize: CGSize) async throws -> SplatEditorSnapshot? {
+        guard let splatEditor, modelRenderer is SplatRenderer else { return nil }
+        let viewport = makeSplatViewport(for: renderSize)
+        let normalized = SIMD2<Float>(
+            Float(min(max(screenPoint.x / max(renderSize.width, 1), 0), 1)),
+            Float(min(max(screenPoint.y / max(renderSize.height, 1), 0), 1))
+        )
+        try await splatEditor.selectColorMatch(
+            normalized: normalized,
+            threshold: threshold,
+            mode: mode,
+            viewport: viewport
+        )
+        requestRedraw()
+        return await splatEditor.snapshot()
+    }
+
     func hideSelectedEditableSplats() async throws -> SplatEditorSnapshot? {
         guard let splatEditor else { return nil }
         try await splatEditor.hideSelection()

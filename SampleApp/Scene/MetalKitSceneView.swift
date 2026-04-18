@@ -380,6 +380,8 @@ final class SceneEditingController: ObservableObject {
         case rect
         case brush
         case lasso
+        case flood
+        case eyedropper
         case sphere
         case box
         case polygon
@@ -396,6 +398,8 @@ final class SceneEditingController: ObservableObject {
             case .rect: "Rect"
             case .brush: "Brush"
             case .lasso: "Lasso"
+            case .flood: "Flood"
+            case .eyedropper: "Color"
             case .sphere: "Sphere"
             case .box: "Box"
             case .polygon: "Polygon"
@@ -412,6 +416,8 @@ final class SceneEditingController: ObservableObject {
             case .rect: "rectangle.dashed"
             case .brush: "paintbrush.pointed"
             case .lasso: "lasso"
+            case .flood: "drop.fill"
+            case .eyedropper: "eyedropper"
             case .sphere: "circle.dashed"
             case .box: "cube.transparent"
             case .polygon: "point.3.connected.trianglepath.dotted"
@@ -424,7 +430,7 @@ final class SceneEditingController: ObservableObject {
 
         var usesOverlaySelection: Bool {
             switch self {
-            case .rect, .brush, .lasso, .polygon, .measure:
+            case .rect, .brush, .lasso, .flood, .eyedropper, .polygon, .measure:
                 true
             default:
                 false
@@ -442,7 +448,7 @@ final class SceneEditingController: ObservableObject {
 
         var usesTapOverlay: Bool {
             switch self {
-            case .polygon, .measure:
+            case .flood, .eyedropper, .polygon, .measure:
                 true
             default:
                 false
@@ -499,6 +505,8 @@ final class SceneEditingController: ObservableObject {
     @Published fileprivate var overlayPreview: OverlayPreview?
     @Published fileprivate var shareSheetItem: ShareSheetPayload?
     @Published private(set) var statusMessage: String?
+    @Published var floodThreshold: Float = 0.2
+    @Published var eyedropperThreshold: Float = 0.2
     @Published var sphereRadius: Float = 0.5
     @Published var boxExtentX: Float = 0.25
     @Published var boxExtentY: Float = 0.25
@@ -723,6 +731,36 @@ final class SceneEditingController: ObservableObject {
     fileprivate func handleOverlayTap(at point: CGPoint, in size: CGSize) {
         overlayCanvasSize = size
         switch tool {
+        case .flood:
+            guard let renderer else { return }
+            Task {
+                do {
+                    let snapshot = try await renderer.selectEditableFlood(
+                        screenPoint: point,
+                        threshold: floodThreshold,
+                        mode: combineMode,
+                        renderSize: size
+                    )
+                    applySelectionSnapshot(snapshot)
+                } catch {
+                    setError(error)
+                }
+            }
+        case .eyedropper:
+            guard let renderer else { return }
+            Task {
+                do {
+                    let snapshot = try await renderer.selectEditableColorMatch(
+                        screenPoint: point,
+                        threshold: eyedropperThreshold,
+                        mode: combineMode,
+                        renderSize: size
+                    )
+                    applySelectionSnapshot(snapshot)
+                } catch {
+                    setError(error)
+                }
+            }
         case .polygon:
             if let first = polygonPoints.first,
                polygonPoints.count >= 3,
@@ -931,6 +969,32 @@ private struct SplatEditingToolbar: View {
     @ViewBuilder
     private var toolConfigurationView: some View {
         switch controller.tool {
+        case .flood:
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Tap a splat to grow a connected selection using opacity similarity.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                thresholdSlider(
+                    label: "Opacity",
+                    value: Binding(
+                        get: { Double(controller.floodThreshold) },
+                        set: { controller.floodThreshold = Float($0) }
+                    )
+                )
+            }
+        case .eyedropper:
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Tap a splat to select visible splats with similar base color.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                thresholdSlider(
+                    label: "Color",
+                    value: Binding(
+                        get: { Double(controller.eyedropperThreshold) },
+                        set: { controller.eyedropperThreshold = Float($0) }
+                    )
+                )
+            }
         case .sphere:
             VStack(alignment: .leading, spacing: 8) {
                 Text(controller.selectionReferenceLabel)
@@ -1023,6 +1087,18 @@ private struct SplatEditingToolbar: View {
                 .font(.subheadline.monospaced())
                 .frame(width: 18)
             Slider(value: value, in: 0.05...5.0)
+            Text(String(format: "%.2f", value.wrappedValue))
+                .font(.caption.monospacedDigit())
+                .frame(width: 42)
+        }
+    }
+
+    private func thresholdSlider(label: String, value: Binding<Double>) -> some View {
+        HStack {
+            Text(label)
+                .font(.subheadline)
+                .frame(width: 52, alignment: .leading)
+            Slider(value: value, in: 0.01...1.0)
             Text(String(format: "%.2f", value.wrappedValue))
                 .font(.caption.monospacedDigit())
                 .frame(width: 42)

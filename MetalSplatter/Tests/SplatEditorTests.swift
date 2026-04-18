@@ -75,6 +75,33 @@ final class SplatEditorTests: XCTestCase {
         XCTAssertEqual(redone?.states[1], [.selected])
     }
 
+    func testEditableStoreColorMatchUsesPerChannelThresholdAndVisibility() {
+        var store = EditableSplatStore(points: [
+            makePoint(position: SIMD3<Float>(0.0, 0.0, -2.0), color: SIMD3<Float>(0.20, 0.40, 0.60)),
+            makePoint(position: SIMD3<Float>(0.1, 0.0, -2.0), color: SIMD3<Float>(0.22, 0.38, 0.61)),
+            makePoint(position: SIMD3<Float>(0.2, 0.0, -2.0), color: SIMD3<Float>(0.20, 0.52, 0.60)),
+            makePoint(position: SIMD3<Float>(0.3, 0.0, -2.0), color: SIMD3<Float>(0.19, 0.39, 0.58))
+        ])
+        store.states[3].insert(.hidden)
+
+        let matched = store.colorMatchIndices(referenceIndex: 0, threshold: 0.03)
+        XCTAssertEqual(matched, [0, 1])
+    }
+
+    func testEditableStoreFloodFillUsesProjectedConnectivityAndOpacityThreshold() {
+        let points = [
+            makePoint(position: SIMD3<Float>(0.00, 0.00, -2.0), color: SIMD3<Float>(1.0, 0.0, 0.0), opacity: 0.20),
+            makePoint(position: SIMD3<Float>(0.03, 0.00, -2.0), color: SIMD3<Float>(0.9, 0.1, 0.0), opacity: 0.24),
+            makePoint(position: SIMD3<Float>(0.06, 0.00, -2.0), color: SIMD3<Float>(0.8, 0.2, 0.0), opacity: 0.22),
+            makePoint(position: SIMD3<Float>(0.45, 0.00, -2.0), color: SIMD3<Float>(0.7, 0.3, 0.0), opacity: 0.21),
+            makePoint(position: SIMD3<Float>(0.02, 0.02, -2.0), color: SIMD3<Float>(0.6, 0.4, 0.0), opacity: 0.80)
+        ]
+        let store = EditableSplatStore(points: points)
+
+        let selected = store.floodFillIndices(seedIndex: 0, threshold: 0.08, viewport: makeViewport())
+        XCTAssertEqual(selected.sorted(), [0, 1, 2])
+    }
+
     func testRectSelectionHideDeleteUndoRedoAndExportRoundTrip() async throws {
         let renderer = try makeRenderer()
         let editor = try await SplatEditor(points: makePoints(), renderer: renderer)
@@ -256,11 +283,11 @@ final class SplatEditorTests: XCTestCase {
         ]
     }
 
-    private func makePoint(position: SIMD3<Float>, color: SIMD3<Float>) -> SplatScenePoint {
+    private func makePoint(position: SIMD3<Float>, color: SIMD3<Float>, opacity: Float = 1.0) -> SplatScenePoint {
         SplatScenePoint(
             position: position,
             color: .linearFloat(color),
-            opacity: .linearFloat(1.0),
+            opacity: .linearFloat(opacity),
             scale: .linearFloat(SIMD3<Float>(repeating: 0.05)),
             rotation: simd_quatf(angle: 0, axis: SIMD3<Float>(0, 1, 0))
         )
