@@ -6,7 +6,7 @@ MetalSplatter is a high‑performance Swift/Metal library for rendering 3D Gauss
 - Native Swift + Metal renderer tuned for Apple GPUs across iOS, macOS, and visionOS.
 - Multi‑stage, tile‑memory rendering pipeline for high‑quality depth blending (ideal for Vision Pro reprojection).
 - GPU‑accelerated sorting options: O(n) counting sort, camera‑relative binning, MPSGraph arg sort fallback, and Metal 4 stable radix sort for large scenes.
-- Multiple file formats with auto‑detection: PLY (ASCII/binary), `.splat`, SPZ, SPX, SOGS v1/v2/ZIP.
+- Multiple file formats with auto‑detection: PLY (ASCII/binary), `.splat`, SPZ, SPX, glTF/GLB, SOGS v1/v2/ZIP.
 - Optional order‑independent transparency (dithered) and a faster 2DGS rendering mode.
 - Spherical harmonics support (degrees 0–3), plus a fast SH pipeline with palette optimization.
 - ARKit renderer that composites splats with the camera feed and supports auto placement and plane detection.
@@ -78,6 +78,8 @@ MetalSplatter includes a full I/O stack with auto‑detection and conversion sup
 | SPLAT (`.splat`) | Yes | Yes | Compact binary format |
 | SPZ (`.spz`, `.spz.gz`) | Yes | Yes | Gzip‑compressed |
 | SPX (`.spx`) | Yes | Yes | Extensible format with optional compression |
+| glTF (`.gltf`) | Yes | Yes | `KHR_gaussian_splatting` JSON + BIN |
+| GLB (`.glb`) | Yes | Yes | Binary `KHR_gaussian_splatting` container |
 | SOGS v1 (`.sogs`) | Yes | No | WebP‑based folders |
 | SOGS v2 (`.sog`) | Yes | No | Bundled archive with codebook compression |
 | SOGS ZIP (`.zip`) | Yes | No | Legacy ZIP bundle |

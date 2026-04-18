@@ -427,8 +427,13 @@ public final class GltfGaussianSplatSceneReader: SplatSceneReader {
     }
 
     private static func readUInt32(_ data: Data, offset: Int) -> UInt32 {
-        let value = data.withUnsafeBytes { $0.load(fromByteOffset: offset, as: UInt32.self) }
-        return UInt32(littleEndian: value)
+        precondition(offset >= 0 && offset + MemoryLayout<UInt32>.size <= data.count)
+
+        let start = data.startIndex + offset
+        let end = start + MemoryLayout<UInt32>.size
+        return data[start..<end].enumerated().reduce(into: UInt32(0)) { value, element in
+            value |= UInt32(element.element) << UInt32(element.offset * 8)
+        }
     }
 
     private struct TransformBuilder {

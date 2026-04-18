@@ -13,7 +13,7 @@ MetalSplatter implements GPU-accelerated rendering of scenes captured via [3D Ga
 ## Features
 
 - **Multi-Platform Support**: iOS/iPadOS, macOS, and visionOS with platform-optimized rendering paths
-- **Multiple File Formats**: PLY (ASCII/binary), SPLAT, SPZ (compressed), SOGS (WebP-based)
+- **Multiple File Formats**: PLY (ASCII/binary), SPLAT, SPZ/SPX, glTF/GLB, SOGS (WebP-based)
 - **Advanced Rendering Pipeline**: Single-stage and multi-stage pipelines with tile memory for high-quality depth blending
 - **GPU-Accelerated Sorting**: O(n) counting sort with camera-relative binning for optimal visual quality
 - **Spherical Harmonics**: Full SH support (degrees 0-3) for view-dependent lighting effects
@@ -179,7 +179,9 @@ swift run SplatConverter input.ply --describe --start 0 --count 10 -v
 | PLY | `.ply` | ✓ | ✓ | ASCII and binary, full SH support |
 | SPLAT | `.splat` | ✓ | ✓ | Compact binary format |
 | SPZ | `.spz`, `.spz.gz` | ✓ | ✓ | Gzip-compressed format |
-| SPX | `.spx` | ✓ | - | Alternative binary format |
+| SPX | `.spx` | ✓ | ✓ | Alternative binary format |
+| glTF | `.gltf` | ✓ | ✓ | `KHR_gaussian_splatting` JSON + BIN |
+| GLB | `.glb` | ✓ | ✓ | Binary `KHR_gaussian_splatting` container |
 | SOGS v1 | `.sogs` | ✓ | - | WebP-based with metadata |
 | SOGS v2 | `.sog` | ✓ | - | Bundled archive format |
 | SOGS ZIP | `.zip` | ✓ | - | Legacy ZIP archive |

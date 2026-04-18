@@ -285,6 +285,70 @@ final class SplatIOTests: XCTestCase {
         XCTAssertGreaterThan(similarity, 0.999)
     }
 
+    func testGLBWriterRoundTripsLinearColor() throws {
+        let points = [
+            SplatScenePoint(
+                position: SIMD3<Float>(1, 2, 3),
+                color: .linearFloat(SIMD3<Float>(0.25, 0.5, 0.75)),
+                opacity: .linearFloat(0.8),
+                scale: .linearFloat(SIMD3<Float>(0.1, 0.2, 0.3)),
+                rotation: simd_quatf(angle: .pi / 4, axis: SIMD3<Float>(0, 1, 0))
+            )
+        ]
+
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+            .appendingPathExtension("glb")
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        let writer = GltfGaussianSplatSceneWriter(container: .glb)
+        try writer.writeScene(points, to: url)
+
+        let reader = try GltfGaussianSplatSceneReader(url)
+        let roundTripped = try reader.readScene()
+        XCTAssertEqual(roundTripped.count, points.count)
+        let actual = roundTripped[0]
+        let expected = points[0]
+        XCTAssertTrue((actual.position - expected.position).isWithin(tolerance: SplatScenePoint.Tolerance.position))
+        XCTAssertTrue(actual.color ~= expected.color)
+        XCTAssertTrue(actual.opacity ~= expected.opacity)
+        XCTAssertTrue((actual.scale.asLinearFloat - expected.scale.asLinearFloat).isWithin(tolerance: 1e-6))
+        XCTAssertTrue((actual.rotation.normalized.vector - expected.rotation.normalized.vector).isWithin(tolerance: SplatScenePoint.Tolerance.rotation))
+    }
+
+    func testGLTFWriterRoundTripsSphericalHarmonics() throws {
+        let points = [
+            SplatScenePoint(
+                position: SIMD3<Float>(-1, 0.5, 2),
+                color: .sphericalHarmonic([
+                    SIMD3<Float>(0.1, 0.2, 0.3),
+                    SIMD3<Float>(0.01, 0.02, 0.03),
+                    SIMD3<Float>(0.04, 0.05, 0.06),
+                    SIMD3<Float>(0.07, 0.08, 0.09)
+                ]),
+                opacity: .linearFloat(0.65),
+                scale: .exponent(SIMD3<Float>(-1, -0.5, -0.25)),
+                rotation: simd_quatf(angle: .pi / 6, axis: SIMD3<Float>(1, 0, 0))
+            )
+        ]
+
+        let baseURL = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let gltfURL = baseURL.appendingPathExtension("gltf")
+        let binURL = baseURL.appendingPathExtension("bin")
+        defer {
+            try? FileManager.default.removeItem(at: gltfURL)
+            try? FileManager.default.removeItem(at: binURL)
+        }
+
+        let writer = GltfGaussianSplatSceneWriter(container: .gltf)
+        try writer.writeScene(points, to: gltfURL)
+
+        let reader = try GltfGaussianSplatSceneReader(gltfURL)
+        let roundTripped = try reader.readScene()
+        XCTAssertEqual(roundTripped.count, points.count)
+        XCTAssertTrue(roundTripped[0] ~= points[0])
+    }
+
     func testReadPLYWithPartialSphericalHarmonicsProperties() {
         let plyData = Data(
             """

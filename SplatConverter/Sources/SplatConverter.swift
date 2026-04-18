@@ -21,7 +21,7 @@ struct SplatConverter: ParsableCommand {
     @Option(name: .shortAndLong, help: "The output splat scene file")
     var outputFile: String?
 
-    @Option(name: [.customShort("f"), .long], help: "The format of the output file (dotSplat, ply, ply-ascii)")
+    @Option(name: [.customShort("f"), .long], help: "The format of the output file (dotSplat, ply, ply-ascii, gltf, glb)")
     var outputFormat: SplatOutputFileFormat?
 
     @Flag(name: [.long], help: "Describe each of the splats from first to first + count")
@@ -93,6 +93,14 @@ struct SplatConverter: ParsableCommand {
                     let splatPLYWriter = try SplatPLYSceneWriter(toFileAtPath: outputFile, append: false)
                     try splatPLYWriter.start(sphericalHarmonicDegree: 3, binary: false, pointCount: pointsToWrite.count)
                     writer = splatPLYWriter
+                case .gltf:
+                    let gltfWriter = GltfGaussianSplatSceneWriter(container: .gltf)
+                    gltfWriter.setOutputURL(URL(fileURLWithPath: outputFile))
+                    writer = gltfWriter
+                case .glb:
+                    let gltfWriter = GltfGaussianSplatSceneWriter(container: .glb)
+                    gltfWriter.setOutputURL(URL(fileURLWithPath: outputFile))
+                    writer = gltfWriter
                 }
 
                 defer {
@@ -194,6 +202,8 @@ enum SplatOutputFileFormat: ExpressibleByArgument {
     case asciiPLY
     case binaryPLY
     case dotSplat
+    case gltf
+    case glb
 
     public init?(argument: String) {
         switch argument.lowercased() {
@@ -201,6 +211,8 @@ enum SplatOutputFileFormat: ExpressibleByArgument {
         case "ply": self.init(defaultFor: .ply)
         case "plybinary", "ply-binary", "binaryply", "binary-ply": self = .binaryPLY
         case "plyascii", "ply-ascii", "asciiply", "ascii-ply": self = .asciiPLY
+        case "gltf": self = .gltf
+        case "glb": self = .glb
         default: return nil
         }
     }
@@ -212,8 +224,8 @@ enum SplatOutputFileFormat: ExpressibleByArgument {
         case .spz: self = .dotSplat  // Default to dotSplat when converting from SPZ
         case .sogs: self = .binaryPLY  // Default to binary PLY when converting from SOGS
         case .spx: self = .dotSplat  // Default to dotSplat when converting from SPX
-        case .gltf, .glb:
-            return nil  // Unsupported output formats for this converter
+        case .gltf: self = .gltf
+        case .glb: self = .glb
         case .none: return nil
         }
     }
