@@ -84,24 +84,44 @@ void decomposeCovariance(float3 cov2D, thread float2 &v1, thread float2 &v2) {
     v2 = eigenvector2 * sqrtLambdas.y;
 }
 
-FragmentIn splatVertex(Splat splat,
-                       Uniforms uniforms,
-                       uint relativeVertexIndex,
-                       uint splatID,
-                       uint editState,
-                       const device uint *transformIndices,
-                       const device float4x4 *transformPalette) {
+static inline FragmentIn culledFragment(uint splatID) {
+    FragmentIn out;
+    out.position = float4(1, 1, 0, 1);
+    out.relativePosition = half2(0);
+    out.color = half4(0);
+    out.lodBand = 0;
+    out.debugFlags = 0;
+    out.splatID = splatID;
+    out.viewCenter = float3(0);
+    out.viewNormal = float3(0);
+    out.viewTangentU = float3(0);
+    out.viewTangentV = float3(0);
+    return out;
+}
+
+static FragmentIn splatVertexInternal(Splat splat,
+                                      Uniforms uniforms,
+                                      uint relativeVertexIndex,
+                                      uint splatID,
+                                      uint editState,
+                                      const device uint *transformIndices,
+                                      const device float4x4 *transformPalette,
+                                      float axisScale,
+                                      bool selectedOnly,
+                                      bool applySelectionTint,
+                                      bool useSelectionColorOverride) {
     FragmentIn out;
     out.debugFlags = uniforms.debugFlags;
     out.lodBand = 0;
     out.splatID = splatID;
 
+    bool isSelected = (editState & (1u << 0)) != 0u;
     if ((editState & ((1u << 1) | (1u << 3))) != 0u) {
-        out.position = float4(1, 1, 0, 1);
-        out.relativePosition = half2(0);
-        out.color = half4(0);
-        out.splatID = splatID;
-        return out;
+        return culledFragment(splatID);
+    }
+
+    if (selectedOnly && !isSelected) {
+        return culledFragment(splatID);
     }
 
     // Optimized matrix multiplication with memory-coalesced access pattern
@@ -144,11 +164,7 @@ FragmentIn splatVertex(Splat splat,
 
     // Early exit for splats behind camera
     if (viewPosition3.z >= 0.0) {
-        out.position = float4(1, 1, 0, 1);
-        out.relativePosition = half2(0);
-        out.color = half4(0);
-        out.splatID = splatID;
-        return out;
+        return culledFragment(splatID);
     }
 
     // Optimized projection matrix multiplication
@@ -161,9 +177,7 @@ FragmentIn splatVertex(Splat splat,
     float3 ndc = projectedCenter.xyz * invW;
     // Combined frustum check: depth + XY bounds in one condition
     if (ndc.z > 1.0f || any(abs(ndc.xy) > 1.2f)) {
-        out.position = float4(1, 1, 0, 1);
-        out.splatID = splatID;
-        return out;
+        return culledFragment(splatID);
     }
 
     float opacityScale = 1.0f;
@@ -182,11 +196,7 @@ FragmentIn splatVertex(Splat splat,
     // Screen-space LOD culling - cull sub-pixel splats
     float pixelRadius = max(length(axis1 + axis2), length(axis1 - axis2)) * kBoundsRadius;
     if (pixelRadius < 0.5f) {
-        out.position = float4(1, 1, 0, 1);
-        out.relativePosition = half2(0);
-        out.color = half4(0);
-        out.splatID = splatID;
-        return out;
+        return culledFragment(splatID);
     }
 
     // 2DGS: extract splat normal from 3D covariance for future ray-splat intersection.
@@ -252,16 +262,18 @@ FragmentIn splatVertex(Splat splat,
     half2 axisContribution2 = relativeCoordinates.y * half2(axis2);
     half2 totalAxisContribution = axisContribution1 + axisContribution2;
 
-    half2 projectedScreenDelta = totalAxisContribution * (2.0h * kBoundsRadius) / screenSizeFloat;
+    half2 projectedScreenDelta = totalAxisContribution * half(axisScale) * (2.0h * kBoundsRadius) / screenSizeFloat;
 
     out.position = float4(projectedCenter.x + projectedScreenDelta.x * projectedCenter.w,
                           projectedCenter.y + projectedScreenDelta.y * projectedCenter.w,
                           projectedCenter.z,
                           projectedCenter.w);
-    out.relativePosition = kBoundsRadius * relativeCoordinates;
+    out.relativePosition = half(axisScale) * kBoundsRadius * relativeCoordinates;
     out.color = unpackSplatColor(splat.packedColor);
     out.color.a = min(out.color.a * half(opacityScale), half(1.0));
-    if (uniforms.editingEnabled != 0u && (editState & (1u << 0)) != 0u) {
+    if (useSelectionColorOverride && isSelected) {
+        out.color = half4(half3(uniforms.selectionTintColor.xyz), half(uniforms.selectionTintColor.w));
+    } else if (applySelectionTint && uniforms.editingEnabled != 0u && isSelected) {
         out.color.rgb = mix(out.color.rgb, half3(uniforms.selectionTintColor.xyz), half(uniforms.selectionTintColor.w));
     }
 
@@ -280,6 +292,46 @@ FragmentIn splatVertex(Splat splat,
     }
 
     return out;
+}
+
+FragmentIn splatVertex(Splat splat,
+                       Uniforms uniforms,
+                       uint relativeVertexIndex,
+                       uint splatID,
+                       uint editState,
+                       const device uint *transformIndices,
+                       const device float4x4 *transformPalette) {
+    return splatVertexInternal(splat,
+                               uniforms,
+                               relativeVertexIndex,
+                               splatID,
+                               editState,
+                               transformIndices,
+                               transformPalette,
+                               1.0f,
+                               false,
+                               true,
+                               false);
+}
+
+FragmentIn selectedOutlineVertex(Splat splat,
+                                 Uniforms uniforms,
+                                 uint relativeVertexIndex,
+                                 uint splatID,
+                                 uint editState,
+                                 const device uint *transformIndices,
+                                 const device float4x4 *transformPalette) {
+    return splatVertexInternal(splat,
+                               uniforms,
+                               relativeVertexIndex,
+                               splatID,
+                               editState,
+                               transformIndices,
+                               transformPalette,
+                               1.18f,
+                               true,
+                               false,
+                               true);
 }
 
 FragmentIn splatVertex(Splat splat,

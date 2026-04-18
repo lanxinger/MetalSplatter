@@ -26,6 +26,14 @@ FragmentIn splatVertex(Splat splat,
                        const device uint *transformIndices,
                        const device float4x4 *transformPalette);
 
+FragmentIn selectedOutlineVertex(Splat splat,
+                                 Uniforms uniforms,
+                                 uint relativeVertexIndex,
+                                 uint splatID,
+                                 uint editState,
+                                 const device uint *transformIndices,
+                                 const device float4x4 *transformPalette);
+
 FragmentIn splatVertex(Splat splat,
                        Uniforms uniforms,
                        uint relativeVertexIndex,
@@ -117,4 +125,12 @@ inline half4 shadeSplatDithered(FragmentIn in, float2 screenPos) {
 
     // Output opaque fragment (no blending needed)
     return half4(rgb, 1.0h);
+}
+
+inline half4 shadeSplatOutline(FragmentIn in) {
+    constexpr half outlineScale = 1.18h;
+    half outerAlpha = splatFragmentAlpha(in.relativePosition, in.color.a);
+    half innerAlpha = splatFragmentAlpha(in.relativePosition / outlineScale, in.color.a);
+    half ringAlpha = max(outerAlpha - innerAlpha, half(0.0));
+    return half4(in.color.rgb * ringAlpha, ringAlpha);
 }

@@ -240,6 +240,28 @@ struct EditableSplatStore: Sendable {
         }
     }
 
+    mutating func selectAllVisible() {
+        for index in states.indices where isSelectable(index) {
+            states[index].insert(.selected)
+        }
+    }
+
+    mutating func clearSelection() {
+        for index in states.indices {
+            states[index].remove(.selected)
+        }
+    }
+
+    mutating func invertSelection() {
+        for index in states.indices where isSelectable(index) {
+            if states[index].contains(.selected) {
+                states[index].remove(.selected)
+            } else {
+                states[index].insert(.selected)
+            }
+        }
+    }
+
     mutating func unhideAll() {
         for index in states.indices {
             states[index].remove(.hidden)
@@ -527,6 +549,27 @@ public actor SplatEditor {
     public func hideSelection() async throws {
         let before = store.snapshot
         store.hideSelection()
+        await history.pushUndo(before)
+        try syncRendererState()
+    }
+
+    public func selectAll() async throws {
+        let before = store.snapshot
+        store.selectAllVisible()
+        await history.pushUndo(before)
+        try syncRendererState()
+    }
+
+    public func clearSelection() async throws {
+        let before = store.snapshot
+        store.clearSelection()
+        await history.pushUndo(before)
+        try syncRendererState()
+    }
+
+    public func invertSelection() async throws {
+        let before = store.snapshot
+        store.invertSelection()
         await history.pushUndo(before)
         try syncRendererState()
     }

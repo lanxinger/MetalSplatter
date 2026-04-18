@@ -355,6 +355,27 @@ class MetalKitSceneRenderer: NSObject, MTKViewDelegate {
         return await splatEditor.snapshot()
     }
 
+    func selectAllEditableSplats() async throws -> SplatEditorSnapshot? {
+        guard let splatEditor else { return nil }
+        try await splatEditor.selectAll()
+        requestRedraw()
+        return await splatEditor.snapshot()
+    }
+
+    func clearEditableSelection() async throws -> SplatEditorSnapshot? {
+        guard let splatEditor else { return nil }
+        try await splatEditor.clearSelection()
+        requestRedraw()
+        return await splatEditor.snapshot()
+    }
+
+    func invertEditableSelection() async throws -> SplatEditorSnapshot? {
+        guard let splatEditor else { return nil }
+        try await splatEditor.invertSelection()
+        requestRedraw()
+        return await splatEditor.snapshot()
+    }
+
     func unhideAllEditableSplats() async throws -> SplatEditorSnapshot? {
         guard let splatEditor else { return nil }
         try await splatEditor.unhideAll()

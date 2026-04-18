@@ -589,6 +589,8 @@ public class SplatRenderer: @unchecked Sendable {
     // Single-stage pipeline
     internal var singleStagePipelineState: MTLRenderPipelineState?
     internal var singleStageDepthState: MTLDepthStencilState?
+    internal var selectionOutlinePipelineState: MTLRenderPipelineState?
+    internal var selectionOutlineDepthState: MTLDepthStencilState?
     // Dithered transparency pipeline (order-independent, no sorting required)
     private var ditheredPipelineState: MTLRenderPipelineState?
     private var ditheredDepthState: MTLDepthStencilState?
@@ -698,6 +700,7 @@ public class SplatRenderer: @unchecked Sendable {
     internal var editTransformIndexBuffer: MTLBuffer?
     internal var editTransformPaletteBuffer: MTLBuffer?
     internal var selectionTintColor = SIMD4<Float>(0.15, 0.55, 1.0, 0.45)
+    internal var selectionOutlineEnabled = true
     internal var editingEnabled = false
 
     public var splatCount: Int { splatBuffer.count }
@@ -1236,6 +1239,9 @@ public class SplatRenderer: @unchecked Sendable {
 
     internal func resetPipelineStates() {
         singleStagePipelineState = nil
+        singleStageDepthState = nil
+        selectionOutlinePipelineState = nil
+        selectionOutlineDepthState = nil
         ditheredPipelineState = nil
         ditheredDepthState = nil
         initializePipelineState = nil
@@ -1314,6 +1320,8 @@ public class SplatRenderer: @unchecked Sendable {
 
         singleStagePipelineState = try buildSingleStagePipelineState()
         singleStageDepthState = try buildSingleStageDepthState()
+        selectionOutlinePipelineState = try buildSelectionOutlinePipelineState()
+        selectionOutlineDepthState = try buildSelectionOutlineDepthState()
     }
 
     private func buildMultiStagePipelineStatesIfNeeded() throws {
@@ -1370,6 +1378,48 @@ public class SplatRenderer: @unchecked Sendable {
         let depthStateDescriptor = MTLDepthStencilDescriptor()
         depthStateDescriptor.depthCompareFunction = MTLCompareFunction.always
         depthStateDescriptor.isDepthWriteEnabled = writeDepth
+        guard let depthState = device.makeDepthStencilState(descriptor: depthStateDescriptor) else {
+            throw SplatRendererError.failedToCreateDepthStencilState
+        }
+        return depthState
+    }
+
+    private func buildSelectionOutlinePipelineState() throws -> MTLRenderPipelineState {
+        guard !useMultiStagePipeline else {
+            throw SplatRendererError.internalPipelineMismatch(expected: "single-stage", actual: "multi-stage")
+        }
+
+        let pipelineDescriptor = MTLRenderPipelineDescriptor()
+        pipelineDescriptor.label = "SelectionOutlinePipeline"
+
+        let functionConstants = MTLFunctionConstantValues()
+        var use2DGSValue = use2DGSMode
+        functionConstants.setConstantValue(&use2DGSValue, type: .bool, index: 12)
+
+        pipelineDescriptor.vertexFunction = try library.makeFunction(name: "selectedOutlineVertexShader", constantValues: functionConstants)
+        pipelineDescriptor.fragmentFunction = try library.makeRequiredFunction(name: "selectedOutlineFragmentShader")
+        pipelineDescriptor.rasterSampleCount = sampleCount
+
+        let colorAttachment = pipelineDescriptor.colorAttachments[0]
+        colorAttachment?.pixelFormat = colorFormat
+        colorAttachment?.isBlendingEnabled = true
+        colorAttachment?.rgbBlendOperation = .add
+        colorAttachment?.alphaBlendOperation = .add
+        colorAttachment?.sourceRGBBlendFactor = .one
+        colorAttachment?.sourceAlphaBlendFactor = .one
+        colorAttachment?.destinationRGBBlendFactor = .oneMinusSourceAlpha
+        colorAttachment?.destinationAlphaBlendFactor = .oneMinusSourceAlpha
+
+        pipelineDescriptor.depthAttachmentPixelFormat = depthFormat
+        pipelineDescriptor.maxVertexAmplificationCount = maxViewCount
+
+        return try device.makeRenderPipelineState(descriptor: pipelineDescriptor)
+    }
+
+    private func buildSelectionOutlineDepthState() throws -> MTLDepthStencilState {
+        let depthStateDescriptor = MTLDepthStencilDescriptor()
+        depthStateDescriptor.depthCompareFunction = .lessEqual
+        depthStateDescriptor.isDepthWriteEnabled = false
         guard let depthState = device.makeDepthStencilState(descriptor: depthStateDescriptor) else {
             throw SplatRendererError.failedToCreateDepthStencilState
         }
@@ -2885,6 +2935,23 @@ public class SplatRenderer: @unchecked Sendable {
                                                 indexBuffer: indexBuffer.buffer,
                                                 indexBufferOffset: 0,
                                                 instanceCount: instanceCount)
+        }
+
+        if !multiStage,
+           selectionOutlineEnabled,
+           editingEnabled,
+           let selectionOutlinePipelineState,
+           let selectionOutlineDepthState {
+            renderEncoder.pushDebugGroup("Draw Selection Outline")
+            renderEncoder.setRenderPipelineState(selectionOutlinePipelineState)
+            renderEncoder.setDepthStencilState(selectionOutlineDepthState)
+            renderEncoder.drawIndexedPrimitives(type: .triangle,
+                                                indexCount: indexCount,
+                                                indexType: .uint32,
+                                                indexBuffer: indexBuffer.buffer,
+                                                indexBufferOffset: 0,
+                                                instanceCount: instanceCount)
+            renderEncoder.popDebugGroup()
         }
 
         if multiStage {

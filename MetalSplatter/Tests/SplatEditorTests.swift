@@ -128,6 +128,21 @@ final class SplatEditorTests: XCTestCase {
         XCTAssertEqual(store.points[1].position, SIMD3<Float>(0.75, 0.75, -2.0))
     }
 
+    func testEditableStoreSelectAllClearAndInvertRespectVisibility() {
+        var store = EditableSplatStore(points: makePoints())
+        store.states[2].insert(.hidden)
+
+        store.selectAllVisible()
+        XCTAssertEqual(store.selectedIndices, [0, 1, 3])
+
+        store.invertSelection()
+        XCTAssertEqual(store.selectedIndices, [])
+
+        store.selectAllVisible()
+        store.clearSelection()
+        XCTAssertEqual(store.selectedIndices, [])
+    }
+
     func testRectSelectionHideDeleteUndoRedoAndExportRoundTrip() async throws {
         let renderer = try makeRenderer()
         let editor = try await SplatEditor(points: makePoints(), renderer: renderer)

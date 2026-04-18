@@ -667,6 +667,24 @@ final class SceneEditingController: ObservableObject {
         }
     }
 
+    func selectAll() {
+        runEditorAction { renderer in
+            try await renderer.selectAllEditableSplats()
+        }
+    }
+
+    func clearSelection() {
+        runEditorAction { renderer in
+            try await renderer.clearEditableSelection()
+        }
+    }
+
+    func invertSelection() {
+        runEditorAction { renderer in
+            try await renderer.invertEditableSelection()
+        }
+    }
+
     func unhideAll() {
         runEditorAction { renderer in
             try await renderer.unhideAllEditableSplats()
@@ -962,6 +980,9 @@ private struct SplatEditingToolbar: View {
                         }
                     }
 
+                    actionButton("All", systemImage: "checklist", disabled: !controller.isEditorAvailable, action: controller.selectAll)
+                    actionButton("None", systemImage: "xmark.circle", disabled: !controller.isEditorAvailable, action: controller.clearSelection)
+                    actionButton("Invert", systemImage: "arrow.left.arrow.right.square", disabled: !controller.isEditorAvailable, action: controller.invertSelection)
                     actionButton("Hide", systemImage: "eye.slash", disabled: !controller.hasSelection, action: controller.hideSelection)
                     actionButton("Show", systemImage: "eye", disabled: !controller.isEditorAvailable, action: controller.unhideAll)
                     actionButton("Duplicate", systemImage: "plus.square.on.square", disabled: !controller.hasSelection, action: controller.duplicateSelection)
