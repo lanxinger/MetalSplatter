@@ -131,6 +131,6 @@ inline half4 shadeSplatOutline(FragmentIn in) {
     constexpr half outlineScale = 1.18h;
     half outerAlpha = splatFragmentAlpha(in.relativePosition, in.color.a);
     half innerAlpha = splatFragmentAlpha(in.relativePosition / outlineScale, in.color.a);
-    half ringAlpha = max(outerAlpha - innerAlpha, half(0.0));
+    half ringAlpha = max(innerAlpha - outerAlpha, half(0.0));
     return half4(in.color.rgb * ringAlpha, ringAlpha);
 }
