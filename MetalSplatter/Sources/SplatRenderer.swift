@@ -182,7 +182,7 @@ public class SplatRenderer: @unchecked Sendable {
     let metal4PipelineCacheLock = NSLock()
     var metal4ComputePipelineCache: [String: MTLComputePipelineState] = [:]
     
-    public struct ViewportDescriptor {
+    public struct ViewportDescriptor: Sendable {
         public var viewport: MTLViewport
         public var projectionMatrix: simd_float4x4
         public var viewMatrix: simd_float4x4
@@ -202,6 +202,9 @@ public class SplatRenderer: @unchecked Sendable {
         case splat          = 1
         case sortedIndices  = 2  // GPU-side sorted indices for indirect rendering
         case precomputed    = 3  // Precomputed splat data (Metal 4 TensorOps)
+        case editState      = 4
+        case transformIndex = 5
+        case transformPalette = 6
     }
 
     // Keep in sync with Shaders.metal : Uniforms
@@ -224,6 +227,11 @@ public class SplatRenderer: @unchecked Sendable {
         var padding1: UInt32
         var lodThresholds: SIMD3<Float>
         var covarianceBlur: Float
+        var selectionTintColor: SIMD4<Float>
+        var editingEnabled: UInt32
+        var padding2: UInt32
+        var padding3: UInt32
+        var padding4: UInt32
     }
 
     // Keep in sync with Shaders.metal : UniformsArray
@@ -581,6 +589,8 @@ public class SplatRenderer: @unchecked Sendable {
     // Single-stage pipeline
     internal var singleStagePipelineState: MTLRenderPipelineState?
     internal var singleStageDepthState: MTLDepthStencilState?
+    internal var selectionOutlinePipelineState: MTLRenderPipelineState?
+    internal var selectionOutlineDepthState: MTLDepthStencilState?
     // Dithered transparency pipeline (order-independent, no sorting required)
     private var ditheredPipelineState: MTLRenderPipelineState?
     private var ditheredDepthState: MTLDepthStencilState?
@@ -685,6 +695,13 @@ public class SplatRenderer: @unchecked Sendable {
     var splatBufferPrime: MetalBuffer<Splat>
 
     var indexBuffer: MetalBuffer<UInt32>
+
+    internal var editStateBuffer: MTLBuffer?
+    internal var editTransformIndexBuffer: MTLBuffer?
+    internal var editTransformPaletteBuffer: MTLBuffer?
+    internal var selectionTintColor = SIMD4<Float>(0.15, 0.55, 1.0, 0.45)
+    internal var selectionOutlineEnabled = true
+    internal var editingEnabled = false
 
     public var splatCount: Int { splatBuffer.count }
 
@@ -1222,6 +1239,9 @@ public class SplatRenderer: @unchecked Sendable {
 
     internal func resetPipelineStates() {
         singleStagePipelineState = nil
+        singleStageDepthState = nil
+        selectionOutlinePipelineState = nil
+        selectionOutlineDepthState = nil
         ditheredPipelineState = nil
         ditheredDepthState = nil
         initializePipelineState = nil
@@ -1300,6 +1320,8 @@ public class SplatRenderer: @unchecked Sendable {
 
         singleStagePipelineState = try buildSingleStagePipelineState()
         singleStageDepthState = try buildSingleStageDepthState()
+        selectionOutlinePipelineState = try buildSelectionOutlinePipelineState()
+        selectionOutlineDepthState = try buildSelectionOutlineDepthState()
     }
 
     private func buildMultiStagePipelineStatesIfNeeded() throws {
@@ -1356,6 +1378,48 @@ public class SplatRenderer: @unchecked Sendable {
         let depthStateDescriptor = MTLDepthStencilDescriptor()
         depthStateDescriptor.depthCompareFunction = MTLCompareFunction.always
         depthStateDescriptor.isDepthWriteEnabled = writeDepth
+        guard let depthState = device.makeDepthStencilState(descriptor: depthStateDescriptor) else {
+            throw SplatRendererError.failedToCreateDepthStencilState
+        }
+        return depthState
+    }
+
+    private func buildSelectionOutlinePipelineState() throws -> MTLRenderPipelineState {
+        guard !useMultiStagePipeline else {
+            throw SplatRendererError.internalPipelineMismatch(expected: "single-stage", actual: "multi-stage")
+        }
+
+        let pipelineDescriptor = MTLRenderPipelineDescriptor()
+        pipelineDescriptor.label = "SelectionOutlinePipeline"
+
+        let functionConstants = MTLFunctionConstantValues()
+        var use2DGSValue = use2DGSMode
+        functionConstants.setConstantValue(&use2DGSValue, type: .bool, index: 12)
+
+        pipelineDescriptor.vertexFunction = try library.makeFunction(name: "selectedOutlineVertexShader", constantValues: functionConstants)
+        pipelineDescriptor.fragmentFunction = try library.makeRequiredFunction(name: "selectedOutlineFragmentShader")
+        pipelineDescriptor.rasterSampleCount = sampleCount
+
+        let colorAttachment = pipelineDescriptor.colorAttachments[0]
+        colorAttachment?.pixelFormat = colorFormat
+        colorAttachment?.isBlendingEnabled = true
+        colorAttachment?.rgbBlendOperation = .add
+        colorAttachment?.alphaBlendOperation = .add
+        colorAttachment?.sourceRGBBlendFactor = .one
+        colorAttachment?.sourceAlphaBlendFactor = .one
+        colorAttachment?.destinationRGBBlendFactor = .oneMinusSourceAlpha
+        colorAttachment?.destinationAlphaBlendFactor = .oneMinusSourceAlpha
+
+        pipelineDescriptor.depthAttachmentPixelFormat = depthFormat
+        pipelineDescriptor.maxVertexAmplificationCount = maxViewCount
+
+        return try device.makeRenderPipelineState(descriptor: pipelineDescriptor)
+    }
+
+    private func buildSelectionOutlineDepthState() throws -> MTLDepthStencilState {
+        let depthStateDescriptor = MTLDepthStencilDescriptor()
+        depthStateDescriptor.depthCompareFunction = .lessEqual
+        depthStateDescriptor.isDepthWriteEnabled = false
         guard let depthState = device.makeDepthStencilState(descriptor: depthStateDescriptor) else {
             throw SplatRendererError.failedToCreateDepthStencilState
         }
@@ -1606,6 +1670,7 @@ public class SplatRenderer: @unchecked Sendable {
         splatBuffer.append(orderedPoints.map { Splat($0) })
         markGeometryDirty()  // New splats affect geometry and require re-sorting
         colorsDirty = true   // New splats also have new colors
+        try ensureEditingResources(pointCount: splatBuffer.count)
 
         // Initialize sorted indices with identity mapping (0, 1, 2, ...)
         // This ensures rendering works before first sort completes
@@ -1636,6 +1701,97 @@ public class SplatRenderer: @unchecked Sendable {
         // Validate single point
         try SplatDataValidator.validatePoint(point)
         try add([ point ])
+    }
+
+    internal func ensureEditingResources(pointCount: Int) throws {
+        let stateLength = max(pointCount, 1) * MemoryLayout<UInt32>.stride
+        if editStateBuffer == nil || editStateBuffer?.length != stateLength {
+            guard let buffer = device.makeBuffer(length: stateLength, options: .storageModeShared) else {
+                throw SplatRendererError.failedToCreateBuffer(length: stateLength)
+            }
+            buffer.label = "Editable Splat State Buffer"
+            memset(buffer.contents(), 0, stateLength)
+            editStateBuffer = buffer
+        }
+
+        if editTransformIndexBuffer == nil || editTransformIndexBuffer?.length != stateLength {
+            guard let buffer = device.makeBuffer(length: stateLength, options: .storageModeShared) else {
+                throw SplatRendererError.failedToCreateBuffer(length: stateLength)
+            }
+            buffer.label = "Editable Transform Index Buffer"
+            memset(buffer.contents(), 0, stateLength)
+            editTransformIndexBuffer = buffer
+        }
+
+        let paletteLength = max(2, 2) * MemoryLayout<matrix_float4x4>.stride
+        if editTransformPaletteBuffer == nil || editTransformPaletteBuffer?.length != paletteLength {
+            guard let buffer = device.makeBuffer(length: paletteLength, options: .storageModeShared) else {
+                throw SplatRendererError.failedToCreateBuffer(length: paletteLength)
+            }
+            buffer.label = "Editable Transform Palette Buffer"
+            let palette = buffer.contents().bindMemory(to: matrix_float4x4.self, capacity: 2)
+            palette[0] = matrix_identity_float4x4
+            palette[1] = matrix_identity_float4x4
+            editTransformPaletteBuffer = buffer
+        }
+    }
+
+    internal func updateEditingState(_ rawStates: [UInt32],
+                                     transformIndices: [UInt32],
+                                     transformPalette: [matrix_float4x4]) throws {
+        let pointCount = rawStates.count
+        try ensureEditingResources(pointCount: pointCount)
+
+        guard let editStateBuffer,
+              let editTransformIndexBuffer,
+              let editTransformPaletteBuffer else {
+            return
+        }
+
+        let bufferCount = max(pointCount, 1)
+        let statePointer = editStateBuffer.contents().bindMemory(to: UInt32.self, capacity: bufferCount)
+        statePointer.initialize(repeating: 0, count: bufferCount)
+        for (index, value) in rawStates.enumerated() {
+            statePointer[index] = value
+        }
+
+        let transformIndexPointer = editTransformIndexBuffer.contents().bindMemory(to: UInt32.self, capacity: bufferCount)
+        transformIndexPointer.initialize(repeating: 0, count: bufferCount)
+        for (index, value) in transformIndices.prefix(pointCount).enumerated() {
+            transformIndexPointer[index] = value
+        }
+
+        let palettePointer = editTransformPaletteBuffer.contents().bindMemory(to: matrix_float4x4.self, capacity: max(transformPalette.count, 2))
+        palettePointer[0] = matrix_identity_float4x4
+        for (index, transform) in transformPalette.enumerated() where index < 2 {
+            palettePointer[index] = transform
+        }
+
+        editingEnabled = rawStates.contains { $0 != 0 } || transformIndices.prefix(pointCount).contains { $0 != 0 }
+        if editingEnabled {
+            meshShaderEnabled = false
+            batchPrecomputeEnabled = false
+        }
+    }
+
+    internal func updateSplats(_ points: [SplatScenePoint], at indices: [Int]) throws {
+        guard !indices.isEmpty else { return }
+        splatBuffer.withLockedValues { values, count in
+            for index in indices where index >= 0 && index < count && index < points.count {
+                values[index] = Splat(points[index])
+            }
+        }
+        markGeometryDirty()
+    }
+
+    internal func replaceAllSplats(with points: [SplatScenePoint]) throws {
+        try ensureAdditionalCapacity(points.count)
+        splatBuffer.count = 0
+        splatBuffer.append(points.map { Splat($0) })
+        markGeometryDirty()
+        colorsDirty = true
+        try ensureEditingResources(pointCount: points.count)
+        try initializeIdentitySortedIndices()
     }
 
     // MARK: - Color-Only Updates
@@ -2042,7 +2198,9 @@ public class SplatRenderer: @unchecked Sendable {
                           debugFlags: debugFlags,
                           renderMode: renderMode,
                           covarianceBlur: covarianceBlur,
-                          lodThresholds: lodThresholds)
+                          lodThresholds: lodThresholds,
+                          selectionTintColor: selectionTintColor,
+                          editingEnabled: editingEnabled)
     }
 
     static func makeUniforms(for viewport: ViewportDescriptor,
@@ -2051,7 +2209,9 @@ public class SplatRenderer: @unchecked Sendable {
                              debugFlags: UInt32,
                              renderMode: SplatRenderMode,
                              covarianceBlur: Float,
-                             lodThresholds: SIMD3<Float>) -> Uniforms {
+                             lodThresholds: SIMD3<Float>,
+                             selectionTintColor: SIMD4<Float> = SIMD4<Float>(0.15, 0.55, 1.0, 0.45),
+                             editingEnabled: Bool = false) -> Uniforms {
         let proj00 = viewport.projectionMatrix[0][0]
         let proj11 = viewport.projectionMatrix[1][1]
         let focalX = Float(viewport.screenSize.x) * proj00 / 2
@@ -2074,7 +2234,12 @@ public class SplatRenderer: @unchecked Sendable {
             padding0: 0,
             padding1: 0,
             lodThresholds: lodThresholds,
-            covarianceBlur: covarianceBlur
+            covarianceBlur: covarianceBlur,
+            selectionTintColor: selectionTintColor,
+            editingEnabled: editingEnabled ? 1 : 0,
+            padding2: 0,
+            padding3: 0,
+            padding4: 0
         )
     }
 
@@ -2735,6 +2900,15 @@ public class SplatRenderer: @unchecked Sendable {
 
         renderEncoder.setVertexBuffer(dynamicUniformBuffers, offset: uniformBufferOffset, index: BufferIndex.uniforms.rawValue)
         renderEncoder.setVertexBuffer(splatBuffer.buffer, offset: 0, index: BufferIndex.splat.rawValue)
+        if let editStateBuffer {
+            renderEncoder.setVertexBuffer(editStateBuffer, offset: 0, index: BufferIndex.editState.rawValue)
+        }
+        if let editTransformIndexBuffer {
+            renderEncoder.setVertexBuffer(editTransformIndexBuffer, offset: 0, index: BufferIndex.transformIndex.rawValue)
+        }
+        if let editTransformPaletteBuffer {
+            renderEncoder.setVertexBuffer(editTransformPaletteBuffer, offset: 0, index: BufferIndex.transformPalette.rawValue)
+        }
 
         // Dithered + Frustum Culling: use culled indices directly (order-independent)
         // This avoids sorting entirely while still benefiting from frustum culling
@@ -2765,6 +2939,23 @@ public class SplatRenderer: @unchecked Sendable {
                                                 indexBuffer: indexBuffer.buffer,
                                                 indexBufferOffset: 0,
                                                 instanceCount: instanceCount)
+        }
+
+        if !multiStage,
+           selectionOutlineEnabled,
+           editingEnabled,
+           let selectionOutlinePipelineState,
+           let selectionOutlineDepthState {
+            renderEncoder.pushDebugGroup("Draw Selection Outline")
+            renderEncoder.setRenderPipelineState(selectionOutlinePipelineState)
+            renderEncoder.setDepthStencilState(selectionOutlineDepthState)
+            renderEncoder.drawIndexedPrimitives(type: .triangle,
+                                                indexCount: indexCount,
+                                                indexType: .uint32,
+                                                indexBuffer: indexBuffer.buffer,
+                                                indexBufferOffset: 0,
+                                                instanceCount: instanceCount)
+            renderEncoder.popDebugGroup()
         }
 
         if multiStage {

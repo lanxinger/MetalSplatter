@@ -18,6 +18,9 @@ enum BufferIndex: int32_t
     BufferIndexSplat          = 1,
     BufferIndexSortedIndices  = 2,  // GPU-side sorted indices for indirect rendering
     BufferIndexPrecomputed    = 3,  // Precomputed splat data (Metal 4 TensorOps)
+    BufferIndexEditState      = 4,
+    BufferIndexTransformIndex = 5,
+    BufferIndexTransformPalette = 6,
 };
 
 typedef struct
@@ -45,6 +48,11 @@ typedef struct
     uint padding1;
     float3 lodThresholds;
     float covarianceBlur;       // Low-pass filter for 2D covariance (derived from render mode by default)
+    float4 selectionTintColor;
+    uint editingEnabled;
+    uint padding2;
+    uint padding3;
+    uint padding4;
 } Uniforms;
 
 typedef struct

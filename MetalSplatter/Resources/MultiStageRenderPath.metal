@@ -34,7 +34,10 @@ vertex FragmentIn multiStageSplatVertexShader(uint vertexID [[vertex_id]],
                                               ushort amplificationID [[amplification_id]],
                                               constant Splat* splatArray [[ buffer(BufferIndexSplat) ]],
                                               constant UniformsArray & uniformsArray [[ buffer(BufferIndexUniforms) ]],
-                                              constant int32_t* sortedIndices [[ buffer(BufferIndexSortedIndices) ]]) {
+                                              constant int32_t* sortedIndices [[ buffer(BufferIndexSortedIndices) ]],
+                                              const device uint *editStates [[ buffer(BufferIndexEditState) ]],
+                                              const device uint *transformIndices [[ buffer(BufferIndexTransformIndex) ]],
+                                              const device float4x4 *transformPalette [[ buffer(BufferIndexTransformPalette) ]]) {
     Uniforms uniforms = uniformsArray.uniforms[min(int(amplificationID), kMaxViewCount - 1)];
 
     uint logicalSplatID = instanceID * uniforms.indexedSplatCount + (vertexID / 4);
@@ -64,7 +67,13 @@ vertex FragmentIn multiStageSplatVertexShader(uint vertexID [[vertex_id]],
     }
     Splat splat = splatArray[actualSplatID];
 
-    return splatVertex(splat, uniforms, vertexID % 4, actualSplatID);
+    return splatVertex(splat,
+                       uniforms,
+                       vertexID % 4,
+                       actualSplatID,
+                       editStates[actualSplatID],
+                       transformIndices,
+                       transformPalette);
 }
 
 fragment FragmentStore multiStageSplatFragmentShader(FragmentIn in [[stage_in]],
