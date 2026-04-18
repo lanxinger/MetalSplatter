@@ -8,7 +8,7 @@ A high-performance Swift/Metal library for rendering 3D Gaussian Splats on Apple
 
 ![A greek-style bust of a woman made of metal, wearing aviator-style goggles while gazing toward colorful abstract metallic blobs floating in space](http://metalsplatter.com/hero.640.jpg)
 
-MetalSplatter implements GPU-accelerated rendering of scenes captured via [3D Gaussian Splatting for Real-Time Radiance Field Rendering](https://repo-sam.inria.fr/fungraph/3d-gaussian-splatting/). Load PLY, SPLAT, SPZ, or SOGS files and visualize them with real-time performance across all Apple platforms, including stereo rendering on Vision Pro.
+MetalSplatter implements GPU-accelerated rendering of scenes captured via [3D Gaussian Splatting for Real-Time Radiance Field Rendering](https://repo-sam.inria.fr/fungraph/3d-gaussian-splatting/). Load and export PLY, SPLAT, SPZ, SPX, glTF/GLB, and SOGS files with real-time performance across all Apple platforms, including stereo rendering on Vision Pro.
 
 ## Features
 
@@ -165,7 +165,7 @@ swift run SplatConverter input.ply --describe --start 0 --count 10 -v
 
 **Options:**
 - `-o, --output-file`: Output file path
-- `-f, --output-format`: Format (`dotSplat`, `ply`, `ply-binary`, `ply-ascii`)
+- `-f, --output-format`: Format (`dotSplat`, `ply`, `ply-binary`, `ply-ascii`, `gltf`, `glb`, `sog`)
 - `-m, --morton-order`: Reorder splats by Morton code for spatial locality
 - `--describe`: Print splat details
 - `--start`: First splat index (default: 0)
@@ -183,7 +183,7 @@ swift run SplatConverter input.ply --describe --start 0 --count 10 -v
 | glTF | `.gltf` | ✓ | ✓ | `KHR_gaussian_splatting` JSON + BIN |
 | GLB | `.glb` | ✓ | ✓ | Binary `KHR_gaussian_splatting` container |
 | SOGS v1 | `.sogs` | ✓ | - | WebP-based with metadata |
-| SOGS v2 | `.sog` | ✓ | - | Bundled archive format |
+| SOGS v2 | `.sog` | ✓ | ✓ | Bundled archive format |
 | SOGS ZIP | `.zip` | ✓ | - | Legacy ZIP archive |
 
 Use `AutodetectSceneReader` for automatic format detection based on file extension and content.

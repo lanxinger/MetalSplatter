@@ -21,7 +21,7 @@ struct SplatConverter: ParsableCommand {
     @Option(name: .shortAndLong, help: "The output splat scene file")
     var outputFile: String?
 
-    @Option(name: [.customShort("f"), .long], help: "The format of the output file (dotSplat, ply, ply-ascii, gltf, glb)")
+    @Option(name: [.customShort("f"), .long], help: "The format of the output file (dotSplat, ply, ply-ascii, gltf, glb, sog)")
     var outputFormat: SplatOutputFileFormat?
 
     @Flag(name: [.long], help: "Describe each of the splats from first to first + count")
@@ -101,6 +101,10 @@ struct SplatConverter: ParsableCommand {
                     let gltfWriter = GltfGaussianSplatSceneWriter(container: .glb)
                     gltfWriter.setOutputURL(URL(fileURLWithPath: outputFile))
                     writer = gltfWriter
+                case .sog:
+                    let sogWriter = SOGSV2SceneWriter()
+                    sogWriter.setOutputURL(URL(fileURLWithPath: outputFile))
+                    writer = sogWriter
                 }
 
                 defer {
@@ -204,6 +208,7 @@ enum SplatOutputFileFormat: ExpressibleByArgument {
     case dotSplat
     case gltf
     case glb
+    case sog
 
     public init?(argument: String) {
         switch argument.lowercased() {
@@ -213,6 +218,7 @@ enum SplatOutputFileFormat: ExpressibleByArgument {
         case "plyascii", "ply-ascii", "asciiply", "ascii-ply": self = .asciiPLY
         case "gltf": self = .gltf
         case "glb": self = .glb
+        case "sog": self = .sog
         default: return nil
         }
     }
@@ -222,7 +228,7 @@ enum SplatOutputFileFormat: ExpressibleByArgument {
         case .dotSplat: self = .dotSplat
         case .ply: self = .binaryPLY
         case .spz: self = .dotSplat  // Default to dotSplat when converting from SPZ
-        case .sogs: self = .binaryPLY  // Default to binary PLY when converting from SOGS
+        case .sogs: self = .sog
         case .spx: self = .dotSplat  // Default to dotSplat when converting from SPX
         case .gltf: self = .gltf
         case .glb: self = .glb

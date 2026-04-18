@@ -81,7 +81,7 @@ MetalSplatter includes a full I/O stack with auto‑detection and conversion sup
 | glTF (`.gltf`) | Yes | Yes | `KHR_gaussian_splatting` JSON + BIN |
 | GLB (`.glb`) | Yes | Yes | Binary `KHR_gaussian_splatting` container |
 | SOGS v1 (`.sogs`) | Yes | No | WebP‑based folders |
-| SOGS v2 (`.sog`) | Yes | No | Bundled archive with codebook compression |
+| SOGS v2 (`.sog`) | Yes | Yes | Bundled archive with codebook compression |
 | SOGS ZIP (`.zip`) | Yes | No | Legacy ZIP bundle |
 
 Additional pipeline capabilities:

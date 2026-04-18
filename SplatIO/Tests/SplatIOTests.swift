@@ -349,6 +349,129 @@ final class SplatIOTests: XCTestCase {
         XCTAssertTrue(roundTripped[0] ~= points[0])
     }
 
+    func testSOGV2WriterRoundTripsLinearColor() throws {
+        let colorTolerance: Float = (2.0 / 255.0) + 1e-6
+        let points = [
+            SplatScenePoint(
+                position: SIMD3<Float>(-1.25, 0.5, 2.75),
+                color: .linearFloat(SIMD3<Float>(0.2, 0.4, 0.6)),
+                opacity: .linearFloat(0.85),
+                scale: .exponent(SIMD3<Float>(-2.0, -1.5, -1.0)),
+                rotation: simd_quatf(angle: .pi / 5, axis: SIMD3<Float>(0, 1, 0))
+            ),
+            SplatScenePoint(
+                position: SIMD3<Float>(0.75, -0.25, -1.5),
+                color: .linearFloat(SIMD3<Float>(0.8, 0.3, 0.15)),
+                opacity: .linearFloat(0.35),
+                scale: .exponent(SIMD3<Float>(-0.5, -0.25, -0.75)),
+                rotation: simd_quatf(angle: .pi / 7, axis: SIMD3<Float>(1, 0, 0))
+            )
+        ]
+
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+            .appendingPathExtension("sog")
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        let writer = SOGSV2SceneWriter()
+        try writer.writeScene(points, to: url)
+
+        let reader = try SplatSOGSSceneReaderV2(url)
+        let roundTripped = try reader.readScene()
+        XCTAssertEqual(roundTripped.count, points.count)
+
+        for (actual, expected) in zip(roundTripped, points) {
+            XCTAssertTrue((actual.position - expected.position).isWithin(tolerance: 2e-4), "position actual=\(actual.position) expected=\(expected.position)")
+            XCTAssertTrue(
+                (actual.color.asLinearFloat - expected.color.asLinearFloat).isWithin(tolerance: colorTolerance),
+                "color actual=\(actual.color.asLinearFloat) expected=\(expected.color.asLinearFloat) shActual=\(actual.color.asSphericalHarmonic[0]) shExpected=\(expected.color.asSphericalHarmonic[0])"
+            )
+            XCTAssertLessThanOrEqual(abs(actual.opacity.asLinearFloat - expected.opacity.asLinearFloat), 1.0 / 255.0)
+            XCTAssertTrue((actual.scale.asLinearFloat - expected.scale.asLinearFloat).isWithin(tolerance: 0.05))
+            XCTAssertTrue((actual.rotation.normalized.vector - expected.rotation.normalized.vector).isWithin(tolerance: 2.0 / 128.0))
+        }
+    }
+
+    func testSOGV2WriterRoundTripsSphericalHarmonicsWithPaletteReuse() throws {
+        let sh0Tolerance: Float = (2.0 / (255.0 * 0.28209479177387814)) + 1e-6
+        let shNTolerance: Float = (1.0 / 128.0) + 1e-6
+        let sharedCoefficients: [SIMD3<Float>] = [
+            SIMD3<Float>(0.1, 0.2, 0.3),
+            SIMD3<Float>(0.01, 0.02, 0.03),
+            SIMD3<Float>(0.04, 0.05, 0.06),
+            SIMD3<Float>(0.07, 0.08, 0.09)
+        ]
+        let points = [
+            SplatScenePoint(
+                position: SIMD3<Float>(0.2, 0.4, 0.6),
+                color: .sphericalHarmonic(sharedCoefficients),
+                opacity: .linearFloat(0.9),
+                scale: .exponent(SIMD3<Float>(-1.2, -1.1, -1.0)),
+                rotation: simd_quatf(angle: .pi / 8, axis: SIMD3<Float>(0, 0, 1))
+            ),
+            SplatScenePoint(
+                position: SIMD3<Float>(-0.4, 0.1, 1.1),
+                color: .sphericalHarmonic(sharedCoefficients),
+                opacity: .linearFloat(0.55),
+                scale: .exponent(SIMD3<Float>(-0.8, -0.7, -0.6)),
+                rotation: simd_quatf(angle: .pi / 9, axis: simd_normalize(SIMD3<Float>(1, 1, 0)))
+            )
+        ]
+
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+            .appendingPathExtension("sog")
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        let writer = SOGSV2SceneWriter()
+        try writer.writeScene(points, to: url)
+
+        let reader = try SplatSOGSSceneReaderV2(url)
+        let roundTripped = try reader.readScene()
+        XCTAssertEqual(roundTripped.count, points.count)
+
+        for (actual, expected) in zip(roundTripped, points) {
+            XCTAssertEqual(actual.color.asSphericalHarmonic.count, expected.color.asSphericalHarmonic.count)
+            for (index, coefficients) in zip(actual.color.asSphericalHarmonic, expected.color.asSphericalHarmonic).enumerated() {
+                let actualCoefficient = coefficients.0
+                let expectedCoefficient = coefficients.1
+                let delta = SIMD3<Float>(
+                    actualCoefficient.x - expectedCoefficient.x,
+                    actualCoefficient.y - expectedCoefficient.y,
+                    actualCoefficient.z - expectedCoefficient.z
+                )
+                let tolerance = index == 0 ? sh0Tolerance : shNTolerance
+                XCTAssertTrue(delta.isWithin(tolerance: tolerance), "coefficient actual=\(actualCoefficient) expected=\(expectedCoefficient) delta=\(delta)")
+            }
+        }
+    }
+
+    func testSOGV2WriterOverwritesExistingArchive() throws {
+        let points = [
+            SplatScenePoint(
+                position: SIMD3<Float>(0.1, 0.2, 0.3),
+                color: .linearFloat(SIMD3<Float>(0.25, 0.5, 0.75)),
+                opacity: .linearFloat(0.8),
+                scale: .exponent(SIMD3<Float>(-1, -1, -1)),
+                rotation: simd_quatf(angle: .pi / 6, axis: SIMD3<Float>(0, 0, 1))
+            )
+        ]
+
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+            .appendingPathExtension("sog")
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        try Data("stale".utf8).write(to: url)
+
+        let writer = SOGSV2SceneWriter()
+        try writer.writeScene(points, to: url)
+
+        let reader = try SplatSOGSSceneReaderV2(url)
+        let roundTripped = try reader.readScene()
+        XCTAssertEqual(roundTripped.count, 1)
+    }
+
     func testReadPLYWithPartialSphericalHarmonicsProperties() {
         let plyData = Data(
             """
