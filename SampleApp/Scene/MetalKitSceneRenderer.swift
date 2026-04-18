@@ -369,6 +369,20 @@ class MetalKitSceneRenderer: NSObject, MTKViewDelegate {
         return await splatEditor.snapshot()
     }
 
+    func duplicateSelectedEditableSplats() async throws -> SplatEditorSnapshot? {
+        guard let splatEditor else { return nil }
+        try await splatEditor.duplicateSelection()
+        requestRedraw()
+        return await splatEditor.snapshot()
+    }
+
+    func separateSelectedEditableSplats() async throws -> SplatEditorSnapshot? {
+        guard let splatEditor else { return nil }
+        try await splatEditor.separateSelection()
+        requestRedraw()
+        return await splatEditor.snapshot()
+    }
+
     func undoEditableChange() async throws -> SplatEditorSnapshot? {
         guard let splatEditor else { return nil }
         try await splatEditor.undo()

@@ -102,6 +102,32 @@ final class SplatEditorTests: XCTestCase {
         XCTAssertEqual(selected.sorted(), [0, 1, 2])
     }
 
+    func testEditableStoreDuplicateSelectionAppendsCopiesAndSelectsDuplicates() {
+        var store = EditableSplatStore(points: makePoints())
+        store.applySelection(indices: [1, 2], mode: .replace)
+
+        let duplicateIndices = store.duplicateSelection()
+
+        XCTAssertEqual(duplicateIndices, [4, 5])
+        XCTAssertEqual(store.points.count, 6)
+        XCTAssertEqual(store.selectedIndices, [4, 5])
+        XCTAssertEqual(store.points[4].position, store.points[1].position)
+        XCTAssertEqual(store.points[5].position, store.points[2].position)
+    }
+
+    func testEditableStoreSeparateSelectionKeepsOnlySelectedPoints() {
+        var store = EditableSplatStore(points: makePoints())
+        store.applySelection(indices: [1, 3], mode: .replace)
+
+        let didSeparate = store.separateSelection()
+
+        XCTAssertTrue(didSeparate)
+        XCTAssertEqual(store.points.count, 2)
+        XCTAssertEqual(store.selectedIndices, [0, 1])
+        XCTAssertEqual(store.points[0].position, SIMD3<Float>(0.0, 0.0, -2.0))
+        XCTAssertEqual(store.points[1].position, SIMD3<Float>(0.75, 0.75, -2.0))
+    }
+
     func testRectSelectionHideDeleteUndoRedoAndExportRoundTrip() async throws {
         let renderer = try makeRenderer()
         let editor = try await SplatEditor(points: makePoints(), renderer: renderer)

@@ -266,6 +266,43 @@ struct EditableSplatStore: Sendable {
         return selected
     }
 
+    mutating func duplicateSelection() -> [Int] {
+        let sourceIndices = selectedIndices
+        guard !sourceIndices.isEmpty else { return [] }
+
+        let insertionStart = points.count
+        let duplicates = sourceIndices.map { points[$0] }
+        points.append(contentsOf: duplicates)
+
+        for index in sourceIndices {
+            states[index].remove(.selected)
+        }
+
+        let duplicateStates = sourceIndices.map { index in
+            var state = states[index]
+            state.remove([.hidden, .deleted, .locked, .selected])
+            state.insert(.selected)
+            return state
+        }
+        states.append(contentsOf: duplicateStates)
+
+        return Array(insertionStart..<(insertionStart + duplicateStates.count))
+    }
+
+    mutating func separateSelection() -> Bool {
+        let sourceIndices = selectedIndices
+        guard !sourceIndices.isEmpty else { return false }
+
+        points = sourceIndices.map { points[$0] }
+        states = sourceIndices.map { index in
+            var state = states[index]
+            state.remove([.hidden, .deleted, .locked])
+            state.insert(.selected)
+            return state
+        }
+        return true
+    }
+
     func colorMatchIndices(referenceIndex: Int, threshold: Float) -> [Int] {
         guard points.indices.contains(referenceIndex), isSelectable(referenceIndex) else { return [] }
 
@@ -505,6 +542,25 @@ public actor SplatEditor {
         let before = store.snapshot
         store.deleteSelection()
         await history.pushUndo(before)
+        try syncRendererState()
+    }
+
+    public func duplicateSelection() async throws {
+        let before = store.snapshot
+        let changedIndices = store.duplicateSelection()
+        guard !changedIndices.isEmpty else { return }
+
+        await history.pushUndo(before)
+        try renderer.replaceAllSplats(with: store.points)
+        try syncRendererState()
+    }
+
+    public func separateSelection() async throws {
+        let before = store.snapshot
+        guard store.separateSelection() else { return }
+
+        await history.pushUndo(before)
+        try renderer.replaceAllSplats(with: store.points)
         try syncRendererState()
     }
 

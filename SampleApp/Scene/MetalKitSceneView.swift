@@ -679,6 +679,18 @@ final class SceneEditingController: ObservableObject {
         }
     }
 
+    func duplicateSelection() {
+        runEditorAction { renderer in
+            try await renderer.duplicateSelectedEditableSplats()
+        }
+    }
+
+    func separateSelection() {
+        runEditorAction { renderer in
+            try await renderer.separateSelectedEditableSplats()
+        }
+    }
+
     func undo() {
         runEditorAction { renderer in
             try await renderer.undoEditableChange()
@@ -952,6 +964,8 @@ private struct SplatEditingToolbar: View {
 
                     actionButton("Hide", systemImage: "eye.slash", disabled: !controller.hasSelection, action: controller.hideSelection)
                     actionButton("Show", systemImage: "eye", disabled: !controller.isEditorAvailable, action: controller.unhideAll)
+                    actionButton("Duplicate", systemImage: "plus.square.on.square", disabled: !controller.hasSelection, action: controller.duplicateSelection)
+                    actionButton("Separate", systemImage: "square.split.2x1", disabled: !controller.hasSelection, action: controller.separateSelection)
                     actionButton("Delete", systemImage: "trash", disabled: !controller.hasSelection, action: controller.deleteSelection)
                     actionButton("Undo", systemImage: "arrow.uturn.backward", disabled: !controller.isEditorAvailable, action: controller.undo)
                     actionButton("Redo", systemImage: "arrow.uturn.forward", disabled: !controller.isEditorAvailable, action: controller.redo)
