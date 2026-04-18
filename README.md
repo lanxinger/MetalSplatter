@@ -43,7 +43,7 @@ Add MetalSplatter to your `Package.swift`:
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/scier/MetalSplatter.git", from: "1.0.0")
+    .package(url: "https://github.com/lanxinger/MetalSplatter.git", from: "1.0.0")
 ]
 ```
 
@@ -62,7 +62,7 @@ Then add the modules you need to your target:
 ### Xcode Project
 
 1. File → Add Package Dependencies
-2. Enter the repository URL: `https://github.com/scier/MetalSplatter.git`
+2. Enter the repository URL: `https://github.com/lanxinger/MetalSplatter.git`
 3. Select the modules you need
 
 ## Quick Start
@@ -390,7 +390,7 @@ The iOS Simulator on Intel Macs (x86_64) is not supported due to Metal limitatio
 
 ```bash
 # Clone the repository
-git clone https://github.com/scier/MetalSplatter.git
+git clone https://github.com/lanxinger/MetalSplatter.git
 cd MetalSplatter
 
 # Build all targets (release mode recommended)
@@ -410,7 +410,7 @@ Apps and projects using MetalSplatter:
 - **[MetalSplatter Viewer](https://apps.apple.com/us/app/metalsplatter/id6476895334)** - Official Vision Pro app with camera controls and splat gallery
 - **[OverSoul](https://apps.apple.com/app/id6475262918)** - Spatial photos, 3D models, and immersive spaces for Vision Pro
 
-Using MetalSplatter in your project? [Let us know!](https://github.com/scier/MetalSplatter/issues)
+Using MetalSplatter in your project? [Let us know!](https://github.com/lanxinger/MetalSplatter/issues)
 
 ## Resources
 
