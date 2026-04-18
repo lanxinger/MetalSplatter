@@ -143,6 +143,23 @@ final class SplatEditorTests: XCTestCase {
         XCTAssertEqual(store.selectedIndices, [])
     }
 
+    func testEditableStoreLockAndUnlockAffectSelectionEligibility() {
+        var store = EditableSplatStore(points: makePoints())
+        store.applySelection(indices: [1, 2], mode: .replace)
+
+        store.lockSelection()
+        XCTAssertEqual(store.selectedIndices, [])
+        XCTAssertTrue(store.states[1].contains(.locked))
+        XCTAssertTrue(store.states[2].contains(.locked))
+
+        store.applySelection(indices: [0, 1, 2, 3], mode: .replace)
+        XCTAssertEqual(store.selectedIndices, [0, 3])
+
+        store.unlockAll()
+        store.applySelection(indices: [0, 1, 2, 3], mode: .replace)
+        XCTAssertEqual(store.selectedIndices, [0, 1, 2, 3])
+    }
+
     func testRectSelectionHideDeleteUndoRedoAndExportRoundTrip() async throws {
         let renderer = try makeRenderer()
         let editor = try await SplatEditor(points: makePoints(), renderer: renderer)

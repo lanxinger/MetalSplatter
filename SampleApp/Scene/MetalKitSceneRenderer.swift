@@ -355,6 +355,13 @@ class MetalKitSceneRenderer: NSObject, MTKViewDelegate {
         return await splatEditor.snapshot()
     }
 
+    func lockSelectedEditableSplats() async throws -> SplatEditorSnapshot? {
+        guard let splatEditor else { return nil }
+        try await splatEditor.lockSelection()
+        requestRedraw()
+        return await splatEditor.snapshot()
+    }
+
     func selectAllEditableSplats() async throws -> SplatEditorSnapshot? {
         guard let splatEditor else { return nil }
         try await splatEditor.selectAll()
@@ -379,6 +386,13 @@ class MetalKitSceneRenderer: NSObject, MTKViewDelegate {
     func unhideAllEditableSplats() async throws -> SplatEditorSnapshot? {
         guard let splatEditor else { return nil }
         try await splatEditor.unhideAll()
+        requestRedraw()
+        return await splatEditor.snapshot()
+    }
+
+    func unlockAllEditableSplats() async throws -> SplatEditorSnapshot? {
+        guard let splatEditor else { return nil }
+        try await splatEditor.unlockAll()
         requestRedraw()
         return await splatEditor.snapshot()
     }

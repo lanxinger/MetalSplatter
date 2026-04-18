@@ -271,6 +271,10 @@ static FragmentIn splatVertexInternal(Splat splat,
     out.relativePosition = half(axisScale) * kBoundsRadius * relativeCoordinates;
     out.color = unpackSplatColor(splat.packedColor);
     out.color.a = min(out.color.a * half(opacityScale), half(1.0));
+    if ((editState & (1u << 2)) != 0u) {
+        constexpr half4 lockedTint = half4(1.0h, 0.72h, 0.22h, 0.65h);
+        out.color.rgb = mix(out.color.rgb, lockedTint.rgb, lockedTint.a);
+    }
     if (useSelectionColorOverride && isSelected) {
         out.color = half4(half3(uniforms.selectionTintColor.xyz), half(uniforms.selectionTintColor.w));
     } else if (applySelectionTint && uniforms.editingEnabled != 0u && isSelected) {

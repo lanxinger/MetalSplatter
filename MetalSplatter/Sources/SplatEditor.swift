@@ -240,6 +240,13 @@ struct EditableSplatStore: Sendable {
         }
     }
 
+    mutating func lockSelection() {
+        for index in selectedIndices {
+            states[index].insert(.locked)
+            states[index].remove(.selected)
+        }
+    }
+
     mutating func selectAllVisible() {
         for index in states.indices where isSelectable(index) {
             states[index].insert(.selected)
@@ -265,6 +272,12 @@ struct EditableSplatStore: Sendable {
     mutating func unhideAll() {
         for index in states.indices {
             states[index].remove(.hidden)
+        }
+    }
+
+    mutating func unlockAll() {
+        for index in states.indices {
+            states[index].remove(.locked)
         }
     }
 
@@ -553,6 +566,13 @@ public actor SplatEditor {
         try syncRendererState()
     }
 
+    public func lockSelection() async throws {
+        let before = store.snapshot
+        store.lockSelection()
+        await history.pushUndo(before)
+        try syncRendererState()
+    }
+
     public func selectAll() async throws {
         let before = store.snapshot
         store.selectAllVisible()
@@ -577,6 +597,13 @@ public actor SplatEditor {
     public func unhideAll() async throws {
         let before = store.snapshot
         store.unhideAll()
+        await history.pushUndo(before)
+        try syncRendererState()
+    }
+
+    public func unlockAll() async throws {
+        let before = store.snapshot
+        store.unlockAll()
         await history.pushUndo(before)
         try syncRendererState()
     }

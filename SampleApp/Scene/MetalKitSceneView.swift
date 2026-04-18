@@ -667,6 +667,12 @@ final class SceneEditingController: ObservableObject {
         }
     }
 
+    func lockSelection() {
+        runEditorAction { renderer in
+            try await renderer.lockSelectedEditableSplats()
+        }
+    }
+
     func selectAll() {
         runEditorAction { renderer in
             try await renderer.selectAllEditableSplats()
@@ -688,6 +694,12 @@ final class SceneEditingController: ObservableObject {
     func unhideAll() {
         runEditorAction { renderer in
             try await renderer.unhideAllEditableSplats()
+        }
+    }
+
+    func unlockAll() {
+        runEditorAction { renderer in
+            try await renderer.unlockAllEditableSplats()
         }
     }
 
@@ -985,6 +997,8 @@ private struct SplatEditingToolbar: View {
                     actionButton("Invert", systemImage: "arrow.left.arrow.right.square", disabled: !controller.isEditorAvailable, action: controller.invertSelection)
                     actionButton("Hide", systemImage: "eye.slash", disabled: !controller.hasSelection, action: controller.hideSelection)
                     actionButton("Show", systemImage: "eye", disabled: !controller.isEditorAvailable, action: controller.unhideAll)
+                    actionButton("Lock", systemImage: "lock", disabled: !controller.hasSelection, action: controller.lockSelection)
+                    actionButton("Unlock", systemImage: "lock.open", disabled: !controller.isEditorAvailable, action: controller.unlockAll)
                     actionButton("Duplicate", systemImage: "plus.square.on.square", disabled: !controller.hasSelection, action: controller.duplicateSelection)
                     actionButton("Separate", systemImage: "square.split.2x1", disabled: !controller.hasSelection, action: controller.separateSelection)
                     actionButton("Delete", systemImage: "trash", disabled: !controller.hasSelection, action: controller.deleteSelection)
