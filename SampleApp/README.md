@@ -1,289 +1,97 @@
-# SampleApp: iOS Gaussian Splat Renderer
+# SampleApp: iOS/iPadOS Gaussian Splat Editor Demo
 
-A sophisticated iOS sample application demonstrating high-performance Gaussian splat rendering using Apple's Metal graphics API. Supports multiple file formats (PLY, SPLAT, SPZ, SOGS) with advanced camera controls and cross-platform compatibility.
+`SampleApp` is the reference iPhone and iPad app for loading, rendering, editing, and exporting gaussian splat scenes with `MetalSplatter`.
 
-## Architecture Overview
+The app still contains some shared rendering infrastructure for other Apple platforms, but the current interactive editing workflow is intentionally `iOS/iPadOS` first.
 
-### Core Design Patterns
-- **Protocol-Oriented Rendering**: `ModelRenderer` protocol enables multiple renderer implementations
-- **Multi-Platform Support**: iOS, macOS, and visionOS with platform-specific optimizations
-- **MVC + Coordinator Pattern**: Clean separation between UI, rendering, and state management
+## What It Demonstrates
 
-### Key Components
+- `SplatRenderer` integrated into a touch-driven `MTKView`
+- `SplatEditor` layered on top of the renderer for editing state and undo/redo
+- GPU-assisted selection for 2D and 3D selection queries
+- Direct-touch transform editing for move, rotate, and scale
+- Round-trip export of edited splat scenes through `SplatIO`
 
-```
-SampleApp/
-├── App/                    # Application entry point and constants
-├── Model/                  # Rendering protocols and implementations
-├── Scene/                  # UI views and Metal scene renderers
-└── Util/                   # Mathematical utilities and helpers
-```
+## Editing Tooling
 
-## Gaussian Splat Rendering Pipeline
+The iOS/iPadOS demo exposes these tools in the editing toolbar:
 
-### 1. Core Rendering Interface
+- Selection: point, rect, brush, lasso, flood, eyedropper/color-match, sphere, box, polygon, and measure
+- Editing: move, rotate, scale, hide, unhide all, lock, unlock all, delete, duplicate, separate, undo, redo, and export
+- Selection utilities: replace/add/subtract combine modes plus all/none/invert helpers
 
-```swift
-public protocol ModelRenderer {
-    func render(viewports: [ModelRendererViewportDescriptor],
-               colorTexture: MTLTexture,
-               colorStoreAction: MTLStoreAction,
-               depthTexture: MTLTexture?,
-               rasterizationRateMap: MTLRasterizationRateMap?,
-               renderTargetArrayLength: Int,
-               to commandBuffer: MTLCommandBuffer) throws
-}
-```
+Renderer feedback in the demo includes:
 
-### 2. SplatRenderer Implementation
-- Extends MetalSplatter's `SplatRenderer` to conform to `ModelRenderer`
-- Handles viewport descriptor adaptation for splat-specific rendering
-- Manages multiple file format loading and processing
+- selection tint
+- outline pass for selected splats
+- locked-splat tinting
 
-### 3. Platform-Specific Renderers
+## Architecture
 
-#### MetalKitSceneRenderer (iOS/macOS)
-- **Metal Infrastructure**: Device, command queue, and render pipeline management
-- **Camera System**: Advanced orbital camera with smooth animations
-- **Gesture Controls**: Multi-touch support for rotation, zoom, pan, and roll
-- **Performance**: Render throttling with semaphore-based concurrency control
+### Main pieces
 
-#### VisionSceneRenderer (visionOS)
-- **ARKit Integration**: World tracking and device anchor positioning
-- **Spatial Computing**: Immersive space rendering with stereo viewports
-- **CompositorServices**: Native visionOS rendering framework integration
+- `Scene/MetalKitSceneRenderer.swift`
+  Owns Metal setup, file loading, camera state, and the active `SplatRenderer` / `SplatEditor`.
+- `Scene/MetalKitSceneView.swift`
+  Hosts the SwiftUI UI, editing toolbar, parameter panels, and the overlay used for rect/brush/lasso/polygon/measure interaction.
+- `MetalSplatter/Sources/SplatEditor.swift`
+  Provides the editor actor used by the app for selection, transforms, visibility changes, history, and export.
 
-## File Format Support
+### Editing flow
 
-| Format | Description | Features |
-|--------|-------------|----------|
-| **PLY** | Standard 3D Gaussian splat format | ASCII/Binary point cloud data |
-| **SPLAT** | Optimized binary format | Compressed, fast loading |
-| **SPZ** | Compressed splat format | Space-efficient storage |
-| **SOGS v1** | Compressed format with WebP textures | Folder-based, metadata JSON |
-| **SOGS v2** | Enhanced compressed format | Bundled .sog files, codebook compression |
+1. Load a supported splat file into `SplatRenderer`.
+2. Create one `SplatEditor` for the active scene.
+3. Route touch gestures or overlay shapes into editor selection queries.
+4. Use preview transforms for move/rotate/scale, then commit or cancel.
+5. Export the visible edited points through `SplatIO`.
 
-### SOGS v1 Format Structure
-```
-model_folder/
-├── meta.json           # Configuration and metadata  
-├── means_l.webp       # Position data (low bytes)
-├── means_u.webp       # Position data (high bytes)
-├── scales.webp        # Scale data
-├── quats.webp         # Orientation data
-├── sh0.webp           # Color/opacity data
-├── shN_centroids.webp # Optional: SH centroids
-└── shN_labels.webp    # Optional: SH labels
-```
+## File Format Support In The Demo
 
-### SOGS v2 Format Structure
-```
-model.sog              # Single bundled ZIP file containing:
-├── meta.json          # v2 metadata with codebooks
-├── means_l.webp       # Position data (low bytes)
-├── means_u.webp       # Position data (high bytes)
-├── scales.webp        # Scale indices (codebook-based)
-├── quats.webp         # Orientation data
-├── sh0.webp           # Color indices (codebook-based)
-├── shN_centroids.webp # Optional: SH centroids
-└── shN_labels.webp    # Optional: SH palette indices
-```
+The sample app can load the same formats supported by `AutodetectSceneReader`:
 
-### SOGS v2 Improvements
-- **Codebook Compression**: 256-entry k-means codebooks for scales and colors
-- **Single File Distribution**: Bundled .sog ZIP archives for easy sharing
-- **Morton Code Ordering**: Optimized spatial ordering eliminates runtime sorting
-- **Enhanced Metadata**: Version tracking, splat count, antialiasing flags
+| Format | Extensions | Notes |
+|--------|------------|-------|
+| PLY | `.ply` | ASCII and binary |
+| SPLAT | `.splat` | Compact binary format |
+| SPZ | `.spz`, `.spz.gz` | Compressed splat container |
+| SPX | `.spx` | Alternative binary format |
+| glTF | `.gltf` | `KHR_gaussian_splatting` |
+| GLB | `.glb` | Binary `KHR_gaussian_splatting` |
+| SOGS v1 | `.sogs`, `meta.json` | Read-only in the library |
+| SOGS v2 | `.sog` | Read/write in the library |
+| SOGS ZIP | `.zip` | Legacy read-only archive |
 
-## Interactive Camera Controls
+The export action in the editing UI writes the currently visible edited scene using the library’s scene writers.
 
-### Gesture Recognition System
-- **Single-finger drag**: Orbital rotation around model center
-- **Two-finger drag**: Panning/translation in screen space
-- **Pinch gesture**: Zoom with constraints (0.2x to 5.0x range)
-- **Two-finger rotation**: Roll rotation around Z-axis
-- **Double-tap**: Animated reset to default viewing position
+## Touch Interaction Model
 
-### Advanced Camera Features
-- **Auto-rotation**: Configurable automatic model rotation when idle
-- **Smooth Animations**: Eased transitions for view reset operations
-- **State Persistence**: Camera position maintained across interactions
-- **Interpolated Reset**: Smooth animated return to default state
+### Camera
 
-## Performance Optimizations
+- One-finger drag: orbit camera when no transform tool is active
+- Two-finger drag: pan camera
+- Pinch: zoom camera, or scale selection when the scale tool is active
+- Rotation gesture: roll camera, or rotate selection when the rotate tool is active
+- Double-tap: reset camera
 
-### Concurrency Management
-```swift
-// Render throttling prevents GPU overload
-private let renderSemaphore = DispatchSemaphore(value: 3)
+### Editing
 
-// Background loading prevents UI blocking
-Task.detached {
-    let splat = try SplatRenderer(device: device, ...)
-    try await splat.read(from: url)
-    await MainActor.run {
-        self.modelRenderer = splat
-    }
-}
-```
+- Tap: point-select, flood-select, eyedropper/color-match, or measure depending on the active tool
+- Drag in overlay: rect, brush, or lasso selection
+- Polygon: tap vertices, then close the shape from the first point or toolbar
+- Move tool: drag selected splats in the camera plane
+- Sphere/box: use toolbar parameters centered on the current selection bounds, or visible bounds if nothing is selected
 
-### Memory Management
-- **Security Scoped Resources**: Proper file access in sandboxed environments
-- **MTLTexture Reuse**: Efficient texture management for render targets
-- **Automatic Cleanup**: Resource cleanup after access timeouts
+## Running The Demo
 
-### Platform-Specific Optimizations
-- **iOS**: Volume button integration, gesture recognizer chaining
-- **visionOS**: Foveated rendering support, layered rendering modes
-- **macOS**: Window-based rendering with display scaling
+1. Open `SampleApp/MetalSplatter_SampleApp.xcodeproj`.
+2. Select an iPhone or iPad destination.
+3. Use `Release` configuration for meaningful rendering performance.
+4. Build and run.
+5. Load a supported splat asset from Files.
+6. Open the editing toolbar and start selecting or transforming splats.
 
-## Mathematical Foundations
+## Notes
 
-### Matrix Transformations
-```swift
-// Perspective projection matrix
-func perspectiveMatrix(fov: Float, aspect: Float, near: Float, far: Float) -> float4x4
-
-// View transformation matrix combining rotation, translation, and zoom
-let transformMatrix = translationMatrix * rotationMatrix * zoomMatrix
-```
-
-### Camera State Management
-```swift
-struct CameraState {
-    var rotation: Angle = .zero
-    var verticalRotation: Float = 0.0
-    var rollRotation: Float = 0.0
-    var zoom: Float = 1.0
-    var translation: SIMD2<Float> = .zero
-}
-```
-
-## Integration with MetalSplatter
-
-### Dependencies
-- **MetalSplatter**: Core Gaussian splat rendering engine
-- **SplatIO/PLYIO**: File format I/O libraries
-- **Metal/MetalKit**: Apple's graphics framework
-
-### Renderer Adaptation
-```swift
-extension SplatRenderer: ModelRenderer {
-    public func render(viewports: [ModelRendererViewportDescriptor], ...) throws {
-        // Convert viewport descriptors to SplatRenderer format
-        let splatViewports = viewports.map { viewport in
-            SplatRenderer.ViewportDescriptor(
-                viewport: viewport.viewport,
-                projectionMatrix: viewport.projectionMatrix,
-                worldToCameraTransform: viewport.viewMatrix.inverse,
-                screenSize: viewport.screenSize
-            )
-        }
-        
-        // Delegate to underlying SplatRenderer
-        try render(viewports: splatViewports, ...)
-    }
-}
-```
-
-## Usage Examples
-
-### Basic Setup
-```swift
-// Initialize Metal infrastructure
-let device = MTLCreateSystemDefaultDevice()!
-let commandQueue = device.makeCommandQueue()!
-
-// Create and configure MetalKit view
-let metalKitView = MTKView()
-metalKitView.device = device
-metalKitView.colorPixelFormat = .bgra8Unorm_srgb
-metalKitView.depthStencilPixelFormat = .depth32Float
-
-// Create scene renderer
-let sceneRenderer = MetalKitSceneRenderer(device: device, view: metalKitView)
-metalKitView.delegate = sceneRenderer
-```
-
-### Loading Gaussian Splat Models
-```swift
-// Async model loading
-Task {
-    do {
-        let splat = try SplatRenderer(device: device, ...)
-        try await splat.read(from: modelURL)
-        
-        await MainActor.run {
-            sceneRenderer.modelRenderer = splat
-        }
-    } catch {
-        print("Failed to load model: \(error)")
-    }
-}
-```
-
-### Gesture Integration
-```swift
-// Pan gesture for orbital rotation
-let panGesture = UIPanGestureRecognizer { gesture in
-    let translation = gesture.translation(in: view)
-    sceneRenderer.updateRotation(deltaX: Float(translation.x),
-                                deltaY: Float(translation.y))
-}
-
-// Pinch gesture for zoom
-let pinchGesture = UIPinchGestureRecognizer { gesture in
-    sceneRenderer.updateZoom(scale: Float(gesture.scale))
-}
-```
-
-## Build Requirements
-
-### Xcode Configuration
-- **iOS Deployment Target**: iOS 17.0+
-- **visionOS Support**: visionOS 1.0+
-- **Metal Feature Set**: iOS GPU Family 4 or higher
-- **SwiftUI**: Required for UI components
-
-### Package Dependencies
-```swift
-dependencies: [
-    .package(path: "../"), // MetalSplatter package
-]
-```
-
-## Performance Considerations
-
-### GPU Memory Management
-- Models are loaded into GPU memory once and reused
-- Texture atlases optimize memory usage for complex splats
-- Automatic LOD (Level of Detail) based on viewing distance
-
-### Rendering Optimization
-- **Frustum Culling**: Only render visible splats
-- **Depth Testing**: Proper Z-buffer usage for correct occlusion
-- **Batched Rendering**: Multiple splats rendered in single draw calls
-
-### Battery Efficiency
-- **Adaptive Frame Rate**: Reduces rendering frequency when static
-- **Thermal Management**: Automatic quality reduction under thermal pressure
-- **Background Handling**: Pauses rendering when app backgrounded
-
-## Future Enhancements
-
-### Potential Features
-- **Real-time Lighting**: Dynamic lighting effects on Gaussian splats
-- **Animation Support**: Temporal Gaussian splats for video content
-- **AR Integration**: Placement of splats in real-world environments
-- **Editing Tools**: Runtime modification of splat properties
-- **Networking**: Remote model loading and streaming
-
-### Architecture Extensions
-- **Plugin System**: Support for custom renderer implementations
-- **Scripting Interface**: Runtime behavior modification
-- **Analytics Integration**: Performance monitoring and optimization
-- **Export Capabilities**: Convert between different splat formats
-
----
-
-This sample application demonstrates production-ready Gaussian splat rendering with sophisticated camera controls, multi-platform support, and optimized Metal performance. The architecture is extensible and can be easily integrated into larger applications requiring 3D Gaussian splat visualization capabilities.
+- The demo is optimized for local editing workflows, not scene-authoring parity with every desktop splat editor.
+- `Separate` currently operates within the active editing session rather than turning one file into multiple in-scene objects.
+- Some renderer-backed tests are skipped in plain SwiftPM environments because Metal shader libraries are not always available there; the Xcode app path remains the best place to validate the full editing UX.

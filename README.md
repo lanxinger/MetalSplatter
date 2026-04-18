@@ -4,21 +4,23 @@
 [![Platforms](https://img.shields.io/badge/Platforms-iOS%2017%2B%20%7C%20macOS%2014%2B%20%7C%20visionOS%201%2B-blue.svg)](https://developer.apple.com)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
-A high-performance Swift/Metal library for rendering 3D Gaussian Splats on Apple platforms (iOS, macOS, and visionOS).
+A high-performance Swift/Metal library for loading, rendering, editing, and exporting 3D Gaussian Splats on Apple platforms.
 
 ![A greek-style bust of a woman made of metal, wearing aviator-style goggles while gazing toward colorful abstract metallic blobs floating in space](http://metalsplatter.com/hero.640.jpg)
 
-MetalSplatter implements GPU-accelerated rendering of scenes captured via [3D Gaussian Splatting for Real-Time Radiance Field Rendering](https://repo-sam.inria.fr/fungraph/3d-gaussian-splatting/). Load and export PLY, SPLAT, SPZ, SPX, glTF/GLB, and SOGS files with real-time performance across all Apple platforms, including stereo rendering on Vision Pro.
+MetalSplatter implements GPU-accelerated rendering of scenes captured via [3D Gaussian Splatting for Real-Time Radiance Field Rendering](https://repo-sam.inria.fr/fungraph/3d-gaussian-splatting/). It supports PLY, SPLAT, SPZ, SPX, glTF/GLB, and SOGS I/O, plus an editable splat workflow built around `SplatEditor` for selection, transforms, visibility changes, undo/redo, and export.
 
 ## Features
 
-- **Multi-Platform Support**: iOS/iPadOS, macOS, and visionOS with platform-optimized rendering paths
-- **Multiple File Formats**: PLY (ASCII/binary), SPLAT, SPZ/SPX, glTF/GLB, SOGS (WebP-based)
+- **Multi-Platform Rendering**: iOS/iPadOS, macOS, and visionOS with platform-optimized rendering paths
+- **Editable Splat Workflows**: `SplatEditor` with GPU-backed selection, preview transforms, hide/show, lock/unlock, delete, duplicate, separate, undo/redo, and export
+- **Multiple File Formats**: PLY (ASCII/binary), SPLAT, SPZ/SPX, glTF/GLB, and SOGS v1/v2
 - **Advanced Rendering Pipeline**: Single-stage and multi-stage pipelines with tile memory for high-quality depth blending
 - **GPU-Accelerated Sorting**: O(n) counting sort with camera-relative binning for optimal visual quality
 - **Spherical Harmonics**: Full SH support (degrees 0-3) for view-dependent lighting effects
 - **Level of Detail**: Distance-based LOD with configurable thresholds and skip factors
 - **Metal 4 Support**: Bindless rendering, tensor operations, and SIMD-group optimizations on supported hardware
+- **Selection Feedback**: Selected splats can be tinted and outlined; locked splats use a separate tint path
 - **AR Integration**: ARKit support on iOS for augmented reality experiences
 - **Vision Pro Stereo**: Vertex amplification for efficient stereo rendering via CompositorServices
 
@@ -28,9 +30,9 @@ MetalSplatter implements GPU-accelerated rendering of scenes captured via [3D Ga
 |--------|-------------|
 | **MetalSplatter** | Core Metal rendering engine for gaussian splats |
 | **PLYIO** | Standalone PLY file reader/writer (ASCII and binary) |
-| **SplatIO** | Interprets PLY/SPLAT/SPZ/SOGS files as gaussian splat point clouds |
+| **SplatIO** | Reads and writes gaussian splat scene formats |
 | **SplatConverter** | Command-line tool for format conversion and inspection |
-| **SampleApp** | Cross-platform demo application |
+| **SampleApp** | Demo application with iOS/iPadOS editing tools |
 | **SampleBoxRenderer** | Debug renderer for integration testing |
 
 ## Installation
@@ -83,7 +85,7 @@ let renderer = try SplatRenderer(
 
 // Load splats from file (auto-detects format)
 let reader = try AutodetectSceneReader(url)
-let points = try reader.read()
+let points = try reader.readScene()
 try renderer.add(points)
 
 // In your render loop
@@ -118,25 +120,81 @@ let sogsReader = try SplatSOGSSceneReaderV2(url)
 ### Writing Splat Files
 
 ```swift
-// Write to PLY format
-let writer = SplatPLYSceneWriter(format: .binary)
-try writer.write(points, to: outputURL)
+// Write to binary PLY
+let plyWriter = try SplatPLYSceneWriter(toFileAtPath: outputURL.path, append: false)
+try plyWriter.start(binary: true, pointCount: points.count)
+try plyWriter.write(points)
+try plyWriter.close()
 
 // Write to SPZ format
 let spzWriter = SPZSceneWriter()
-try spzWriter.write(points, to: outputURL)
+try spzWriter.writeScene(points, to: outputURL)
+
+// Write to glTF
+let gltfWriter = GltfGaussianSplatSceneWriter(container: .gltf)
+try gltfWriter.writeScene(points, to: outputURL)
+
+// Write to SOGS v2 (.sog)
+let sogWriter = SOGSV2SceneWriter()
+try sogWriter.writeScene(points, to: outputURL)
 ```
+
+### Editing Splats
+
+```swift
+import MetalSplatter
+import SplatIO
+
+let renderer = try SplatRenderer(
+    device: device,
+    colorFormat: .bgra8Unorm,
+    depthFormat: .depth32Float,
+    sampleCount: 1,
+    maxViewCount: 1,
+    maxSimultaneousRenders: 3
+)
+
+let points = try AutodetectSceneReader(url).readScene()
+let editor = try await SplatEditor(points: points, renderer: renderer)
+
+try await editor.select(
+    .rect(normalizedMin: SIMD2<Float>(0.4, 0.4), normalizedMax: SIMD2<Float>(0.6, 0.6)),
+    mode: .replace,
+    viewport: viewportDescriptor
+)
+
+await editor.beginPreviewTransform(pivot: SIMD3<Float>(0, 0, 0))
+try await editor.updatePreviewTransform(
+    SplatEditTransform(translation: SIMD3<Float>(0.1, 0.0, 0.0))
+)
+try await editor.commitPreviewTransform()
+
+let editedPoints = try await editor.exportVisiblePoints()
+```
+
+`SplatEditor` supports:
+- Point, rect, mask, sphere, and box selection queries
+- Move, rotate, and scale preview transforms with commit/cancel
+- Hide, unhide, lock, unlock, delete, duplicate, and separate operations
+- Undo/redo and snapshot inspection via `SplatEditorSnapshot`
+- Export of the current visible edited scene back through `SplatIO`
 
 ## Sample App
 
-Try the included sample application to see MetalSplatter in action:
+Try the included sample application to see MetalSplatter in action. The current editing UI is focused on `iOS/iPadOS`.
 
 1. Clone the repository
 2. Open `SampleApp/MetalSplatter_SampleApp.xcodeproj`
-3. Select your target device and set your development team (iOS/visionOS only)
+3. Select an iPhone or iPad target and set your development team if needed
 4. **Important**: Use Release configuration for best performance (Debug is >10x slower)
 5. Build and run
-6. Load a PLY or SPLAT file to visualize
+6. Load a supported splat file to visualize and edit
+
+The iOS/iPadOS demo includes:
+- Selection tools: point, rect, brush, lasso, flood, eyedropper/color-match, sphere, box, polygon, and measure
+- Edit tools: move, rotate, scale, hide/show, lock/unlock, delete, duplicate, separate, undo/redo, and export
+- Selection utilities: replace/add/subtract combine modes plus all/none/invert helpers
+- Renderer feedback: selection tint plus an outline pass for selected splats
 
 > **Tip**: For best framerate, run without the debugger attached (stop in Xcode, then launch from Home screen).
 
@@ -155,6 +213,15 @@ swift run SplatConverter input.ply -o output.splat
 
 # Convert to ASCII PLY
 swift run SplatConverter input.ply -f ply-ascii -o output.ply
+
+# Convert to glTF
+swift run SplatConverter input.ply -f gltf -o output.gltf
+
+# Convert to GLB
+swift run SplatConverter input.ply -f glb -o output.glb
+
+# Convert to SOGS v2
+swift run SplatConverter input.ply -f sog -o output.sog
 
 # Reorder by Morton code for better GPU cache coherency
 swift run SplatConverter input.ply -o output.splat --morton-order
@@ -182,7 +249,7 @@ swift run SplatConverter input.ply --describe --start 0 --count 10 -v
 | SPX | `.spx` | ✓ | ✓ | Alternative binary format |
 | glTF | `.gltf` | ✓ | ✓ | `KHR_gaussian_splatting` JSON + BIN |
 | GLB | `.glb` | ✓ | ✓ | Binary `KHR_gaussian_splatting` container |
-| SOGS v1 | `.sogs` | ✓ | - | WebP-based with metadata |
+| SOGS v1 | `.sogs`, `meta.json` | ✓ | - | WebP-based folder layout |
 | SOGS v2 | `.sog` | ✓ | ✓ | Bundled archive format |
 | SOGS ZIP | `.zip` | ✓ | - | Legacy ZIP archive |
 
