@@ -2,6 +2,24 @@
   "originHash" : "7a8b0ba2133718a6385287604cd9928730f529f54180d7410370e0f6639192a9",
   "pins" : [
     {
+      "identity" : "libpng",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/the-swift-collective/libpng.git",
+      "state" : {
+        "revision" : "0eff23aca92a086b7892831f5cb4f58e15be9449",
+        "version" : "1.6.45"
+      }
+    },
+    {
+      "identity" : "libwebp",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/the-swift-collective/libwebp.git",
+      "state" : {
+        "revision" : "5f745a17b9a5c2a4283f17c2cde4517610ab5f99",
+        "version" : "1.4.1"
+      }
+    },
+    {
       "identity" : "swift-argument-parser",
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/apple/swift-argument-parser",
@@ -17,6 +35,15 @@
       "state" : {
         "revision" : "22787ffb59de99e5dc1fbfe80b19c97a904ad48d",
         "version" : "0.9.20"
+      }
+    },
+    {
+      "identity" : "zlib",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/the-swift-collective/zlib.git",
+      "state" : {
+        "revision" : "f1d153b90420f9fcc6ef916cd67ea96f0e68d137",
+        "version" : "1.3.2"
       }
     }
   ],

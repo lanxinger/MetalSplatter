@@ -380,6 +380,10 @@ final class SceneEditingController: ObservableObject {
         case rect
         case brush
         case lasso
+        case sphere
+        case box
+        case polygon
+        case measure
         case move
         case rotate
         case scale
@@ -392,6 +396,10 @@ final class SceneEditingController: ObservableObject {
             case .rect: "Rect"
             case .brush: "Brush"
             case .lasso: "Lasso"
+            case .sphere: "Sphere"
+            case .box: "Box"
+            case .polygon: "Polygon"
+            case .measure: "Measure"
             case .move: "Move"
             case .rotate: "Rotate"
             case .scale: "Scale"
@@ -404,6 +412,10 @@ final class SceneEditingController: ObservableObject {
             case .rect: "rectangle.dashed"
             case .brush: "paintbrush.pointed"
             case .lasso: "lasso"
+            case .sphere: "circle.dashed"
+            case .box: "cube.transparent"
+            case .polygon: "point.3.connected.trianglepath.dotted"
+            case .measure: "ruler"
             case .move: "arrow.up.left.and.arrow.down.right"
             case .rotate: "rotate.3d"
             case .scale: "arrow.up.left.and.down.right.and.arrow.up.right.and.down.left"
@@ -412,7 +424,25 @@ final class SceneEditingController: ObservableObject {
 
         var usesOverlaySelection: Bool {
             switch self {
+            case .rect, .brush, .lasso, .polygon, .measure:
+                true
+            default:
+                false
+            }
+        }
+
+        var usesDragOverlay: Bool {
+            switch self {
             case .rect, .brush, .lasso:
+                true
+            default:
+                false
+            }
+        }
+
+        var usesTapOverlay: Bool {
+            switch self {
+            case .polygon, .measure:
                 true
             default:
                 false
@@ -434,6 +464,12 @@ final class SceneEditingController: ObservableObject {
         let url: URL
     }
 
+    struct MeasuredPoint: Identifiable {
+        let id = UUID()
+        let screenPoint: CGPoint
+        let worldPoint: SIMD3<Float>
+    }
+
     enum OverlayPreview {
         case rect(CGRect)
         case brush([CGPoint])
@@ -445,6 +481,15 @@ final class SceneEditingController: ObservableObject {
             if !tool.usesOverlaySelection {
                 overlayPreview = nil
             }
+            if tool != .polygon {
+                polygonPoints.removeAll(keepingCapacity: true)
+            }
+            if tool != .measure {
+                measurePoints.removeAll(keepingCapacity: true)
+            }
+            if tool == .sphere || tool == .box {
+                resetVolumeSelectionParameters()
+            }
             statusMessage = nil
         }
     }
@@ -454,8 +499,15 @@ final class SceneEditingController: ObservableObject {
     @Published fileprivate var overlayPreview: OverlayPreview?
     @Published fileprivate var shareSheetItem: ShareSheetPayload?
     @Published private(set) var statusMessage: String?
+    @Published var sphereRadius: Float = 0.5
+    @Published var boxExtentX: Float = 0.25
+    @Published var boxExtentY: Float = 0.25
+    @Published var boxExtentZ: Float = 0.25
+    @Published private(set) var polygonPoints: [CGPoint] = []
+    @Published private(set) var measurePoints: [MeasuredPoint] = []
 
     weak var renderer: MetalKitSceneRenderer?
+    private var overlayCanvasSize: CGSize = .zero
 
     var isOverlayInteractionEnabled: Bool {
         isEditorAvailable && tool.usesOverlaySelection
@@ -463,6 +515,42 @@ final class SceneEditingController: ObservableObject {
 
     var hasSelection: Bool {
         (snapshot?.selectedCount ?? 0) > 0
+    }
+
+    var canCommitPolygonSelection: Bool {
+        polygonPoints.count >= 3
+    }
+
+    var measurementSummary: String {
+        guard measurePoints.count >= 2 else {
+            return "Tap splats to add measure points"
+        }
+
+        let segments = zip(measurePoints, measurePoints.dropFirst()).map { lhs, rhs in
+            simd_length(rhs.worldPoint - lhs.worldPoint)
+        }
+        let total = segments.reduce(0, +)
+        let last = segments.last ?? total
+        return String(format: "Last %.3f m  Total %.3f m", last, total)
+    }
+
+    var selectionReferenceLabel: String {
+        if snapshot?.selectionBounds != nil {
+            return "Centered on current selection"
+        }
+        if snapshot?.visibleBounds != nil {
+            return "Centered on visible scene bounds"
+        }
+        return "No visible splats"
+    }
+
+    private var referenceBounds: SplatSelectionBounds? {
+        snapshot?.selectionBounds ?? snapshot?.visibleBounds
+    }
+
+    private static func defaultHalfExtents(for bounds: SplatSelectionBounds) -> SIMD3<Float> {
+        let halfExtents = simd.max((bounds.max - bounds.min) * 0.5, SIMD3<Float>(repeating: 0.05))
+        return halfExtents
     }
 
     func attach(renderer: MetalKitSceneRenderer?) {
@@ -485,6 +573,9 @@ final class SceneEditingController: ObservableObject {
     func applySelectionSnapshot(_ snapshot: SplatEditorSnapshot?) {
         self.snapshot = snapshot
         isEditorAvailable = snapshot != nil
+        if tool == .sphere || tool == .box {
+            resetVolumeSelectionParameters()
+        }
         statusMessage = nil
     }
 
@@ -494,6 +585,72 @@ final class SceneEditingController: ObservableObject {
 
     func selectPoint(at point: CGPoint, in size: CGSize) {
         runSelection(query: .point(normalized: normalizedPoint(point, in: size), radius: 0.04), in: size)
+    }
+
+    func applySphereSelection() {
+        guard let bounds = referenceBounds else {
+            statusMessage = "No visible splats"
+            return
+        }
+
+        runSelection(
+            query: .sphere(center: bounds.center, radius: max(sphereRadius, 0.05))
+        )
+    }
+
+    func applyBoxSelection() {
+        guard let bounds = referenceBounds else {
+            statusMessage = "No visible splats"
+            return
+        }
+
+        runSelection(
+            query: .box(
+                center: bounds.center,
+                extents: SIMD3<Float>(
+                    max(boxExtentX, 0.05),
+                    max(boxExtentY, 0.05),
+                    max(boxExtentZ, 0.05)
+                )
+            )
+        )
+    }
+
+    func resetVolumeSelectionParameters() {
+        let halfExtents = referenceBounds.map(Self.defaultHalfExtents(for:)) ?? SIMD3<Float>(repeating: 0.25)
+        sphereRadius = max(0.05, max(halfExtents.x, max(halfExtents.y, halfExtents.z)))
+        boxExtentX = halfExtents.x
+        boxExtentY = halfExtents.y
+        boxExtentZ = halfExtents.z
+    }
+
+    func clearPolygon() {
+        polygonPoints.removeAll(keepingCapacity: true)
+        overlayPreview = nil
+        statusMessage = nil
+    }
+
+    func commitPolygonSelection(in size: CGSize) {
+        let points = polygonPoints
+        guard size != .zero else {
+            statusMessage = "Polygon overlay is not ready"
+            return
+        }
+        guard let mask = makeLassoMask(points: points, size: size) else {
+            statusMessage = "Polygon needs at least three points"
+            return
+        }
+        polygonPoints.removeAll(keepingCapacity: true)
+        runSelection(query: .mask(alphaMask: mask, size: maskDimensions(for: size)), in: size)
+    }
+
+    func commitPolygonSelection() {
+        commitPolygonSelection(in: overlayCanvasSize)
+    }
+
+    func clearMeasure() {
+        measurePoints.removeAll(keepingCapacity: true)
+        statusMessage = nil
     }
 
     func hideSelection() {
@@ -541,6 +698,7 @@ final class SceneEditingController: ObservableObject {
     }
 
     fileprivate func updateOverlayGesture(_ value: DragGesture.Value, in size: CGSize) {
+        overlayCanvasSize = size
         switch tool {
         case .rect:
             overlayPreview = .rect(CGRect(
@@ -562,7 +720,38 @@ final class SceneEditingController: ObservableObject {
         }
     }
 
+    fileprivate func handleOverlayTap(at point: CGPoint, in size: CGSize) {
+        overlayCanvasSize = size
+        switch tool {
+        case .polygon:
+            if let first = polygonPoints.first,
+               polygonPoints.count >= 3,
+               distance(first, point) <= 24 {
+                commitPolygonSelection(in: size)
+                return
+            }
+            polygonPoints.append(point)
+        case .measure:
+            guard let renderer else { return }
+            Task {
+                do {
+                    guard let pickedPoint = try await renderer.pickEditablePoint(screenPoint: point, renderSize: size) else {
+                        statusMessage = "No splat at tap location"
+                        return
+                    }
+                    measurePoints.append(MeasuredPoint(screenPoint: point, worldPoint: pickedPoint.position))
+                    statusMessage = nil
+                } catch {
+                    setError(error)
+                }
+            }
+        default:
+            break
+        }
+    }
+
     fileprivate func finishOverlayGesture(_ value: DragGesture.Value, in size: CGSize) {
+        overlayCanvasSize = size
         defer { overlayPreview = nil }
 
         switch tool {
@@ -601,6 +790,12 @@ final class SceneEditingController: ObservableObject {
     private func runSelection(query: SplatSelectionQuery, in size: CGSize) {
         runEditorAction { renderer in
             try await renderer.selectEditableSplats(query: query, mode: self.combineMode, renderSize: size)
+        }
+    }
+
+    private func runSelection(query: SplatSelectionQuery) {
+        runEditorAction { renderer in
+            try await renderer.selectEditableSplats(query: query, mode: self.combineMode)
         }
     }
 
@@ -680,6 +875,10 @@ final class SceneEditingController: ObservableObject {
         draw(context)
         return Data(bytes)
     }
+
+    private func distance(_ lhs: CGPoint, _ rhs: CGPoint) -> CGFloat {
+        hypot(lhs.x - rhs.x, lhs.y - rhs.y)
+    }
 }
 
 private struct SplatEditingToolbar: View {
@@ -722,9 +921,81 @@ private struct SplatEditingToolbar: View {
                 }
                 .padding(.horizontal, 2)
             }
+
+            toolConfigurationView
         }
         .padding(12)
         .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+    }
+
+    @ViewBuilder
+    private var toolConfigurationView: some View {
+        switch controller.tool {
+        case .sphere:
+            VStack(alignment: .leading, spacing: 8) {
+                Text(controller.selectionReferenceLabel)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                HStack {
+                    Text("Radius")
+                        .font(.subheadline)
+                    Slider(value: Binding(
+                        get: { Double(controller.sphereRadius) },
+                        set: { controller.sphereRadius = Float($0) }
+                    ), in: 0.05...5.0)
+                    Text(String(format: "%.2f", controller.sphereRadius))
+                        .font(.caption.monospacedDigit())
+                        .frame(width: 42)
+                }
+                HStack(spacing: 10) {
+                    actionButton("Reset", systemImage: "arrow.counterclockwise", disabled: !controller.isEditorAvailable, action: controller.resetVolumeSelectionParameters)
+                    actionButton("Apply", systemImage: "checkmark.circle", disabled: !controller.isEditorAvailable, action: controller.applySphereSelection)
+                }
+            }
+        case .box:
+            VStack(alignment: .leading, spacing: 8) {
+                Text(controller.selectionReferenceLabel)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                extentSlider(label: "X", value: Binding(
+                    get: { Double(controller.boxExtentX) },
+                    set: { controller.boxExtentX = Float($0) }
+                ))
+                extentSlider(label: "Y", value: Binding(
+                    get: { Double(controller.boxExtentY) },
+                    set: { controller.boxExtentY = Float($0) }
+                ))
+                extentSlider(label: "Z", value: Binding(
+                    get: { Double(controller.boxExtentZ) },
+                    set: { controller.boxExtentZ = Float($0) }
+                ))
+                HStack(spacing: 10) {
+                    actionButton("Reset", systemImage: "arrow.counterclockwise", disabled: !controller.isEditorAvailable, action: controller.resetVolumeSelectionParameters)
+                    actionButton("Apply", systemImage: "checkmark.circle", disabled: !controller.isEditorAvailable, action: controller.applyBoxSelection)
+                }
+            }
+        case .polygon:
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Tap to add vertices. Tap the first point again or press Close to select.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                HStack(spacing: 10) {
+                    actionButton("Close", systemImage: "checkmark.circle", disabled: !controller.canCommitPolygonSelection, action: controller.commitPolygonSelection)
+                    actionButton("Clear", systemImage: "xmark.circle", disabled: controller.polygonPoints.isEmpty, action: controller.clearPolygon)
+                }
+            }
+        case .measure:
+            VStack(alignment: .leading, spacing: 8) {
+                Text(controller.measurementSummary)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                HStack(spacing: 10) {
+                    actionButton("Clear", systemImage: "xmark.circle", disabled: controller.measurePoints.isEmpty, action: controller.clearMeasure)
+                }
+            }
+        default:
+            EmptyView()
+        }
     }
 
     private func actionButton(_ title: String,
@@ -745,6 +1016,18 @@ private struct SplatEditingToolbar: View {
         }
         .disabled(disabled)
     }
+
+    private func extentSlider(label: String, value: Binding<Double>) -> some View {
+        HStack {
+            Text(label)
+                .font(.subheadline.monospaced())
+                .frame(width: 18)
+            Slider(value: value, in: 0.05...5.0)
+            Text(String(format: "%.2f", value.wrappedValue))
+                .font(.caption.monospacedDigit())
+                .frame(width: 42)
+        }
+    }
 }
 
 private struct SplatEditingStatusChip: View {
@@ -756,6 +1039,10 @@ private struct SplatEditingStatusChip: View {
                 .font(.caption.weight(.semibold))
             if let message = controller.statusMessage {
                 Text(message)
+                    .font(.caption2)
+                    .lineLimit(2)
+            } else if controller.tool == .measure {
+                Text(controller.measurementSummary)
                     .font(.caption2)
                     .lineLimit(2)
             } else {
@@ -801,15 +1088,50 @@ private struct SplatEditingOverlay: View {
                 case .none:
                     break
                 }
+
+                if controller.tool == .polygon, !controller.polygonPoints.isEmpty {
+                    var polygonPath = Path()
+                    if let first = controller.polygonPoints.first {
+                        polygonPath.move(to: first)
+                        for point in controller.polygonPoints.dropFirst() {
+                            polygonPath.addLine(to: point)
+                        }
+                    }
+                    context.stroke(polygonPath, with: .color(.orange), style: StrokeStyle(lineWidth: 2, dash: [6, 4]))
+                    for point in controller.polygonPoints {
+                        let marker = Path(ellipseIn: CGRect(x: point.x - 5, y: point.y - 5, width: 10, height: 10))
+                        context.fill(marker, with: .color(.orange))
+                    }
+                }
+
+                if controller.tool == .measure, !controller.measurePoints.isEmpty {
+                    var measurePath = Path()
+                    if let first = controller.measurePoints.first {
+                        measurePath.move(to: first.screenPoint)
+                        for point in controller.measurePoints.dropFirst() {
+                            measurePath.addLine(to: point.screenPoint)
+                        }
+                    }
+                    context.stroke(measurePath, with: .color(.green), style: StrokeStyle(lineWidth: 2))
+                    for point in controller.measurePoints {
+                        let marker = Path(ellipseIn: CGRect(x: point.screenPoint.x - 6, y: point.screenPoint.y - 6, width: 12, height: 12))
+                        context.fill(marker, with: .color(.green))
+                    }
+                }
             }
             .contentShape(Rectangle())
             .gesture(
                 DragGesture(minimumDistance: 0)
                     .onChanged { value in
+                        guard controller.tool.usesDragOverlay else { return }
                         controller.updateOverlayGesture(value, in: geometry.size)
                     }
                     .onEnded { value in
-                        controller.finishOverlayGesture(value, in: geometry.size)
+                        if controller.tool.usesDragOverlay {
+                            controller.finishOverlayGesture(value, in: geometry.size)
+                        } else if controller.tool.usesTapOverlay {
+                            controller.handleOverlayTap(at: value.location, in: geometry.size)
+                        }
                     }
             )
         }
@@ -1202,6 +1524,10 @@ struct MetalKitRendererView: ViewRepresentable {
                 return
             }
 
+            if parent.editingController.tool == .measure, gesture.state == .began {
+                parent.editingController.clearMeasure()
+            }
+
             // --- Call endUserInteraction on gesture end ---
             if gesture.state == .ended || gesture.state == .cancelled {
                 renderer.endUserInteraction()
@@ -1285,6 +1611,10 @@ struct MetalKitRendererView: ViewRepresentable {
                 return
             }
 
+            if parent.editingController.tool == .measure, gesture.state == .began {
+                parent.editingController.clearMeasure()
+            }
+
             // --- Call endUserInteraction on gesture end ---
             if gesture.state == .ended || gesture.state == .cancelled {
                 renderer.endUserInteraction()
@@ -1330,6 +1660,10 @@ struct MetalKitRendererView: ViewRepresentable {
                     break
                 }
                 return
+            }
+
+            if parent.editingController.tool == .measure, gesture.state == .began {
+                parent.editingController.clearMeasure()
             }
 
             // --- Call endUserInteraction on gesture end ---

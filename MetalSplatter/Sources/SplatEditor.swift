@@ -68,6 +68,7 @@ public struct SplatEditorSnapshot: Sendable {
     public var hiddenCount: Int
     public var deletedCount: Int
     public var lockedCount: Int
+    public var visibleBounds: SplatSelectionBounds?
     public var selectionBounds: SplatSelectionBounds?
 }
 
@@ -156,6 +157,9 @@ struct EditableSplatStore: Sendable {
         var hiddenCount = 0
         var deletedCount = 0
         var lockedCount = 0
+        var visibleMin = SIMD3<Float>(repeating: .greatestFiniteMagnitude)
+        var visibleMax = SIMD3<Float>(repeating: -.greatestFiniteMagnitude)
+        var hasVisibleBounds = false
         var selectionMin = SIMD3<Float>(repeating: .greatestFiniteMagnitude)
         var selectionMax = SIMD3<Float>(repeating: -.greatestFiniteMagnitude)
         var hasSelectionBounds = false
@@ -179,6 +183,9 @@ struct EditableSplatStore: Sendable {
             }
             if !state.contains(.hidden), !state.contains(.deleted) {
                 visibleCount += 1
+                visibleMin = simd_min(visibleMin, point.position)
+                visibleMax = simd_max(visibleMax, point.position)
+                hasVisibleBounds = true
             }
         }
 
@@ -189,6 +196,7 @@ struct EditableSplatStore: Sendable {
             hiddenCount: hiddenCount,
             deletedCount: deletedCount,
             lockedCount: lockedCount,
+            visibleBounds: hasVisibleBounds ? SplatSelectionBounds(min: visibleMin, max: visibleMax) : nil,
             selectionBounds: hasSelectionBounds ? SplatSelectionBounds(min: selectionMin, max: selectionMax) : nil
         )
     }
@@ -394,6 +402,35 @@ public actor SplatEditor {
         store.snapshotSummary()
     }
 
+    public func pickPoint(normalized: SIMD2<Float>,
+                          radius: Float,
+                          viewport: SplatRenderer.ViewportDescriptor) async throws -> SplatScenePoint? {
+        let indices = try await selectionEngine.select(
+            query: .point(normalized: normalized, radius: radius),
+            viewport: viewport,
+            renderer: renderer
+        )
+
+        guard !indices.isEmpty else { return nil }
+
+        let nearestIndex = indices.min { lhs, rhs in
+            let lhsDistance = projectedDistanceSquared(
+                point: store.points[lhs],
+                target: normalized,
+                viewport: viewport
+            )
+            let rhsDistance = projectedDistanceSquared(
+                point: store.points[rhs],
+                target: normalized,
+                viewport: viewport
+            )
+            return lhsDistance < rhsDistance
+        }
+
+        guard let nearestIndex else { return nil }
+        return store.points[nearestIndex]
+    }
+
     private func syncRendererState() throws {
         let rawStates = store.states.map(\.rawValue)
         try renderer.updateEditingState(
@@ -401,6 +438,21 @@ public actor SplatEditor {
             transformIndices: previewTransformIndices,
             transformPalette: transformPalette
         )
+    }
+
+    private func projectedDistanceSquared(point: SplatScenePoint,
+                                          target: SIMD2<Float>,
+                                          viewport: SplatRenderer.ViewportDescriptor) -> Float {
+        let clip = viewport.projectionMatrix * viewport.viewMatrix * SIMD4<Float>(point.position, 1)
+        guard abs(clip.w) > .ulpOfOne else { return .greatestFiniteMagnitude }
+
+        let ndc = clip / clip.w
+        let normalized = SIMD2<Float>(
+            (ndc.x + 1) * 0.5,
+            1 - ((ndc.y + 1) * 0.5)
+        )
+        let delta = normalized - target
+        return simd_dot(delta, delta)
     }
 }
 

@@ -176,6 +176,49 @@ final class SplatEditorTests: XCTestCase {
         XCTAssertNotNil(snapshot.selectionBounds)
     }
 
+    func testBoxSelectionAndVisibleBounds() async throws {
+        let renderer = try makeRenderer()
+        let editor = try await SplatEditor(points: makePoints(), renderer: renderer)
+
+        let initialSnapshot = await editor.snapshot()
+        let initialVisibleBounds = try XCTUnwrap(initialSnapshot.visibleBounds)
+        XCTAssertEqual(initialVisibleBounds.min.x, -0.75, accuracy: 0.0001)
+        XCTAssertEqual(initialVisibleBounds.min.y, -0.75, accuracy: 0.0001)
+        XCTAssertEqual(initialVisibleBounds.max.x, 0.75, accuracy: 0.0001)
+        XCTAssertEqual(initialVisibleBounds.max.y, 0.75, accuracy: 0.0001)
+
+        try await editor.select(
+            .box(center: SIMD3<Float>(0.275, 0, -2), extents: SIMD3<Float>(0.3, 0.2, 0.2)),
+            mode: .replace,
+            viewport: makeViewport()
+        )
+
+        let snapshot = await editor.snapshot()
+        XCTAssertEqual(snapshot.selectedCount, 2)
+        let selectionBounds = try XCTUnwrap(snapshot.selectionBounds)
+        XCTAssertEqual(selectionBounds.min.x, 0.0, accuracy: 0.0001)
+        XCTAssertEqual(selectionBounds.max.x, 0.55, accuracy: 0.0001)
+    }
+
+    func testPointPickingReturnsNearestVisibleSplatWithoutChangingSelection() async throws {
+        let renderer = try makeRenderer()
+        let editor = try await SplatEditor(points: makePoints(), renderer: renderer)
+
+        let picked = try await editor.pickPoint(
+            normalized: SIMD2<Float>(0.5, 0.5),
+            radius: 0.05,
+            viewport: makeViewport()
+        )
+
+        let pickedPoint = try XCTUnwrap(picked)
+        XCTAssertEqual(pickedPoint.position.x, 0.0, accuracy: 0.0001)
+        XCTAssertEqual(pickedPoint.position.y, 0.0, accuracy: 0.0001)
+        XCTAssertEqual(pickedPoint.position.z, -2.0, accuracy: 0.0001)
+
+        let snapshot = await editor.snapshot()
+        XCTAssertEqual(snapshot.selectedCount, 0)
+    }
+
     private func makeRenderer() throws -> SplatRenderer {
         guard let device else {
             throw XCTSkip("Metal device unavailable")

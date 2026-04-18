@@ -288,6 +288,26 @@ class MetalKitSceneRenderer: NSObject, MTKViewDelegate {
         return await splatEditor.snapshot()
     }
 
+    func selectEditableSplats(query: SplatSelectionQuery,
+                              mode: SelectionCombineMode) async throws -> SplatEditorSnapshot? {
+        try await selectEditableSplats(query: query, mode: mode, renderSize: metalKitView.bounds.size)
+    }
+
+    func pickEditablePoint(screenPoint: CGPoint,
+                           renderSize: CGSize) async throws -> SplatScenePoint? {
+        guard let splatEditor, modelRenderer is SplatRenderer else { return nil }
+        let viewport = makeSplatViewport(for: renderSize)
+        let normalized = SIMD2<Float>(
+            Float(min(max(screenPoint.x / max(renderSize.width, 1), 0), 1)),
+            Float(min(max(screenPoint.y / max(renderSize.height, 1), 0), 1))
+        )
+        return try await splatEditor.pickPoint(
+            normalized: normalized,
+            radius: 0.04,
+            viewport: viewport
+        )
+    }
+
     func hideSelectedEditableSplats() async throws -> SplatEditorSnapshot? {
         guard let splatEditor else { return nil }
         try await splatEditor.hideSelection()
