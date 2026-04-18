@@ -1739,7 +1739,8 @@ public class SplatRenderer: @unchecked Sendable {
     internal func updateEditingState(_ rawStates: [UInt32],
                                      transformIndices: [UInt32],
                                      transformPalette: [matrix_float4x4]) throws {
-        try ensureEditingResources(pointCount: rawStates.count)
+        let pointCount = rawStates.count
+        try ensureEditingResources(pointCount: pointCount)
 
         guard let editStateBuffer,
               let editTransformIndexBuffer,
@@ -1747,13 +1748,16 @@ public class SplatRenderer: @unchecked Sendable {
             return
         }
 
-        let statePointer = editStateBuffer.contents().bindMemory(to: UInt32.self, capacity: max(rawStates.count, 1))
+        let bufferCount = max(pointCount, 1)
+        let statePointer = editStateBuffer.contents().bindMemory(to: UInt32.self, capacity: bufferCount)
+        statePointer.initialize(repeating: 0, count: bufferCount)
         for (index, value) in rawStates.enumerated() {
             statePointer[index] = value
         }
 
-        let transformIndexPointer = editTransformIndexBuffer.contents().bindMemory(to: UInt32.self, capacity: max(transformIndices.count, 1))
-        for (index, value) in transformIndices.enumerated() {
+        let transformIndexPointer = editTransformIndexBuffer.contents().bindMemory(to: UInt32.self, capacity: bufferCount)
+        transformIndexPointer.initialize(repeating: 0, count: bufferCount)
+        for (index, value) in transformIndices.prefix(pointCount).enumerated() {
             transformIndexPointer[index] = value
         }
 
@@ -1763,7 +1767,7 @@ public class SplatRenderer: @unchecked Sendable {
             palettePointer[index] = transform
         }
 
-        editingEnabled = rawStates.contains { $0 != 0 } || transformIndices.contains { $0 != 0 }
+        editingEnabled = rawStates.contains { $0 != 0 } || transformIndices.prefix(pointCount).contains { $0 != 0 }
         if editingEnabled {
             meshShaderEnabled = false
             batchPrecomputeEnabled = false

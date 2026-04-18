@@ -130,8 +130,12 @@ static FragmentIn splatVertexInternal(Splat splat,
     packed_half3 covA = splat.covA;
     packed_half3 covB = splat.covB;
 
-    uint transformIndex = transformIndices[splatID];
-    if (transformIndex != 0u) {
+    uint transformIndex = 0u;
+    if (transformIndices != nullptr) {
+        transformIndex = transformIndices[splatID];
+    }
+
+    if (transformIndex != 0u && transformPalette != nullptr) {
         float4x4 editTransform = transformPalette[transformIndex];
         splatPos = (editTransform * float4(splatPos, 1.0)).xyz;
 

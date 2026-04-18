@@ -128,6 +128,25 @@ final class SplatEditorTests: XCTestCase {
         XCTAssertEqual(store.points[1].position, SIMD3<Float>(0.75, 0.75, -2.0))
     }
 
+    func testRendererUpdateEditingStateClampsTransformIndicesToPointCount() throws {
+        let renderer = try makeRenderer()
+
+        try renderer.updateEditingState(
+            [0, 0],
+            transformIndices: [7, 9, 11, 13],
+            transformPalette: [matrix_identity_float4x4]
+        )
+
+        guard let buffer = renderer.editTransformIndexBuffer else {
+            XCTFail("Missing edit transform index buffer")
+            return
+        }
+
+        let values = buffer.contents().bindMemory(to: UInt32.self, capacity: 2)
+        XCTAssertEqual(values[0], 7)
+        XCTAssertEqual(values[1], 9)
+    }
+
     func testEditableStoreSelectAllClearAndInvertRespectVisibility() {
         var store = EditableSplatStore(points: makePoints())
         store.states[2].insert(.hidden)
