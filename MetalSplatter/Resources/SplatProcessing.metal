@@ -87,15 +87,48 @@ void decomposeCovariance(float3 cov2D, thread float2 &v1, thread float2 &v2) {
 FragmentIn splatVertex(Splat splat,
                        Uniforms uniforms,
                        uint relativeVertexIndex,
-                       uint splatID) {
+                       uint splatID,
+                       uint editState,
+                       const device uint *transformIndices,
+                       const device float4x4 *transformPalette) {
     FragmentIn out;
     out.debugFlags = uniforms.debugFlags;
     out.lodBand = 0;
     out.splatID = splatID;
 
+    if ((editState & ((1u << 1) | (1u << 3))) != 0u) {
+        out.position = float4(1, 1, 0, 1);
+        out.relativePosition = half2(0);
+        out.color = half4(0);
+        out.splatID = splatID;
+        return out;
+    }
+
     // Optimized matrix multiplication with memory-coalesced access pattern
     // Load position components into SIMD-friendly variables for better memory access
     float3 splatPos = float3(splat.position);
+    packed_half3 covA = splat.covA;
+    packed_half3 covB = splat.covB;
+
+    uint transformIndex = transformIndices[splatID];
+    if (transformIndex != 0u) {
+        float4x4 editTransform = transformPalette[transformIndex];
+        splatPos = (editTransform * float4(splatPos, 1.0)).xyz;
+
+        float3x3 transform3x3 = float3x3(editTransform[0].xyz, editTransform[1].xyz, editTransform[2].xyz);
+        float3x3 covariance3D = float3x3(
+            covA.x, covA.y, covA.z,
+            covA.y, covB.x, covB.y,
+            covA.z, covB.y, covB.z
+        );
+        float3x3 transformedCovariance = transform3x3 * covariance3D * transpose(transform3x3);
+        covA = packed_half3(half(transformedCovariance[0][0]),
+                            half(transformedCovariance[0][1]),
+                            half(transformedCovariance[0][2]));
+        covB = packed_half3(half(transformedCovariance[1][1]),
+                            half(transformedCovariance[1][2]),
+                            half(transformedCovariance[2][2]));
+    }
 
     // Pre-load matrix rows for coalesced access
     float3 viewMatrixRow0 = uniforms.viewMatrix[0].xyz;
@@ -132,10 +165,6 @@ FragmentIn splatVertex(Splat splat,
         out.splatID = splatID;
         return out;
     }
-
-    // Pre-load covariance data
-    packed_half3 covA = splat.covA;
-    packed_half3 covB = splat.covB;
 
     float opacityScale = 1.0f;
     float3 cov2D = calcCovariance2D(viewPosition3, covA, covB,
@@ -232,6 +261,9 @@ FragmentIn splatVertex(Splat splat,
     out.relativePosition = kBoundsRadius * relativeCoordinates;
     out.color = unpackSplatColor(splat.packedColor);
     out.color.a = min(out.color.a * half(opacityScale), half(1.0));
+    if (uniforms.editingEnabled != 0u && (editState & (1u << 0)) != 0u) {
+        out.color.rgb = mix(out.color.rgb, half3(uniforms.selectionTintColor.xyz), half(uniforms.selectionTintColor.w));
+    }
 
     if ((uniforms.debugFlags & DebugFlagLodTint) != 0) {
         float distance = length(viewPosition3);
@@ -248,6 +280,19 @@ FragmentIn splatVertex(Splat splat,
     }
 
     return out;
+}
+
+FragmentIn splatVertex(Splat splat,
+                       Uniforms uniforms,
+                       uint relativeVertexIndex,
+                       uint splatID) {
+    return splatVertex(splat,
+                       uniforms,
+                       relativeVertexIndex,
+                       splatID,
+                       0u,
+                       nullptr,
+                       nullptr);
 }
 
 // Inline helper functions (splatFragmentAlpha, lodTintForBand, shadeSplat) moved to SplatProcessing.h

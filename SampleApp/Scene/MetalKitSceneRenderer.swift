@@ -50,6 +50,7 @@ class MetalKitSceneRenderer: NSObject, MTKViewDelegate {
 
     var model: ModelIdentifier?
     var modelRenderer: (any ModelRenderer)?
+    private var splatEditor: SplatEditor?
     private var currentLoadID: UUID?
     
     // Track last logged model to avoid spam
@@ -132,6 +133,7 @@ class MetalKitSceneRenderer: NSObject, MTKViewDelegate {
         currentLoadID = loadID
 
         modelRenderer = nil
+        splatEditor = nil
 
         switch model {
         case .gaussianSplat(let url):
@@ -197,6 +199,12 @@ class MetalKitSceneRenderer: NSObject, MTKViewDelegate {
             }
 
             modelRenderer = splat
+            do {
+                splatEditor = try await SplatEditor(points: points, renderer: splat)
+            } catch {
+                splatEditor = nil
+                Self.log.warning("Failed to initialize splat editor: \(error.localizedDescription)")
+            }
             
             updateFrameTimeBridge()
 
@@ -265,6 +273,123 @@ class MetalKitSceneRenderer: NSObject, MTKViewDelegate {
         }
     }
 
+    func currentEditorSnapshot() async -> SplatEditorSnapshot? {
+        guard let splatEditor else { return nil }
+        return await splatEditor.snapshot()
+    }
+
+    func selectEditableSplats(query: SplatSelectionQuery,
+                              mode: SelectionCombineMode,
+                              renderSize: CGSize) async throws -> SplatEditorSnapshot? {
+        guard let splatEditor, modelRenderer is SplatRenderer else { return nil }
+        let viewport = makeSplatViewport(for: renderSize)
+        try await splatEditor.select(query, mode: mode, viewport: viewport)
+        requestRedraw()
+        return await splatEditor.snapshot()
+    }
+
+    func hideSelectedEditableSplats() async throws -> SplatEditorSnapshot? {
+        guard let splatEditor else { return nil }
+        try await splatEditor.hideSelection()
+        requestRedraw()
+        return await splatEditor.snapshot()
+    }
+
+    func unhideAllEditableSplats() async throws -> SplatEditorSnapshot? {
+        guard let splatEditor else { return nil }
+        try await splatEditor.unhideAll()
+        requestRedraw()
+        return await splatEditor.snapshot()
+    }
+
+    func deleteSelectedEditableSplats() async throws -> SplatEditorSnapshot? {
+        guard let splatEditor else { return nil }
+        try await splatEditor.deleteSelection()
+        requestRedraw()
+        return await splatEditor.snapshot()
+    }
+
+    func undoEditableChange() async throws -> SplatEditorSnapshot? {
+        guard let splatEditor else { return nil }
+        try await splatEditor.undo()
+        requestRedraw()
+        return await splatEditor.snapshot()
+    }
+
+    func redoEditableChange() async throws -> SplatEditorSnapshot? {
+        guard let splatEditor else { return nil }
+        try await splatEditor.redo()
+        requestRedraw()
+        return await splatEditor.snapshot()
+    }
+
+    func beginEditableTransformIfPossible() async -> Bool {
+        guard let splatEditor else { return false }
+        guard let pivot = await currentSelectionPivot() else { return false }
+        await splatEditor.beginPreviewTransform(pivot: pivot)
+        requestRedraw()
+        return true
+    }
+
+    func updateEditableTranslation(screenDelta: CGPoint, renderSize: CGSize) async throws {
+        guard let splatEditor, let pivot = await currentSelectionPivot() else { return }
+        let translation = cameraPlaneTranslation(for: screenDelta, around: pivot, renderSize: renderSize)
+        try await splatEditor.updatePreviewTransform(
+            SplatEditTransform(translation: translation)
+        )
+        requestRedraw()
+    }
+
+    func updateEditableScale(_ factor: Float) async throws {
+        guard let splatEditor else { return }
+        let clampedFactor = max(0.05, factor)
+        try await splatEditor.updatePreviewTransform(
+            SplatEditTransform(scale: SIMD3<Float>(repeating: clampedFactor))
+        )
+        requestRedraw()
+    }
+
+    func updateEditableRotation(angle: Float, renderSize: CGSize) async throws {
+        guard let splatEditor else { return }
+        let axis = cameraForwardAxis(renderSize: renderSize)
+        let rotation = simd_quatf(angle: -angle, axis: axis)
+        try await splatEditor.updatePreviewTransform(
+            SplatEditTransform(rotation: rotation)
+        )
+        requestRedraw()
+    }
+
+    func commitEditableTransform() async throws -> SplatEditorSnapshot? {
+        guard let splatEditor else { return nil }
+        try await splatEditor.commitPreviewTransform()
+        requestRedraw()
+        return await splatEditor.snapshot()
+    }
+
+    func cancelEditableTransform() async {
+        guard let splatEditor else { return }
+        await splatEditor.cancelPreviewTransform()
+        requestRedraw()
+    }
+
+    func exportEditedScene() async throws -> URL? {
+        guard let splatEditor else { return nil }
+        let points = try await splatEditor.exportVisiblePoints()
+        let baseName = model?.description
+            .components(separatedBy: CharacterSet.alphanumerics.inverted)
+            .filter { !$0.isEmpty }
+            .joined(separator: "-")
+            .lowercased() ?? "edited-splats"
+        let outputURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("\(baseName)-edited-\(UUID().uuidString.prefix(8))")
+            .appendingPathExtension("ply")
+        let writer = try SplatPLYSceneWriter(toFileAtPath: outputURL.path, append: false)
+        try writer.start(binary: true, pointCount: points.count)
+        try writer.write(points)
+        try writer.close()
+        return outputURL
+    }
+
     private func makeViewport(for renderSize: CGSize) -> ModelRendererViewportDescriptor {
         // Guard against zero height to prevent NaN/inf in projection matrix
         let safeAspectRatio: Float = renderSize.height > 0
@@ -326,6 +451,63 @@ class MetalKitSceneRenderer: NSObject, MTKViewDelegate {
                                                projectionMatrix: projectionMatrix,
                                                viewMatrix: translationMatrix * panMatrix * rotationMatrix * verticalMatrix * rollMatrix * scaleMatrix * commonUpCalibration,
                                                screenSize: SIMD2(x: Int(renderSize.width), y: Int(renderSize.height)))
+    }
+
+    private func makeSplatViewport(for renderSize: CGSize) -> SplatRenderer.ViewportDescriptor {
+        let viewport = makeViewport(for: renderSize)
+        return SplatRenderer.ViewportDescriptor(
+            viewport: viewport.viewport,
+            projectionMatrix: viewport.projectionMatrix,
+            viewMatrix: viewport.viewMatrix,
+            screenSize: viewport.screenSize
+        )
+    }
+
+    private func currentSelectionPivot() async -> SIMD3<Float>? {
+        guard let snapshot = await currentEditorSnapshot(),
+              let bounds = snapshot.selectionBounds else {
+            return nil
+        }
+        return bounds.center
+    }
+
+    private func cameraPlaneTranslation(for screenDelta: CGPoint,
+                                        around worldPoint: SIMD3<Float>,
+                                        renderSize: CGSize) -> SIMD3<Float> {
+        let safeWidth = max(renderSize.width, 1)
+        let safeHeight = max(renderSize.height, 1)
+        let viewport = makeSplatViewport(for: renderSize)
+        let viewSpace = viewport.viewMatrix * SIMD4<Float>(worldPoint.x, worldPoint.y, worldPoint.z, 1)
+        let depth = max(abs(viewSpace.z), 0.1)
+        let aspectRatio = Float(safeWidth / safeHeight)
+        let fovY = Float(Constants.fovy.radians) / zoom
+        let visibleHeight = 2 * tan(fovY * 0.5) * depth
+        let visibleWidth = visibleHeight * aspectRatio
+
+        let dx = Float(screenDelta.x / safeWidth) * visibleWidth
+        let dy = Float(screenDelta.y / safeHeight) * visibleHeight
+
+        let inverseView = viewport.viewMatrix.inverse
+        let right = simd_normalize(SIMD3<Float>(inverseView.columns.0.x, inverseView.columns.0.y, inverseView.columns.0.z))
+        let up = simd_normalize(SIMD3<Float>(inverseView.columns.1.x, inverseView.columns.1.y, inverseView.columns.1.z))
+        return (right * dx) - (up * dy)
+    }
+
+    private func cameraForwardAxis(renderSize: CGSize) -> SIMD3<Float> {
+        let inverseView = makeSplatViewport(for: renderSize).viewMatrix.inverse
+        let forward = -SIMD3<Float>(inverseView.columns.2.x, inverseView.columns.2.y, inverseView.columns.2.z)
+        if simd_length_squared(forward) <= .ulpOfOne {
+            return SIMD3<Float>(0, 0, -1)
+        }
+        return simd_normalize(forward)
+    }
+
+    private func requestRedraw() {
+        #if os(macOS)
+        metalKitView.setNeedsDisplay(metalKitView.bounds)
+        #else
+        metalKitView.setNeedsDisplay()
+        #endif
     }
 
     private func updateRotation() {

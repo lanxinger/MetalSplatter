@@ -21,6 +21,14 @@ void decomposeCovariance(float3 cov2D, thread float2 &v1, thread float2 &v2);
 FragmentIn splatVertex(Splat splat,
                        Uniforms uniforms,
                        uint relativeVertexIndex,
+                       uint splatID,
+                       uint editState,
+                       const device uint *transformIndices,
+                       const device float4x4 *transformPalette);
+
+FragmentIn splatVertex(Splat splat,
+                       Uniforms uniforms,
+                       uint relativeVertexIndex,
                        uint splatID);
 
 // Inline helper functions
