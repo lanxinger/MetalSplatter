@@ -47,7 +47,7 @@ struct SampleApp: App {
             }
         }
 
-        return bundledModelIdentifier(named: "skull.sog")
+        return nil
     }()
 
 #if os(visionOS)
