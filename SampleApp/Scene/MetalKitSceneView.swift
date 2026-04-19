@@ -342,9 +342,17 @@ struct MetalKitSceneView: View {
             }
         }
 #if os(iOS)
-        .navigationDestination(isPresented: $navigateToAR) {
-            ARContentView(model: modelIdentifier)
-                .navigationTitle("AR \(modelIdentifier?.description ?? "View")")
+        .fullScreenCover(isPresented: $navigateToAR) {
+            NavigationStack {
+                ARContentView(model: modelIdentifier)
+                    .toolbar {
+                        ToolbarItem(placement: .topBarLeading) {
+                            Button("Done") {
+                                navigateToAR = false
+                            }
+                        }
+                    }
+            }
         }
 #endif
         .alert("AR Not Available", isPresented: $showARUnavailableAlert) {
