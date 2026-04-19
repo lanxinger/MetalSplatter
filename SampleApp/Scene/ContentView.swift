@@ -1,11 +1,17 @@
 import SwiftUI
 import RealityKit
 import UniformTypeIdentifiers
+import os
 
 struct ContentView: View {
+    private static let log =
+        Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.metalsplatter.sampleapp",
+               category: "ContentView")
+
     @State private var isPickingFile = false
     @State private var isPickingSOGSFolder = false
     @State private var lastLoadedModel: ModelIdentifier?
+    @State private var didAttemptStartupSceneLoad = false
 
     private static let allowedFileTypes: [UTType] = {
         let extensions = ["ply", "splat", "spz", "spx", "gltf", "glb", "json", "sog"]
@@ -174,6 +180,32 @@ struct ContentView: View {
             Spacer()
 #endif // os(visionOS)
         }
+        .task {
+            await maybeOpenStartupScene()
+        }
+    }
+
+    @MainActor
+    private func maybeOpenStartupScene() async {
+        guard !didAttemptStartupSceneLoad else { return }
+        didAttemptStartupSceneLoad = true
+
+        let environment = ProcessInfo.processInfo.environment
+        guard let startupPath = environment["METALSPLATTER_STARTUP_SCENE_PATH"],
+              !startupPath.isEmpty else { return }
+
+        let startupURL = URL(fileURLWithPath: startupPath)
+        guard FileManager.default.fileExists(atPath: startupURL.path) else {
+            Self.log.error("Startup scene not found at path: \(startupURL.path, privacy: .public)")
+            return
+        }
+
+        Self.log.info("Opening startup scene from path: \(startupURL.path, privacy: .public)")
+        try? await Task.sleep(for: .milliseconds(300))
+
+        let model = ModelIdentifier.gaussianSplat(startupURL)
+        lastLoadedModel = model
+        openWindow(value: model)
     }
     
     private func handleSOGSFolderSelection(_ folderURL: URL) {

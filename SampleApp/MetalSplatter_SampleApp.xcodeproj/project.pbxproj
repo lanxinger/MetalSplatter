@@ -8,6 +8,7 @@
 
 /* Begin PBXBuildFile section */
 		2831796A2E5A1586006FD427 /* ModelCache.swift in Sources */ = {isa = PBXBuildFile; fileRef = 283179692E5A1586006FD427 /* ModelCache.swift */; };
+		2840F5B42E629A8400E92D5A /* skull.sog in Resources */ = {isa = PBXBuildFile; fileRef = 2840F5B32E629A8400E92D5A /* skull.sog */; };
 		28BD25552E166F9700525F25 /* ARContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 28BD25532E166F9700525F25 /* ARContentView.swift */; };
 		28BD25562E166F9700525F25 /* ARSceneRenderer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 28BD25542E166F9700525F25 /* ARSceneRenderer.swift */; };
 		28C237DB2E17C48000BF6F24 /* FastSHSettings.swift in Sources */ = {isa = PBXBuildFile; fileRef = 28C237DA2E17C48000BF6F24 /* FastSHSettings.swift */; };
@@ -32,6 +33,7 @@
 
 /* Begin PBXFileReference section */
 		283179692E5A1586006FD427 /* ModelCache.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ModelCache.swift; sourceTree = "<group>"; };
+		2840F5B32E629A8400E92D5A /* skull.sog */ = {isa = PBXFileReference; lastKnownFileType = file; name = skull.sog; path = ../skull.sog; sourceTree = SOURCE_ROOT; };
 		28BD25532E166F9700525F25 /* ARContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ARContentView.swift; sourceTree = "<group>"; };
 		28BD25542E166F9700525F25 /* ARSceneRenderer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ARSceneRenderer.swift; sourceTree = "<group>"; };
 		28C237DA2E17C48000BF6F24 /* FastSHSettings.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FastSHSettings.swift; sourceTree = "<group>"; };
@@ -126,6 +128,7 @@
 				619832682AF0BC390022500D /* Frameworks */,
 				61791DF82B41551F00302B57 /* Info.plist */,
 				610347DF2B4689DB00693CE3 /* Model */,
+				2840F5B32E629A8400E92D5A /* skull.sog */,
 				61E3FD832AE5CB0200032652 /* Products */,
 				610347E02B468A0000693CE3 /* Scene */,
 				610347E12B468A0B00693CE3 /* Util */,
@@ -207,6 +210,7 @@
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				2840F5B42E629A8400E92D5A /* skull.sog in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

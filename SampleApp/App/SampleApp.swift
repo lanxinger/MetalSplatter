@@ -2,16 +2,70 @@
 import CompositorServices
 #endif
 import SwiftUI
+import os
 
 @main
 struct SampleApp: App {
+    private static let log =
+        Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.metalsplatter.sampleapp",
+               category: "SampleApp")
+
+    private static func bundledModelIdentifier(named resourceName: String) -> ModelIdentifier? {
+        let resourceURL = URL(fileURLWithPath: resourceName)
+        let baseName = resourceURL.deletingPathExtension().lastPathComponent
+        let fileExtension = resourceURL.pathExtension.isEmpty ? nil : resourceURL.pathExtension
+
+        guard let bundledURL = Bundle.main.url(forResource: baseName, withExtension: fileExtension) else {
+            return nil
+        }
+        return .gaussianSplat(bundledURL)
+    }
+
+    private let startupModelIdentifier: ModelIdentifier? = {
+        let arguments = CommandLine.arguments
+        if let bundledSceneIndex = arguments.firstIndex(of: "--startup-bundled-scene"),
+           arguments.indices.contains(arguments.index(after: bundledSceneIndex)) {
+            let bundledSceneName = arguments[arguments.index(after: bundledSceneIndex)]
+            if let bundledModel = bundledModelIdentifier(named: bundledSceneName) {
+                return bundledModel
+            }
+        }
+
+        let environment = ProcessInfo.processInfo.environment
+        if let bundledSceneName = environment["METALSPLATTER_BUNDLED_SCENE_NAME"],
+           !bundledSceneName.isEmpty {
+            if let bundledModel = bundledModelIdentifier(named: bundledSceneName) {
+                return bundledModel
+            }
+        }
+
+        if let startupPath = environment["METALSPLATTER_STARTUP_SCENE_PATH"],
+           !startupPath.isEmpty {
+            let startupURL = URL(fileURLWithPath: startupPath)
+            if FileManager.default.fileExists(atPath: startupURL.path) {
+                return .gaussianSplat(startupURL)
+            }
+        }
+
+        return bundledModelIdentifier(named: "skull.sog")
+    }()
+
 #if os(visionOS)
     @State private var visionSceneRenderer: VisionSceneRenderer?
 #endif
 
     var body: some Scene {
         WindowGroup("MetalSplatter Sample App", id: "main") {
-            ContentView()
+            if let startupModelIdentifier {
+                let description = startupModelIdentifier.description
+                MetalKitSceneView(modelIdentifier: startupModelIdentifier)
+                    .navigationTitle(description)
+                    .task {
+                        Self.log.info("Launching directly into startup scene: \(description, privacy: .public)")
+                    }
+            } else {
+                ContentView()
+            }
         }
 
 #if os(macOS)

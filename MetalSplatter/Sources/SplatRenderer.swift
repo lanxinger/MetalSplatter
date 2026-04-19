@@ -141,8 +141,18 @@ public class SplatRenderer: @unchecked Sendable {
     private var indirectDrawArgsBuffer: MTLBuffer?  // For GPU-driven indirect draw
     private var generateIndirectArgsPipelineState: MTLComputePipelineState?
     private var resetVisibleCountPipelineState: MTLComputePipelineState?
-    public var frustumCullingEnabled = false  // Enable via settings
+    public var frustumCullingEnabled = false {  // Enable via settings
+        didSet {
+            if frustumCullingEnabled != oldValue {
+                frustumCullDirtyDueToData = true
+            }
+        }
+    }
     private var lastVisibleCount: Int = 0
+    private var lastFrustumCullCameraPosition: SIMD3<Float>?
+    private var lastFrustumCullCameraForward: SIMD3<Float>?
+    private var lastFrustumCullTime: CFAbsoluteTime = 0
+    private var frustumCullDirtyDueToData = true
     
     // SIMD-group parallel bounds computation
     private var computeBoundsPipelineState: MTLComputePipelineState?
@@ -429,6 +439,9 @@ public class SplatRenderer: @unchecked Sendable {
     public var sortPositionEpsilon: Float = 0.01
     public var sortDirectionEpsilon: Float = 0.0001  // ~0.5-1° rotation (reduced from 0.001 to fix flickering during rotation)
     public var minimumSortInterval: TimeInterval = 0
+    public var frustumCullPositionEpsilon: Float = 0.01
+    public var frustumCullDirectionEpsilon: Float = 0.0001
+    public var minimumFrustumCullInterval: TimeInterval = 0
 
     // MARK: - Spherical Harmonics Update Thresholds
 
@@ -459,11 +472,17 @@ public class SplatRenderer: @unchecked Sendable {
     private var qualitySortPositionEpsilon: Float = 0.01
     private var qualitySortDirectionEpsilon: Float = 0.0001
     private var qualityMinimumSortInterval: TimeInterval = 0
+    private var qualityFrustumCullPositionEpsilon: Float = 0.01
+    private var qualityFrustumCullDirectionEpsilon: Float = 0.0001
+    private var qualityMinimumFrustumCullInterval: TimeInterval = 0
     
     /// Interaction mode sort parameters (relaxed for performance)
     public var interactionSortPositionEpsilon: Float = 0.05      // 5cm during interaction
     public var interactionSortDirectionEpsilon: Float = 0.003    // ~2-3° during interaction
     public var interactionMinimumSortInterval: TimeInterval = 0.033  // Max ~30 sorts/sec
+    public var interactionFrustumCullPositionEpsilon: Float = 0.05
+    public var interactionFrustumCullDirectionEpsilon: Float = 0.003
+    public var interactionMinimumFrustumCullInterval: TimeInterval = 0.033
     
     /// Delay before forcing a final high-quality sort after interaction ends
     public var postInteractionSortDelay: TimeInterval = 0.1
@@ -1909,6 +1928,7 @@ public class SplatRenderer: @unchecked Sendable {
 
     private func markRenderableSetDirty() {
         sortDirtyDueToData = true
+        frustumCullDirtyDueToData = true
         sortDataRevision &+= 1
     }
 
@@ -2052,6 +2072,7 @@ public class SplatRenderer: @unchecked Sendable {
     private func markGeometryDirty() {
         geometryDirty = true
         sortDirtyDueToData = true
+        frustumCullDirtyDueToData = true
         sortDataRevision &+= 1
         boundsDirty = true
         invalidatePrecomputedData()
@@ -2581,11 +2602,17 @@ public class SplatRenderer: @unchecked Sendable {
         qualitySortPositionEpsilon = sortPositionEpsilon
         qualitySortDirectionEpsilon = sortDirectionEpsilon
         qualityMinimumSortInterval = minimumSortInterval
-        
+        qualityFrustumCullPositionEpsilon = frustumCullPositionEpsilon
+        qualityFrustumCullDirectionEpsilon = frustumCullDirectionEpsilon
+        qualityMinimumFrustumCullInterval = minimumFrustumCullInterval
+
         // Apply relaxed interaction settings
         sortPositionEpsilon = interactionSortPositionEpsilon
         sortDirectionEpsilon = interactionSortDirectionEpsilon
         minimumSortInterval = interactionMinimumSortInterval
+        frustumCullPositionEpsilon = interactionFrustumCullPositionEpsilon
+        frustumCullDirectionEpsilon = interactionFrustumCullDirectionEpsilon
+        minimumFrustumCullInterval = interactionMinimumFrustumCullInterval
         
         Self.log.debug("Interaction mode started - sort thresholds relaxed")
     }
@@ -2602,6 +2629,9 @@ public class SplatRenderer: @unchecked Sendable {
         sortPositionEpsilon = qualitySortPositionEpsilon
         sortDirectionEpsilon = qualitySortDirectionEpsilon
         minimumSortInterval = qualityMinimumSortInterval
+        frustumCullPositionEpsilon = qualityFrustumCullPositionEpsilon
+        frustumCullDirectionEpsilon = qualityFrustumCullDirectionEpsilon
+        minimumFrustumCullInterval = qualityMinimumFrustumCullInterval
         
         // Schedule a final high-quality sort after a brief delay
         // This allows the last frame to render before the sort overhead kicks in
@@ -2613,6 +2643,7 @@ public class SplatRenderer: @unchecked Sendable {
                 if !self.isInteracting {
                     Self.log.debug("Interaction mode ended - triggering final sort")
                     self.sortDirtyDueToData = true  // Force a re-sort
+                    self.frustumCullDirtyDueToData = true
                     self.resort(useGPU: true)
                 }
             }
@@ -2649,38 +2680,66 @@ public class SplatRenderer: @unchecked Sendable {
         uniforms = UnsafeMutableRawPointer(dynamicUniformBuffers.contents() + uniformBufferOffset).bindMemory(to: UniformsArray.self, capacity: 1)
     }
 
-    private func updateSortReferenceCamera(from viewports: [ViewportDescriptor]) {
-        if let reference = viewports.first {
-            let invView = reference.viewMatrix.inverse
-            sortCameraPosition = (invView * SIMD4<Float>(x: 0, y: 0, z: 0, w: 1)).xyz
-            sortCameraForward = (invView * SIMD4<Float>(x: 0, y: 0, z: -1, w: 0)).xyz.normalized
-        } else {
-            sortCameraPosition = .zero
-            sortCameraForward = .init(x: 0, y: 0, z: -1)
-        }
-    }
-
     private func shouldResortForCurrentCamera() -> Bool {
         // Skip sorting entirely when using dithered transparency
         // Dithered mode is order-independent, so sort order doesn't affect visual quality
         if useDitheredTransparency {
             return false
         }
-        if sortDirtyDueToData {
+        return Self.shouldRunCameraDrivenUpdate(
+            dirty: sortDirtyDueToData,
+            now: CFAbsoluteTimeGetCurrent(),
+            lastUpdateTime: lastSortTime,
+            minimumInterval: effectiveMinimumSortInterval,
+            currentPosition: sortCameraPosition,
+            currentForward: sortCameraForward,
+            lastPosition: lastSortedCameraPosition,
+            lastForward: lastSortedCameraForward,
+            positionEpsilon: sortPositionEpsilon,
+            directionEpsilon: sortDirectionEpsilon
+        )
+    }
+
+    private func shouldUpdateFrustumCullingForCurrentCamera() -> Bool {
+        Self.shouldRunCameraDrivenUpdate(
+            dirty: frustumCullDirtyDueToData,
+            now: CFAbsoluteTimeGetCurrent(),
+            lastUpdateTime: lastFrustumCullTime,
+            minimumInterval: minimumFrustumCullInterval,
+            currentPosition: sortCameraPosition,
+            currentForward: sortCameraForward,
+            lastPosition: lastFrustumCullCameraPosition,
+            lastForward: lastFrustumCullCameraForward,
+            positionEpsilon: frustumCullPositionEpsilon,
+            directionEpsilon: frustumCullDirectionEpsilon
+        )
+    }
+
+    internal static func shouldRunCameraDrivenUpdate(
+        dirty: Bool,
+        now: CFAbsoluteTime,
+        lastUpdateTime: CFAbsoluteTime,
+        minimumInterval: TimeInterval,
+        currentPosition: SIMD3<Float>,
+        currentForward: SIMD3<Float>,
+        lastPosition: SIMD3<Float>?,
+        lastForward: SIMD3<Float>?,
+        positionEpsilon: Float,
+        directionEpsilon: Float
+    ) -> Bool {
+        if dirty {
             return true
         }
-        let now = CFAbsoluteTimeGetCurrent()
-        let effectiveInterval = effectiveMinimumSortInterval
-        if effectiveInterval > 0 && (now - lastSortTime) < effectiveInterval {
+        if minimumInterval > 0 && (now - lastUpdateTime) < minimumInterval {
             return false
         }
-        guard let lastPos = lastSortedCameraPosition,
-              let lastFwd = lastSortedCameraForward else {
+        guard let lastPosition, let lastForward else {
             return true
         }
-        let positionDelta = simd_distance(sortCameraPosition, lastPos)
-        let forwardDelta = 1 - simd_dot(simd_normalize(sortCameraForward), simd_normalize(lastFwd))
-        return positionDelta > sortPositionEpsilon || forwardDelta > sortDirectionEpsilon
+
+        let positionDelta = simd_distance(currentPosition, lastPosition)
+        let forwardDelta = 1 - simd_dot(simd_normalize(currentForward), simd_normalize(lastForward))
+        return positionDelta > positionEpsilon || forwardDelta > directionEpsilon
     }
 
     /// Determines whether spherical harmonics should be re-evaluated based on camera direction change.
@@ -2723,7 +2782,6 @@ public class SplatRenderer: @unchecked Sendable {
                                         debugFlags: debugFlags)
             self.uniforms.pointee.setUniforms(index: i, uniforms)
         }
-        updateSortReferenceCamera(from: viewports)
         // Use cached arrays to avoid per-frame allocations
         if cameraPositionsTemp.count != viewports.count {
             cameraPositionsTemp = Array(repeating: .zero, count: viewports.count)
@@ -2738,6 +2796,8 @@ public class SplatRenderer: @unchecked Sendable {
         }
         cameraWorldPosition = cameraPositionsTemp.mean ?? .zero
         cameraWorldForward = cameraForwardsTemp.mean?.normalized ?? .init(x: 0, y: 0, z: -1)
+        sortCameraPosition = cameraPositionsTemp.first ?? .zero
+        sortCameraForward = cameraForwardsTemp.first?.normalized ?? .init(x: 0, y: 0, z: -1)
 
         if !isSorting && shouldResortForCurrentCamera() {
             resort()
@@ -2848,7 +2908,13 @@ public class SplatRenderer: @unchecked Sendable {
         frameBufferUploads += 1 // uniforms update
         
         // GPU Frustum Culling: encode compute pass before rendering
-        if frustumCullingEnabled, let firstViewport = viewports.first {
+        if frustumCullingEnabled,
+           shouldUpdateFrustumCullingForCurrentCamera(),
+           let firstViewport = viewports.first {
+            lastFrustumCullCameraPosition = sortCameraPosition
+            lastFrustumCullCameraForward = sortCameraForward
+            lastFrustumCullTime = CFAbsoluteTimeGetCurrent()
+            frustumCullDirtyDueToData = false
             encodeFrustumCulling(viewport: firstViewport, to: commandBuffer)
             
             // Add completion handler to read culling results

@@ -52,6 +52,8 @@ class MetalKitSceneRenderer: NSObject, MTKViewDelegate {
     var modelRenderer: (any ModelRenderer)?
     private var splatEditor: SplatEditor?
     private var currentLoadID: UUID?
+    private var metal4BindlessAttemptedLoadID: UUID?
+    private var meshShaderCapabilityCheckedLoadID: UUID?
     
     // Track last logged model to avoid spam
     private var lastLoggedModel: String?
@@ -68,6 +70,29 @@ class MetalKitSceneRenderer: NSObject, MTKViewDelegate {
             updateFrameTimeBridge()
         }
     }
+
+    private struct ProfilingConfiguration {
+        let logInterval: Int
+
+        static var current: ProfilingConfiguration {
+            let arguments = CommandLine.arguments
+            if let intervalIndex = arguments.firstIndex(of: "--profile-log-interval"),
+               arguments.indices.contains(arguments.index(after: intervalIndex)),
+               let interval = Int(arguments[arguments.index(after: intervalIndex)]) {
+                return ProfilingConfiguration(logInterval: max(0, interval))
+            }
+
+            let environment = ProcessInfo.processInfo.environment
+            let interval = Int(environment["METALSPLATTER_PROFILE_LOG_INTERVAL"] ?? "") ?? 0
+            return ProfilingConfiguration(logInterval: max(0, interval))
+        }
+
+        var isEnabled: Bool { logInterval > 0 }
+    }
+
+    private let profilingConfiguration = ProfilingConfiguration.current
+    private var profiledFrameSampleCount = 0
+    private var profiledFrameTimeAccumulator: TimeInterval = 0
 
     let inFlightSemaphore = DispatchSemaphore(value: Constants.maxSimultaneousRenders)
 
@@ -131,6 +156,8 @@ class MetalKitSceneRenderer: NSObject, MTKViewDelegate {
         // Generate unique load ID to detect stale loads from rapid model switches
         let loadID = UUID()
         currentLoadID = loadID
+        metal4BindlessAttemptedLoadID = nil
+        meshShaderCapabilityCheckedLoadID = nil
 
         modelRenderer = nil
         splatEditor = nil
@@ -209,17 +236,16 @@ class MetalKitSceneRenderer: NSObject, MTKViewDelegate {
             updateFrameTimeBridge()
 
             // Initialize Metal 4 bindless resources if available and enabled
-            if useMetal4Bindless {
+            if useMetal4Bindless && isMetal4BindlessAvailable {
                 if #available(iOS 26.0, macOS 26.0, tvOS 26.0, visionOS 26.0, *) {
                     do {
                         try splat.initializeMetal4Bindless()
+                        metal4BindlessAttemptedLoadID = loadID
                         Self.log.info("Initialized Metal 4 bindless resources for Gaussian Splat model")
                     } catch {
                         Self.log.warning("Failed to initialize Metal 4 bindless resources: \(error.localizedDescription)")
                         // Continue with traditional rendering
                     }
-                } else {
-                    Self.log.info("Metal 4 bindless resources not available on this platform (requires iOS 26+/macOS 26+)")
                 }
             }
 
@@ -750,19 +776,44 @@ class MetalKitSceneRenderer: NSObject, MTKViewDelegate {
 
     private func updateFrameTimeBridge() {
         guard let splat = modelRenderer as? SplatRenderer else { return }
-        guard let onFrameTimeUpdate else {
+        let frameTimeCallback = onFrameTimeUpdate
+        guard frameTimeCallback != nil || profilingConfiguration.isEnabled else {
             splat.onFrameReady = nil
             return
         }
 
         let loadID = currentLoadID
+        profiledFrameSampleCount = 0
+        profiledFrameTimeAccumulator = 0
         splat.onFrameReady = { [weak self] stats in
             Task { @MainActor [weak self] in
                 guard let self else { return }
                 guard self.currentLoadID == loadID else { return }
-                onFrameTimeUpdate(stats.frameTime)
+                frameTimeCallback?(stats.frameTime)
+                self.recordProfilingSample(stats)
             }
         }
+    }
+
+    private func recordProfilingSample(_ stats: SplatRenderer.FrameStatistics) {
+        guard profilingConfiguration.isEnabled else { return }
+
+        profiledFrameSampleCount += 1
+        profiledFrameTimeAccumulator += stats.frameTime
+
+        guard profiledFrameSampleCount >= profilingConfiguration.logInterval else { return }
+
+        let averageFrameTime = profiledFrameTimeAccumulator / Double(profiledFrameSampleCount)
+        let averageFPS = averageFrameTime > 0 ? 1.0 / averageFrameTime : 0
+        let averageFrameMs = averageFrameTime * 1000
+        let sortMs = (stats.sortDuration ?? 0) * 1000
+
+        Self.log.info(
+            "PROFILE avgFrameMs=\(String(format: "%.2f", averageFrameMs)), fps=\(String(format: "%.1f", averageFPS)), splats=\(stats.splatCount), sortMs=\(String(format: "%.2f", sortMs)), uploads=\(stats.bufferUploadCount), sortJobs=\(stats.sortJobsInFlight)"
+        )
+
+        profiledFrameSampleCount = 0
+        profiledFrameTimeAccumulator = 0
     }
 
 #if os(iOS) && canImport(MetalFX)
@@ -885,30 +936,47 @@ class MetalKitSceneRenderer: NSObject, MTKViewDelegate {
     func setMetal4Bindless(_ enabled: Bool) {
         let previousValue = useMetal4Bindless
         useMetal4Bindless = enabled
+        let loadID = currentLoadID
 
-        // If we already have a renderer, try to initialize Metal 4
-        if enabled, let splat = modelRenderer as? SplatRenderer {
-            if #available(iOS 26.0, macOS 26.0, tvOS 26.0, visionOS 26.0, *) {
-                let alreadyInitialized = splat.metal4ArgumentBufferManager != nil
-                guard !alreadyInitialized || previousValue != enabled else { return }
-                do {
-                    try splat.initializeMetal4Bindless()
-                    Self.log.info("Enabled Metal 4 bindless resources for current model")
-                } catch {
-                    Self.log.warning("Failed to enable Metal 4 bindless: \(error.localizedDescription)")
-                }
-            }
-        } else if previousValue == enabled {
-            // No state or renderer change; avoid redundant work/redraw.
+        guard let splat = modelRenderer as? SplatRenderer else {
+            guard previousValue != enabled else { return }
+            requestRedraw()
             return
         }
 
-        // Request redraw
-        #if os(macOS)
-        metalKitView.setNeedsDisplay(metalKitView.bounds)
-        #else
-        metalKitView.setNeedsDisplay()
-        #endif
+        guard enabled else {
+            guard previousValue != enabled else { return }
+            requestRedraw()
+            return
+        }
+
+        guard isMetal4BindlessAvailable else {
+            if metal4BindlessAttemptedLoadID != loadID || previousValue != enabled {
+                metal4BindlessAttemptedLoadID = loadID
+                Self.log.warning("Failed to enable Metal 4 bindless: Metal rendering is not available on this device")
+            }
+            return
+        }
+
+        let alreadyInitialized = splat.metal4ArgumentBufferManager != nil
+        if alreadyInitialized {
+            guard previousValue != enabled else { return }
+            requestRedraw()
+            return
+        }
+
+        guard metal4BindlessAttemptedLoadID != loadID || previousValue != enabled else { return }
+        metal4BindlessAttemptedLoadID = loadID
+
+        if #available(iOS 26.0, macOS 26.0, tvOS 26.0, visionOS 26.0, *) {
+            do {
+                try splat.initializeMetal4Bindless()
+                Self.log.info("Enabled Metal 4 bindless resources for current model")
+                requestRedraw()
+            } catch {
+                Self.log.warning("Failed to enable Metal 4 bindless: \(error.localizedDescription)")
+            }
+        }
     }
 
     /// Check if Metal 4 bindless is available on this device
@@ -961,26 +1029,25 @@ class MetalKitSceneRenderer: NSObject, MTKViewDelegate {
     /// Enable or disable mesh shader rendering (Metal 3+)
     /// When enabled, geometry is generated entirely on GPU - 1 computation per splat instead of 4
     func setMeshShader(_ enabled: Bool) {
-        if let splat = modelRenderer as? SplatRenderer {
-            if enabled && !splat.isMeshShaderSupported {
+        guard let splat = modelRenderer as? SplatRenderer else { return }
+
+        if enabled && !splat.isMeshShaderSupported {
+            if meshShaderCapabilityCheckedLoadID != currentLoadID {
+                meshShaderCapabilityCheckedLoadID = currentLoadID
                 Self.log.info("Mesh shaders not supported on this device")
-                return
             }
-            guard splat.meshShaderEnabled != enabled else { return }
-            splat.meshShaderEnabled = enabled
-            if enabled {
-                Self.log.info("Mesh shader rendering enabled - geometry generated on GPU")
-            } else {
-                Self.log.info("Mesh shader rendering disabled - using vertex shader path")
-            }
+            return
         }
 
-        // Request redraw
-        #if os(macOS)
-        metalKitView.setNeedsDisplay(metalKitView.bounds)
-        #else
-        metalKitView.setNeedsDisplay()
-        #endif
+        guard splat.meshShaderEnabled != enabled else { return }
+        meshShaderCapabilityCheckedLoadID = currentLoadID
+        splat.meshShaderEnabled = enabled
+        if enabled {
+            Self.log.info("Mesh shader rendering enabled - geometry generated on GPU")
+        } else {
+            Self.log.info("Mesh shader rendering disabled - using vertex shader path")
+        }
+        requestRedraw()
     }
     
     /// Enable or disable Metal 4 TensorOps batch precompute
