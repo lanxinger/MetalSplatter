@@ -20,16 +20,16 @@ final class SplatEditorTests: XCTestCase {
     func testEditableStoreSelectionModesAndVisibility() {
         var store = EditableSplatStore(points: makePoints())
 
-        store.applySelection(indices: [1, 2], mode: .replace)
+        _ = store.applySelection(indices: [1, 2], mode: .replace)
         XCTAssertEqual(store.selectedIndices, [1, 2])
 
-        store.applySelection(indices: [3], mode: .add)
+        _ = store.applySelection(indices: [3], mode: .add)
         XCTAssertEqual(store.selectedIndices, [1, 2, 3])
 
-        store.applySelection(indices: [2], mode: .subtract)
+        _ = store.applySelection(indices: [2], mode: .subtract)
         XCTAssertEqual(store.selectedIndices, [1, 3])
 
-        store.hideSelection()
+        _ = store.hideSelection()
         let snapshot = store.snapshotSummary()
         XCTAssertEqual(snapshot.hiddenCount, 2)
         XCTAssertEqual(snapshot.visibleCount, 2)
@@ -38,9 +38,9 @@ final class SplatEditorTests: XCTestCase {
 
     func testEditableStoreCommittedTransformBakesPositionAndSelectionBounds() {
         var store = EditableSplatStore(points: makePoints())
-        store.applySelection(indices: [1], mode: .replace)
+        _ = store.applySelection(indices: [1], mode: .replace)
 
-        let changedIndices = store.applyCommittedTransform(
+        let pointChanges = store.applyCommittedTransform(
             SplatEditTransform(
                 translation: SIMD3<Float>(0.5, 0.25, -0.5),
                 rotation: simd_quatf(angle: .pi / 2, axis: SIMD3<Float>(0, 1, 0)),
@@ -49,7 +49,7 @@ final class SplatEditorTests: XCTestCase {
             pivot: SIMD3<Float>(0, 0, -2)
         )
 
-        XCTAssertEqual(changedIndices, [1])
+        XCTAssertEqual(pointChanges.map(\.index), [1])
         XCTAssertEqual(store.points[1].position.x, 0.5, accuracy: 0.0001)
         XCTAssertEqual(store.points[1].position.y, 0.25, accuracy: 0.0001)
         XCTAssertEqual(store.points[1].position.z, -2.5, accuracy: 0.0001)
@@ -59,20 +59,17 @@ final class SplatEditorTests: XCTestCase {
         XCTAssertEqual(snapshot.selectionBounds?.center.x ?? 0, 0.5, accuracy: 0.0001)
     }
 
-    func testEditHistoryUndoRedoSnapshots() async {
-        let points = makePoints()
-        let history = SplatEditHistory()
-        let original = SplatEditHistory.Snapshot(points: points, states: Array(repeating: [], count: points.count))
-        var editedStates = Array(repeating: EditableSplatState(), count: points.count)
-        editedStates[1] = [.selected]
-        let edited = SplatEditHistory.Snapshot(points: points, states: editedStates)
+    func testEditableStoreStateChangesApplyAndRestoreIncrementally() {
+        var store = EditableSplatStore(points: makePoints())
+        let changes = store.applySelection(indices: [1, 2], mode: .replace)
 
-        await history.pushUndo(original)
-        let undone = await history.popUndo(current: edited)
-        XCTAssertEqual(undone?.states[1], [])
+        XCTAssertEqual(store.selectedIndices, [1, 2])
 
-        let redone = await history.popRedo(current: original)
-        XCTAssertEqual(redone?.states[1], [.selected])
+        store.applyStateChanges(changes, useNewValues: false)
+        XCTAssertEqual(store.selectedIndices, [])
+
+        store.applyStateChanges(changes, useNewValues: true)
+        XCTAssertEqual(store.selectedIndices, [1, 2])
     }
 
     func testEditableStoreColorMatchUsesPerChannelThresholdAndVisibility() {
@@ -104,7 +101,7 @@ final class SplatEditorTests: XCTestCase {
 
     func testEditableStoreDuplicateSelectionAppendsCopiesAndSelectsDuplicates() {
         var store = EditableSplatStore(points: makePoints())
-        store.applySelection(indices: [1, 2], mode: .replace)
+        _ = store.applySelection(indices: [1, 2], mode: .replace)
 
         let duplicateIndices = store.duplicateSelection()
 
@@ -117,7 +114,7 @@ final class SplatEditorTests: XCTestCase {
 
     func testEditableStoreSeparateSelectionKeepsOnlySelectedPoints() {
         var store = EditableSplatStore(points: makePoints())
-        store.applySelection(indices: [1, 3], mode: .replace)
+        _ = store.applySelection(indices: [1, 3], mode: .replace)
 
         let didSeparate = store.separateSelection()
 
@@ -131,7 +128,7 @@ final class SplatEditorTests: XCTestCase {
     func testRendererUpdateEditingStateClampsTransformIndicesToPointCount() throws {
         let renderer = try makeRenderer()
 
-        try renderer.updateEditingState(
+        try renderer.replaceEditingState(
             [0, 0],
             transformIndices: [7, 9, 11, 13],
             transformPalette: [matrix_identity_float4x4]
@@ -147,35 +144,69 @@ final class SplatEditorTests: XCTestCase {
         XCTAssertEqual(values[1], 9)
     }
 
+    func testRendererIncrementalEditStateTrackingUpdatesRenderableCount() throws {
+        let renderer = try makeRenderer()
+        try renderer.add(makePoints().prefix(3).map { $0 })
+        try renderer.replaceEditingState(
+            [0, 0, 0],
+            transformIndices: [0, 0, 0],
+            transformPalette: [matrix_identity_float4x4]
+        )
+
+        XCTAssertEqual(renderer.renderableSplatCountForCurrentEditState, 3)
+
+        try renderer.updateEditStates(
+            at: [0, 1, 2],
+            values: [0, EditableSplatState.hidden.rawValue, EditableSplatState.selected.rawValue]
+        )
+
+        XCTAssertEqual(renderer.renderableSplatCountForCurrentEditState, 2)
+        XCTAssertTrue(renderer.editingEnabled)
+    }
+
+    func testRendererPreviewTransformRestoresOptimizedSettings() throws {
+        let renderer = try makeRenderer()
+        renderer.meshShaderEnabled = true
+        renderer.batchPrecomputeEnabled = true
+
+        try renderer.setPreviewTransformActive(true)
+        XCTAssertFalse(renderer.meshShaderEnabled)
+        XCTAssertFalse(renderer.batchPrecomputeEnabled)
+
+        try renderer.setPreviewTransformActive(false)
+        XCTAssertTrue(renderer.meshShaderEnabled)
+        XCTAssertTrue(renderer.batchPrecomputeEnabled)
+    }
+
     func testEditableStoreSelectAllClearAndInvertRespectVisibility() {
         var store = EditableSplatStore(points: makePoints())
         store.states[2].insert(.hidden)
 
-        store.selectAllVisible()
+        _ = store.selectAllVisible()
         XCTAssertEqual(store.selectedIndices, [0, 1, 3])
 
-        store.invertSelection()
+        _ = store.invertSelection()
         XCTAssertEqual(store.selectedIndices, [])
 
-        store.selectAllVisible()
-        store.clearSelection()
+        _ = store.selectAllVisible()
+        _ = store.clearSelection()
         XCTAssertEqual(store.selectedIndices, [])
     }
 
     func testEditableStoreLockAndUnlockAffectSelectionEligibility() {
         var store = EditableSplatStore(points: makePoints())
-        store.applySelection(indices: [1, 2], mode: .replace)
+        _ = store.applySelection(indices: [1, 2], mode: .replace)
 
-        store.lockSelection()
+        _ = store.lockSelection()
         XCTAssertEqual(store.selectedIndices, [])
         XCTAssertTrue(store.states[1].contains(.locked))
         XCTAssertTrue(store.states[2].contains(.locked))
 
-        store.applySelection(indices: [0, 1, 2, 3], mode: .replace)
+        _ = store.applySelection(indices: [0, 1, 2, 3], mode: .replace)
         XCTAssertEqual(store.selectedIndices, [0, 3])
 
-        store.unlockAll()
-        store.applySelection(indices: [0, 1, 2, 3], mode: .replace)
+        _ = store.unlockAll()
+        _ = store.applySelection(indices: [0, 1, 2, 3], mode: .replace)
         XCTAssertEqual(store.selectedIndices, [0, 1, 2, 3])
     }
 

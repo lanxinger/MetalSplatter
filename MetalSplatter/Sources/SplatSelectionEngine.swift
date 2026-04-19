@@ -3,6 +3,11 @@ import Metal
 import simd
 
 final class SplatSelectionEngine: @unchecked Sendable {
+    private struct NearestSelectionCandidate {
+        var index: Int32
+        var distanceSquared: Float
+    }
+
     private enum QueryMode: UInt32 {
         case point = 0
         case rect = 1
@@ -32,7 +37,13 @@ final class SplatSelectionEngine: @unchecked Sendable {
     private let device: MTLDevice
     private let commandQueue: MTLCommandQueue?
     private let pipelineState: MTLComputePipelineState?
+    private let nearestPointPipelineState: MTLComputePipelineState?
     private let dummyMaskTexture: MTLTexture?
+    private var queryBuffer: MTLBuffer?
+    private var selectedIndexBuffer: MTLBuffer?
+    private var selectedCountBuffer: MTLBuffer?
+    private var nearestCandidateBuffer: MTLBuffer?
+    private var cachedMaskTextures: [String: MTLTexture] = [:]
 
     init(device: MTLDevice) throws {
         self.device = device
@@ -43,6 +54,11 @@ final class SplatSelectionEngine: @unchecked Sendable {
             self.pipelineState = try device.makeComputePipelineState(function: function)
         } else {
             self.pipelineState = nil
+        }
+        if let function = library.makeFunction(name: "pickNearestEditableSplat") {
+            self.nearestPointPipelineState = try device.makeComputePipelineState(function: function)
+        } else {
+            self.nearestPointPipelineState = nil
         }
 
         let descriptor = MTLTextureDescriptor.texture2DDescriptor(
@@ -66,8 +82,11 @@ final class SplatSelectionEngine: @unchecked Sendable {
         let splatCount = renderer.splatCount
         guard splatCount > 0 else { return [] }
 
-        guard let outputBuffer = device.makeBuffer(length: splatCount, options: .storageModeShared),
-              let queryBuffer = device.makeBuffer(length: MemoryLayout<QueryParameters>.stride, options: .storageModeShared),
+        try ensureSelectionResources(splatCount: splatCount)
+
+        guard let outputBuffer = selectedIndexBuffer,
+              let selectedCountBuffer,
+              let queryBuffer,
               let commandBuffer = commandQueue.makeCommandBuffer(),
               let encoder = commandBuffer.makeComputeCommandEncoder(),
               let editStateBuffer = renderer.editStateBuffer,
@@ -124,6 +143,7 @@ final class SplatSelectionEngine: @unchecked Sendable {
         }
 
         memcpy(queryBuffer.contents(), &parameters, MemoryLayout<QueryParameters>.stride)
+        selectedCountBuffer.contents().storeBytes(of: UInt32(0), as: UInt32.self)
 
         encoder.setComputePipelineState(pipelineState)
         encoder.setBuffer(renderer.splatBuffer.buffer, offset: 0, index: 0)
@@ -131,7 +151,8 @@ final class SplatSelectionEngine: @unchecked Sendable {
         encoder.setBuffer(editTransformIndexBuffer, offset: 0, index: 2)
         encoder.setBuffer(editTransformPaletteBuffer, offset: 0, index: 3)
         encoder.setBuffer(outputBuffer, offset: 0, index: 4)
-        encoder.setBuffer(queryBuffer, offset: 0, index: 5)
+        encoder.setBuffer(selectedCountBuffer, offset: 0, index: 5)
+        encoder.setBuffer(queryBuffer, offset: 0, index: 6)
         if let maskTexture {
             encoder.setTexture(maskTexture, index: 0)
         }
@@ -153,22 +174,122 @@ final class SplatSelectionEngine: @unchecked Sendable {
             commandBuffer.commit()
         }
 
-        let bytes = outputBuffer.contents().bindMemory(to: UInt8.self, capacity: splatCount)
-        return (0..<splatCount).compactMap { index in
-            bytes[index] == 0 ? nil : index
+        let selectedCount = Int(selectedCountBuffer.contents().load(as: UInt32.self))
+        guard selectedCount > 0 else { return [] }
+
+        let indices = outputBuffer.contents().bindMemory(to: UInt32.self, capacity: max(selectedCount, 1))
+        return (0..<selectedCount).map { Int(indices[$0]) }
+    }
+
+    func pickNearest(normalized: SIMD2<Float>,
+                     radius: Float,
+                     viewport: SplatRenderer.ViewportDescriptor,
+                     renderer: SplatRenderer) async throws -> Int? {
+        guard let commandQueue, let nearestPointPipelineState else {
+            throw SplatEditorError.selectionEngineUnavailable
         }
+
+        let splatCount = renderer.splatCount
+        guard splatCount > 0 else { return nil }
+
+        let maxThreads = min(256, nearestPointPipelineState.maxTotalThreadsPerThreadgroup, splatCount)
+        var threadsPerGroup = 1
+        while threadsPerGroup * 2 <= maxThreads {
+            threadsPerGroup *= 2
+        }
+        let threadgroupCount = max(1, (splatCount + threadsPerGroup - 1) / threadsPerGroup)
+
+        try ensureNearestResources(threadgroupCount: threadgroupCount)
+        try ensureQueryBuffer()
+
+        guard let queryBuffer,
+              let nearestCandidateBuffer,
+              let commandBuffer = commandQueue.makeCommandBuffer(),
+              let encoder = commandBuffer.makeComputeCommandEncoder(),
+              let editStateBuffer = renderer.editStateBuffer,
+              let editTransformIndexBuffer = renderer.editTransformIndexBuffer,
+              let editTransformPaletteBuffer = renderer.editTransformPaletteBuffer else {
+            throw SplatEditorError.selectionEngineUnavailable
+        }
+
+        var parameters = QueryParameters(
+            projectionMatrix: viewport.projectionMatrix,
+            viewMatrix: viewport.viewMatrix,
+            point: normalized,
+            pointRadius: radius,
+            mode: QueryMode.point.rawValue,
+            splatCount: UInt32(splatCount),
+            rect: SIMD4<Float>(0, 0, 0, 0),
+            sphereCenter: .zero,
+            sphereRadius: 0,
+            boxCenter: .zero,
+            padding0: 0,
+            boxExtents: .zero,
+            padding1: 0,
+            maskSize: .zero,
+            padding2: .zero
+        )
+        memcpy(queryBuffer.contents(), &parameters, MemoryLayout<QueryParameters>.stride)
+
+        let candidates = nearestCandidateBuffer.contents().bindMemory(to: NearestSelectionCandidate.self, capacity: threadgroupCount)
+        for index in 0..<threadgroupCount {
+            candidates[index] = NearestSelectionCandidate(index: -1, distanceSquared: .greatestFiniteMagnitude)
+        }
+
+        encoder.setComputePipelineState(nearestPointPipelineState)
+        encoder.setBuffer(renderer.splatBuffer.buffer, offset: 0, index: 0)
+        encoder.setBuffer(editStateBuffer, offset: 0, index: 1)
+        encoder.setBuffer(editTransformIndexBuffer, offset: 0, index: 2)
+        encoder.setBuffer(editTransformPaletteBuffer, offset: 0, index: 3)
+        encoder.setBuffer(nearestCandidateBuffer, offset: 0, index: 4)
+        encoder.setBuffer(queryBuffer, offset: 0, index: 5)
+        encoder.dispatchThreadgroups(
+            MTLSize(width: threadgroupCount, height: 1, depth: 1),
+            threadsPerThreadgroup: MTLSize(width: threadsPerGroup, height: 1, depth: 1)
+        )
+        encoder.endEncoding()
+
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            commandBuffer.addCompletedHandler { buffer in
+                if let error = buffer.error {
+                    continuation.resume(throwing: error)
+                } else {
+                    continuation.resume(returning: ())
+                }
+            }
+            commandBuffer.commit()
+        }
+
+        var bestCandidate = NearestSelectionCandidate(index: -1, distanceSquared: .greatestFiniteMagnitude)
+        for index in 0..<threadgroupCount {
+            let candidate = candidates[index]
+            guard candidate.index >= 0 else { continue }
+            if candidate.distanceSquared < bestCandidate.distanceSquared {
+                bestCandidate = candidate
+            }
+        }
+
+        return bestCandidate.index >= 0 ? Int(bestCandidate.index) : nil
     }
 
     private func makeMaskTexture(data: Data, size: SIMD2<Int>) throws -> MTLTexture? {
-        let descriptor = MTLTextureDescriptor.texture2DDescriptor(
-            pixelFormat: .r8Unorm,
-            width: size.x,
-            height: size.y,
-            mipmapped: false
-        )
-        descriptor.usage = [.shaderRead]
-        guard let texture = device.makeTexture(descriptor: descriptor) else {
-            throw SplatEditorError.selectionEngineUnavailable
+        let key = "\(size.x)x\(size.y)"
+        let texture: MTLTexture
+        if let cachedTexture = cachedMaskTextures[key] {
+            texture = cachedTexture
+        } else {
+            let descriptor = MTLTextureDescriptor.texture2DDescriptor(
+                pixelFormat: .r8Unorm,
+                width: size.x,
+                height: size.y,
+                mipmapped: false
+            )
+            descriptor.usage = [.shaderRead]
+            guard let newTexture = device.makeTexture(descriptor: descriptor) else {
+                throw SplatEditorError.selectionEngineUnavailable
+            }
+            cachedMaskTextures[key] = newTexture
+            texture = newTexture
         }
         data.withUnsafeBytes { rawBuffer in
             if let baseAddress = rawBuffer.baseAddress {
@@ -181,5 +302,43 @@ final class SplatSelectionEngine: @unchecked Sendable {
             }
         }
         return texture
+    }
+
+    private func ensureQueryBuffer() throws {
+        if queryBuffer == nil {
+            guard let buffer = device.makeBuffer(length: MemoryLayout<QueryParameters>.stride, options: .storageModeShared) else {
+                throw SplatEditorError.selectionEngineUnavailable
+            }
+            queryBuffer = buffer
+        }
+    }
+
+    private func ensureSelectionResources(splatCount: Int) throws {
+        try ensureQueryBuffer()
+
+        let indexLength = max(splatCount, 1) * MemoryLayout<UInt32>.stride
+        if selectedIndexBuffer == nil || selectedIndexBuffer?.length != indexLength {
+            selectedIndexBuffer = device.makeBuffer(length: indexLength, options: .storageModeShared)
+        }
+        if selectedCountBuffer == nil {
+            selectedCountBuffer = device.makeBuffer(length: MemoryLayout<UInt32>.stride, options: .storageModeShared)
+        }
+
+        guard selectedIndexBuffer != nil, selectedCountBuffer != nil else {
+            throw SplatEditorError.selectionEngineUnavailable
+        }
+    }
+
+    private func ensureNearestResources(threadgroupCount: Int) throws {
+        try ensureQueryBuffer()
+
+        let length = max(threadgroupCount, 1) * MemoryLayout<NearestSelectionCandidate>.stride
+        if nearestCandidateBuffer == nil || nearestCandidateBuffer?.length != length {
+            nearestCandidateBuffer = device.makeBuffer(length: length, options: .storageModeShared)
+        }
+
+        guard nearestCandidateBuffer != nil else {
+            throw SplatEditorError.selectionEngineUnavailable
+        }
     }
 }

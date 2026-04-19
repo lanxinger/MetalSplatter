@@ -371,6 +371,7 @@ internal class CountingSorter {
     internal func sort(
         commandBuffer: MTLCommandBuffer,
         splatBuffer: MTLBuffer,
+        editStateBuffer: MTLBuffer?,
         outputBuffer: MTLBuffer,
         cameraPosition: SIMD3<Float>,
         cameraForward: SIMD3<Float>,
@@ -454,6 +455,9 @@ internal class CountingSorter {
                 encoder.setBytes(&sortByDist, length: MemoryLayout<Bool>.size, index: 5)
                 encoder.setBuffer(cachedBins, offset: 0, index: 6)
                 encoder.setBytes(&binParams, length: MemoryLayout<CameraRelativeBinParams>.size, index: 7)
+                if let editStateBuffer {
+                    encoder.setBuffer(editStateBuffer, offset: 0, index: 8)
+                }
             } else {
                 // Standard uniform binning
                 encoder.label = "CountingSort Histogram"
@@ -465,6 +469,9 @@ internal class CountingSorter {
                 encoder.setBytes(&cameraFwd, length: MemoryLayout<SIMD3<Float>>.size, index: 4)
                 encoder.setBytes(&sortByDist, length: MemoryLayout<Bool>.size, index: 5)
                 encoder.setBuffer(cachedBins, offset: 0, index: 6)
+                if let editStateBuffer {
+                    encoder.setBuffer(editStateBuffer, offset: 0, index: 7)
+                }
             }
 
             encoder.dispatchThreadgroups(
@@ -568,6 +575,9 @@ internal class CountingSorter {
             encoder.setBuffer(binOffsets, offset: 0, index: 1)
             encoder.setBuffer(outputBuffer, offset: 0, index: 2)
             encoder.setBytes(&params, length: MemoryLayout<CountingSortParams>.size, index: 3)
+            if let editStateBuffer {
+                encoder.setBuffer(editStateBuffer, offset: 0, index: 4)
+            }
 
             encoder.dispatchThreadgroups(
                 MTLSize(width: threadgroups, height: 1, depth: 1),

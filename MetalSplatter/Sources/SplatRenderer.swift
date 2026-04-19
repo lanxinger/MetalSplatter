@@ -702,8 +702,16 @@ public class SplatRenderer: @unchecked Sendable {
     internal var selectionTintColor = SIMD4<Float>(0.15, 0.55, 1.0, 0.45)
     internal var selectionOutlineEnabled = true
     internal var editingEnabled = false
+    private var nonZeroEditStateCount = 0
+    private var hiddenOrDeletedEditStateCount = 0
+    private var activeTransformIndexCount = 0
+    private var previewTransformActive = false
+    private var savedOptimizedEditSettings: (meshShaderEnabled: Bool, batchPrecomputeEnabled: Bool)?
 
     public var splatCount: Int { splatBuffer.count }
+    internal var renderableSplatCountForCurrentEditState: Int {
+        max(0, splatCount - hiddenOrDeletedEditStateCount)
+    }
 
     var sorting = false
     private var sortJobsInFlight: Int = 0  // Track concurrent sort operations
@@ -1181,6 +1189,7 @@ public class SplatRenderer: @unchecked Sendable {
         // Clear current buffers and return them to pools
         splatBufferPool.release(splatBuffer)
         splatBufferPool.release(splatBufferPrime)
+        resetEditingTracking()
         
         // Invalidate cached bounds
         cachedBounds = nil
@@ -1736,9 +1745,9 @@ public class SplatRenderer: @unchecked Sendable {
         }
     }
 
-    internal func updateEditingState(_ rawStates: [UInt32],
-                                     transformIndices: [UInt32],
-                                     transformPalette: [matrix_float4x4]) throws {
+    internal func replaceEditingState(_ rawStates: [UInt32],
+                                      transformIndices: [UInt32],
+                                      transformPalette: [matrix_float4x4]) throws {
         let pointCount = rawStates.count
         try ensureEditingResources(pointCount: pointCount)
 
@@ -1750,27 +1759,87 @@ public class SplatRenderer: @unchecked Sendable {
 
         let bufferCount = max(pointCount, 1)
         let statePointer = editStateBuffer.contents().bindMemory(to: UInt32.self, capacity: bufferCount)
-        statePointer.initialize(repeating: 0, count: bufferCount)
+        memset(statePointer, 0, stateLength(for: bufferCount))
+        nonZeroEditStateCount = 0
+        hiddenOrDeletedEditStateCount = 0
         for (index, value) in rawStates.enumerated() {
             statePointer[index] = value
+            updateEditStateCounters(from: 0, to: value)
         }
 
         let transformIndexPointer = editTransformIndexBuffer.contents().bindMemory(to: UInt32.self, capacity: bufferCount)
-        transformIndexPointer.initialize(repeating: 0, count: bufferCount)
+        memset(transformIndexPointer, 0, stateLength(for: bufferCount))
+        activeTransformIndexCount = 0
         for (index, value) in transformIndices.prefix(pointCount).enumerated() {
             transformIndexPointer[index] = value
+            updateTransformIndexCounters(from: 0, to: value)
         }
 
         let palettePointer = editTransformPaletteBuffer.contents().bindMemory(to: matrix_float4x4.self, capacity: max(transformPalette.count, 2))
-        palettePointer[0] = matrix_identity_float4x4
-        for (index, transform) in transformPalette.enumerated() where index < 2 {
-            palettePointer[index] = transform
-        }
+        writeTransformPalette(transformPalette, to: palettePointer)
+        refreshEditingEnabled()
+    }
 
-        editingEnabled = rawStates.contains { $0 != 0 } || transformIndices.prefix(pointCount).contains { $0 != 0 }
-        if editingEnabled {
+    internal func updateEditingState(_ rawStates: [UInt32],
+                                     transformIndices: [UInt32],
+                                     transformPalette: [matrix_float4x4]) throws {
+        try replaceEditingState(rawStates, transformIndices: transformIndices, transformPalette: transformPalette)
+    }
+
+    internal func updateEditStates(at indices: [Int], values: [UInt32]) throws {
+        guard indices.count == values.count else { return }
+        try ensureEditingResources(pointCount: splatCount)
+        guard let editStateBuffer else { return }
+
+        let pointer = editStateBuffer.contents().bindMemory(to: UInt32.self, capacity: max(splatCount, 1))
+        var visibilityChanged = false
+        for (index, value) in zip(indices, values) where index >= 0 && index < splatCount {
+            let oldValue = pointer[index]
+            guard oldValue != value else { continue }
+            visibilityChanged = visibilityChanged || isHiddenOrDeleted(oldValue) != isHiddenOrDeleted(value)
+            updateEditStateCounters(from: oldValue, to: value)
+            pointer[index] = value
+        }
+        refreshEditingEnabled()
+        if visibilityChanged {
+            markRenderableSetDirty()
+        }
+    }
+
+    internal func updateTransformIndices(at indices: [Int], values: [UInt32]) throws {
+        guard indices.count == values.count else { return }
+        try ensureEditingResources(pointCount: splatCount)
+        guard let editTransformIndexBuffer else { return }
+
+        let pointer = editTransformIndexBuffer.contents().bindMemory(to: UInt32.self, capacity: max(splatCount, 1))
+        for (index, value) in zip(indices, values) where index >= 0 && index < splatCount {
+            let oldValue = pointer[index]
+            guard oldValue != value else { continue }
+            updateTransformIndexCounters(from: oldValue, to: value)
+            pointer[index] = value
+        }
+        refreshEditingEnabled()
+    }
+
+    internal func updateTransformPalette(_ transformPalette: [matrix_float4x4]) throws {
+        try ensureEditingResources(pointCount: splatCount)
+        guard let editTransformPaletteBuffer else { return }
+        let palettePointer = editTransformPaletteBuffer.contents().bindMemory(to: matrix_float4x4.self, capacity: max(transformPalette.count, 2))
+        writeTransformPalette(transformPalette, to: palettePointer)
+    }
+
+    internal func setPreviewTransformActive(_ active: Bool) throws {
+        guard previewTransformActive != active else { return }
+        previewTransformActive = active
+
+        if active {
+            savedOptimizedEditSettings = (meshShaderEnabled, batchPrecomputeEnabled)
             meshShaderEnabled = false
             batchPrecomputeEnabled = false
+        } else if let savedOptimizedEditSettings {
+            meshShaderEnabled = savedOptimizedEditSettings.meshShaderEnabled
+            batchPrecomputeEnabled = savedOptimizedEditSettings.batchPrecomputeEnabled
+            self.savedOptimizedEditSettings = nil
         }
     }
 
@@ -1790,8 +1859,66 @@ public class SplatRenderer: @unchecked Sendable {
         splatBuffer.append(points.map { Splat($0) })
         markGeometryDirty()
         colorsDirty = true
+        resetEditingTracking()
         try ensureEditingResources(pointCount: points.count)
         try initializeIdentitySortedIndices()
+    }
+
+    private func refreshEditingEnabled() {
+        editingEnabled = nonZeroEditStateCount > 0 || activeTransformIndexCount > 0
+    }
+
+    private func updateEditStateCounters(from oldValue: UInt32, to newValue: UInt32) {
+        if oldValue == 0, newValue != 0 {
+            nonZeroEditStateCount += 1
+        } else if oldValue != 0, newValue == 0 {
+            nonZeroEditStateCount -= 1
+        }
+
+        if !isHiddenOrDeleted(oldValue), isHiddenOrDeleted(newValue) {
+            hiddenOrDeletedEditStateCount += 1
+        } else if isHiddenOrDeleted(oldValue), !isHiddenOrDeleted(newValue) {
+            hiddenOrDeletedEditStateCount -= 1
+        }
+    }
+
+    private func updateTransformIndexCounters(from oldValue: UInt32, to newValue: UInt32) {
+        if oldValue == 0, newValue != 0 {
+            activeTransformIndexCount += 1
+        } else if oldValue != 0, newValue == 0 {
+            activeTransformIndexCount -= 1
+        }
+    }
+
+    private func writeTransformPalette(_ transformPalette: [matrix_float4x4],
+                                       to palettePointer: UnsafeMutablePointer<matrix_float4x4>) {
+        palettePointer[0] = matrix_identity_float4x4
+        palettePointer[1] = matrix_identity_float4x4
+        for (index, transform) in transformPalette.enumerated() where index < 2 {
+            palettePointer[index] = transform
+        }
+    }
+
+    private func isHiddenOrDeleted(_ value: UInt32) -> Bool {
+        (value & (EditableSplatState.hidden.rawValue | EditableSplatState.deleted.rawValue)) != 0
+    }
+
+    private func stateLength(for pointCount: Int) -> Int {
+        max(pointCount, 1) * MemoryLayout<UInt32>.stride
+    }
+
+    private func markRenderableSetDirty() {
+        sortDirtyDueToData = true
+        sortDataRevision &+= 1
+    }
+
+    private func resetEditingTracking() {
+        editingEnabled = false
+        nonZeroEditStateCount = 0
+        hiddenOrDeletedEditStateCount = 0
+        activeTransformIndexCount = 0
+        previewTransformActive = false
+        savedOptimizedEditSettings = nil
     }
 
     // MARK: - Color-Only Updates
@@ -2382,9 +2509,12 @@ public class SplatRenderer: @unchecked Sendable {
         cullEncoder.setBuffer(indicesBuffer, offset: 0, index: 1)
         cullEncoder.setBuffer(countBuffer, offset: 0, index: 2)
         cullEncoder.setBuffer(cullDataBuffer, offset: 0, index: 3)
+        if let editStateBuffer {
+            cullEncoder.setBuffer(editStateBuffer, offset: 0, index: 4)
+        }
         
         var count = UInt32(splatCount)
-        cullEncoder.setBytes(&count, length: MemoryLayout<UInt32>.stride, index: 4)
+        cullEncoder.setBytes(&count, length: MemoryLayout<UInt32>.stride, index: 5)
         
         let threadsPerThreadgroup = MTLSize(width: 256, height: 1, depth: 1)
         let threadgroups = MTLSize(width: (splatCount + 255) / 256, height: 1, depth: 1)
@@ -2424,7 +2554,7 @@ public class SplatRenderer: @unchecked Sendable {
         lastVisibleCount = Int(visibleCount)
         
         // Log when count changes by more than 5%
-        let totalCount = self.splatCount
+        let totalCount = self.renderableSplatCountForCurrentEditState
         let changeThreshold = max(totalCount / 20, 100)  // At least 100 splats or 5%
         if abs(lastVisibleCount - previousCount) > changeThreshold {
             let percentage = totalCount > 0 ? Int(Float(visibleCount) / Float(totalCount) * 100) : 0
@@ -2434,7 +2564,7 @@ public class SplatRenderer: @unchecked Sendable {
     
     /// Get the last frustum culling result
     public var culledSplatCount: Int {
-        frustumCullingEnabled ? lastVisibleCount : splatCount
+        frustumCullingEnabled ? lastVisibleCount : renderableSplatCountForCurrentEditState
     }
     
     // MARK: - Interaction Mode Control
@@ -2703,16 +2833,18 @@ public class SplatRenderer: @unchecked Sendable {
         schedulePendingBufferRelease(on: commandBuffer)
 
         let splatCount = splatBuffer.count
-        guard splatBuffer.count != 0 else { return }
-        let indexedSplatCount = min(splatCount, Constants.maxIndexedSplatCount)
-        let instanceCount = (splatCount + indexedSplatCount - 1) / indexedSplatCount
+        guard splatCount != 0 else { return }
+        let drawSplatCount = renderableSplatCountForCurrentEditState
+        guard drawSplatCount > 0 else { return }
+        let indexedSplatCount = min(drawSplatCount, Constants.maxIndexedSplatCount)
+        let instanceCount = (drawSplatCount + indexedSplatCount - 1) / indexedSplatCount
 
         if #available(iOS 26.0, macOS 26.0, tvOS 26.0, visionOS 26.0, *) {
             updateMetal4ResidencyForFrame(commandBuffer: commandBuffer)
         }
 
         switchToNextDynamicBuffer()
-        updateUniforms(forViewports: viewports, splatCount: UInt32(splatCount), indexedSplatCount: UInt32(indexedSplatCount))
+        updateUniforms(forViewports: viewports, splatCount: UInt32(drawSplatCount), indexedSplatCount: UInt32(indexedSplatCount))
         frameBufferUploads += 1 // uniforms update
         
         // GPU Frustum Culling: encode compute pass before rendering
@@ -2733,12 +2865,12 @@ public class SplatRenderer: @unchecked Sendable {
 
         // Log Metal 4.0 availability but use standard rendering path (only log once per scene)
         if #available(iOS 26.0, macOS 26.0, tvOS 26.0, visionOS 26.0, *) {
-            if isMetal4OptimizationsAvailable && splatCount > 5000 {
+            if isMetal4OptimizationsAvailable && drawSplatCount > 5000 {
                 // Only log if this is a new scene or first time
-                if !metal4LoggedOnce || abs(splatCount - lastSplatCountLogged) > 1000 {
-                    Self.log.info("Metal 4.0: Enhanced pipeline active for \(splatCount) splats")
+                if !metal4LoggedOnce || abs(drawSplatCount - lastSplatCountLogged) > 1000 {
+                    Self.log.info("Metal 4.0: Enhanced pipeline active for \(drawSplatCount) splats")
                     metal4LoggedOnce = true
-                    lastSplatCountLogged = splatCount
+                    lastSplatCountLogged = drawSplatCount
                 }
                 // Continue with standard rendering but Metal 4.0 features are available
             }
@@ -2792,7 +2924,7 @@ public class SplatRenderer: @unchecked Sendable {
             // Calculate number of meshlets needed
             // Each meshlet handles 64 splats (increased from 32, limited by Metal's 256 vertex max)
             let splatsPerMeshlet: Int = 64
-            let meshletCount = (splatCount + splatsPerMeshlet - 1) / splatsPerMeshlet
+            let meshletCount = (drawSplatCount + splatsPerMeshlet - 1) / splatsPerMeshlet
 
             // Dispatch mesh shader grid
             // Object shader threadgroups = number of meshlets
@@ -3159,7 +3291,13 @@ public class SplatRenderer: @unchecked Sendable {
         onSortStart?()
 
         let splatCount = splatBuffer.count
+        let renderableCount = renderableSplatCountForCurrentEditState
         let dataDirtySnapshot = sortDataRevision
+
+        guard renderableCount > 0 else {
+            finishSort()
+            return
+        }
 
         let cameraWorldForward = sortCameraForward
         let cameraWorldPosition = sortCameraPosition
@@ -3187,7 +3325,7 @@ public class SplatRenderer: @unchecked Sendable {
 
                 do {
                     indexOutputBuffer = try sortIndexBufferPool.acquire(minimumCapacity: splatCount)
-                    indexOutputBuffer.count = splatCount
+                    indexOutputBuffer.count = max(renderableCount, 0)
                 } catch {
                     Self.log.error("Failed to acquire index output buffer from pool: \(error)")
                     self.finishSort()
@@ -3198,6 +3336,7 @@ public class SplatRenderer: @unchecked Sendable {
                 // Uses GPU atomics-based radix sort, beneficial for >100K splats
                 if #available(iOS 26.0, macOS 26.0, visionOS 26.0, *) {
                     if self.useMetal4Sorting,
+                       self.hiddenOrDeletedEditStateCount == 0,
                        splatCount > self.metal4SortingThreshold,
                        let sorter = self.metal4Sorter {
                         let sortCommandBufferManager = self.computeCommandBufferManager ?? commandBufferManager
@@ -3270,12 +3409,13 @@ public class SplatRenderer: @unchecked Sendable {
                     }
 
                     do {
-                        try sorter.sort(
-                            commandBuffer: commandBuffer,
-                            splatBuffer: splatBuffer.buffer,
-                            outputBuffer: indexOutputBuffer.buffer,
-                            cameraPosition: cameraWorldPosition,
-                            cameraForward: cameraWorldForward,
+                            try sorter.sort(
+                                commandBuffer: commandBuffer,
+                                splatBuffer: splatBuffer.buffer,
+                                editStateBuffer: self.editStateBuffer,
+                                outputBuffer: indexOutputBuffer.buffer,
+                                cameraPosition: cameraWorldPosition,
+                                cameraForward: cameraWorldForward,
                             sortByDistance: effectiveSortByDistance,
                             splatCount: splatCount,
                             depthBounds: depthBounds,
@@ -3352,10 +3492,13 @@ public class SplatRenderer: @unchecked Sendable {
                     computeEncoder.setComputePipelineState(computePipelineState)
                     computeEncoder.setBuffer(splatBuffer.buffer, offset: 0, index: 0)
                     computeEncoder.setBuffer(distanceBuffer.buffer, offset: 0, index: 1)
-                    computeEncoder.setBytes(&cameraPos, length: MemoryLayout<SIMD3<Float>>.size, index: 2)
-                    computeEncoder.setBytes(&cameraFwd, length: MemoryLayout<SIMD3<Float>>.size, index: 3)
-                    computeEncoder.setBytes(&sortByDist, length: MemoryLayout<Bool>.size, index: 4)
-                    computeEncoder.setBytes(&count, length: MemoryLayout<UInt32>.size, index: 5)
+                    if let editStateBuffer = self.editStateBuffer {
+                        computeEncoder.setBuffer(editStateBuffer, offset: 0, index: 2)
+                    }
+                    computeEncoder.setBytes(&cameraPos, length: MemoryLayout<SIMD3<Float>>.size, index: 3)
+                    computeEncoder.setBytes(&cameraFwd, length: MemoryLayout<SIMD3<Float>>.size, index: 4)
+                    computeEncoder.setBytes(&sortByDist, length: MemoryLayout<Bool>.size, index: 5)
+                    computeEncoder.setBytes(&count, length: MemoryLayout<UInt32>.size, index: 6)
 
                     let threadsPerThreadgroup = MTLSize(width: 256, height: 1, depth: 1)
                     let threadgroups = MTLSize(width: (splatCount + 255) / 256, height: 1, depth: 1)

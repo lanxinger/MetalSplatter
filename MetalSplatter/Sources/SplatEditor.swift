@@ -92,31 +92,27 @@ public enum SplatEditorError: LocalizedError, Sendable {
     }
 }
 
-actor SplatEditHistory {
-    struct Snapshot: Sendable {
-        var points: [SplatScenePoint]
-        var states: [EditableSplatState]
-    }
+struct EditableSplatStateChange: Sendable {
+    var index: Int
+    var oldState: EditableSplatState
+    var newState: EditableSplatState
+}
 
-    private var undoStack: [Snapshot] = []
-    private var redoStack: [Snapshot] = []
+struct EditableSplatPointChange: Sendable {
+    var index: Int
+    var oldPoint: SplatScenePoint
+    var newPoint: SplatScenePoint
+}
 
-    func pushUndo(_ snapshot: Snapshot) {
-        undoStack.append(snapshot)
-        redoStack.removeAll(keepingCapacity: true)
-    }
+struct EditableSplatStoreSnapshot: Sendable {
+    var points: [SplatScenePoint]
+    var states: [EditableSplatState]
+}
 
-    func popUndo(current: Snapshot) -> Snapshot? {
-        guard let previous = undoStack.popLast() else { return nil }
-        redoStack.append(current)
-        return previous
-    }
-
-    func popRedo(current: Snapshot) -> Snapshot? {
-        guard let next = redoStack.popLast() else { return nil }
-        undoStack.append(current)
-        return next
-    }
+enum SplatEditHistoryEntry: Sendable {
+    case states([EditableSplatStateChange])
+    case points([EditableSplatPointChange])
+    case snapshot(EditableSplatStoreSnapshot)
 }
 
 struct EditableSplatStore: Sendable {
@@ -135,11 +131,11 @@ struct EditableSplatStore: Sendable {
         self.states = Array(repeating: [], count: points.count)
     }
 
-    var snapshot: SplatEditHistory.Snapshot {
-        SplatEditHistory.Snapshot(points: points, states: states)
+    var snapshot: EditableSplatStoreSnapshot {
+        EditableSplatStoreSnapshot(points: points, states: states)
     }
 
-    mutating func restore(_ snapshot: SplatEditHistory.Snapshot) {
+    mutating func restore(_ snapshot: EditableSplatStoreSnapshot) {
         points = snapshot.points
         states = snapshot.states
     }
@@ -208,97 +204,141 @@ struct EditableSplatStore: Sendable {
         )
     }
 
-    mutating func applySelection(indices: [Int], mode: SelectionCombineMode) {
+    mutating func applySelection(indices: [Int], mode: SelectionCombineMode) -> [EditableSplatStateChange] {
         let selectable = Set(indices.filter { index in
             isSelectable(index)
         })
 
+        var changes: [EditableSplatStateChange] = []
         switch mode {
         case .replace:
             for index in states.indices {
-                if selectable.contains(index) {
-                    states[index].insert(.selected)
-                } else {
-                    states[index].remove(.selected)
+                recordStateChange(at: index, into: &changes) { state in
+                    if selectable.contains(index) {
+                        state.insert(.selected)
+                    } else {
+                        state.remove(.selected)
+                    }
                 }
             }
         case .add:
             for index in selectable {
-                states[index].insert(.selected)
+                recordStateChange(at: index, into: &changes) { state in
+                    state.insert(.selected)
+                }
             }
         case .subtract:
             for index in selectable {
-                states[index].remove(.selected)
+                recordStateChange(at: index, into: &changes) { state in
+                    state.remove(.selected)
+                }
             }
         }
+
+        return changes
     }
 
-    mutating func hideSelection() {
+    mutating func hideSelection() -> [EditableSplatStateChange] {
+        var changes: [EditableSplatStateChange] = []
         for index in selectedIndices {
-            states[index].insert(.hidden)
-            states[index].remove(.selected)
-        }
-    }
-
-    mutating func lockSelection() {
-        for index in selectedIndices {
-            states[index].insert(.locked)
-            states[index].remove(.selected)
-        }
-    }
-
-    mutating func selectAllVisible() {
-        for index in states.indices where isSelectable(index) {
-            states[index].insert(.selected)
-        }
-    }
-
-    mutating func clearSelection() {
-        for index in states.indices {
-            states[index].remove(.selected)
-        }
-    }
-
-    mutating func invertSelection() {
-        for index in states.indices where isSelectable(index) {
-            if states[index].contains(.selected) {
-                states[index].remove(.selected)
-            } else {
-                states[index].insert(.selected)
+            recordStateChange(at: index, into: &changes) { state in
+                state.insert(.hidden)
+                state.remove(.selected)
             }
         }
+        return changes
     }
 
-    mutating func unhideAll() {
-        for index in states.indices {
-            states[index].remove(.hidden)
-        }
-    }
-
-    mutating func unlockAll() {
-        for index in states.indices {
-            states[index].remove(.locked)
-        }
-    }
-
-    mutating func deleteSelection() {
+    mutating func lockSelection() -> [EditableSplatStateChange] {
+        var changes: [EditableSplatStateChange] = []
         for index in selectedIndices {
-            states[index].insert(.deleted)
-            states[index].remove(.selected)
+            recordStateChange(at: index, into: &changes) { state in
+                state.insert(.locked)
+                state.remove(.selected)
+            }
         }
+        return changes
     }
 
-    mutating func applyCommittedTransform(_ transform: SplatEditTransform, pivot: SIMD3<Float>) -> [Int] {
+    mutating func selectAllVisible() -> [EditableSplatStateChange] {
+        var changes: [EditableSplatStateChange] = []
+        for index in states.indices where isSelectable(index) {
+            recordStateChange(at: index, into: &changes) { state in
+                state.insert(.selected)
+            }
+        }
+        return changes
+    }
+
+    mutating func clearSelection() -> [EditableSplatStateChange] {
+        var changes: [EditableSplatStateChange] = []
+        for index in states.indices {
+            recordStateChange(at: index, into: &changes) { state in
+                state.remove(.selected)
+            }
+        }
+        return changes
+    }
+
+    mutating func invertSelection() -> [EditableSplatStateChange] {
+        var changes: [EditableSplatStateChange] = []
+        for index in states.indices where isSelectable(index) {
+            recordStateChange(at: index, into: &changes) { state in
+                if state.contains(.selected) {
+                    state.remove(.selected)
+                } else {
+                    state.insert(.selected)
+                }
+            }
+        }
+        return changes
+    }
+
+    mutating func unhideAll() -> [EditableSplatStateChange] {
+        var changes: [EditableSplatStateChange] = []
+        for index in states.indices {
+            recordStateChange(at: index, into: &changes) { state in
+                state.remove(.hidden)
+            }
+        }
+        return changes
+    }
+
+    mutating func unlockAll() -> [EditableSplatStateChange] {
+        var changes: [EditableSplatStateChange] = []
+        for index in states.indices {
+            recordStateChange(at: index, into: &changes) { state in
+                state.remove(.locked)
+            }
+        }
+        return changes
+    }
+
+    mutating func deleteSelection() -> [EditableSplatStateChange] {
+        var changes: [EditableSplatStateChange] = []
+        for index in selectedIndices {
+            recordStateChange(at: index, into: &changes) { state in
+                state.insert(.deleted)
+                state.remove(.selected)
+            }
+        }
+        return changes
+    }
+
+    mutating func applyCommittedTransform(_ transform: SplatEditTransform,
+                                          pivot: SIMD3<Float>) -> [EditableSplatPointChange] {
         let selected = selectedIndices
         guard !selected.isEmpty else { return [] }
 
+        var changes: [EditableSplatPointChange] = []
         for index in selected {
-            var point = points[index]
-            point = point.applying(transform: transform, around: pivot)
-            points[index] = point
+            let oldPoint = points[index]
+            let newPoint = oldPoint.applying(transform: transform, around: pivot)
+            points[index] = newPoint
+            changes.append(EditableSplatPointChange(index: index, oldPoint: oldPoint, newPoint: newPoint))
         }
 
-        return selected
+        return changes
     }
 
     mutating func duplicateSelection() -> [Int] {
@@ -336,6 +376,18 @@ struct EditableSplatStore: Sendable {
             return state
         }
         return true
+    }
+
+    mutating func applyStateChanges(_ changes: [EditableSplatStateChange], useNewValues: Bool) {
+        for change in changes {
+            states[change.index] = useNewValues ? change.newState : change.oldState
+        }
+    }
+
+    mutating func applyPointChanges(_ changes: [EditableSplatPointChange], useNewValues: Bool) {
+        for change in changes {
+            points[change.index] = useNewValues ? change.newPoint : change.oldPoint
+        }
     }
 
     func colorMatchIndices(referenceIndex: Int, threshold: Float) -> [Int] {
@@ -414,6 +466,17 @@ struct EditableSplatStore: Sendable {
         return !state.contains(.hidden) && !state.contains(.deleted) && !state.contains(.locked)
     }
 
+    private mutating func recordStateChange(at index: Int,
+                                            into changes: inout [EditableSplatStateChange],
+                                            update: (inout EditableSplatState) -> Void) {
+        let oldState = states[index]
+        var newState = oldState
+        update(&newState)
+        guard newState != oldState else { return }
+        states[index] = newState
+        changes.append(EditableSplatStateChange(index: index, oldState: oldState, newState: newState))
+    }
+
     private func projectedCandidates(viewport: SplatRenderer.ViewportDescriptor) -> [ProjectedCandidate] {
         let cameraRight = Self.cameraRightAxis(viewMatrix: viewport.viewMatrix)
 
@@ -475,17 +538,20 @@ struct PreviewTransformState: Sendable {
 public actor SplatEditor {
     private let renderer: SplatRenderer
     private let selectionEngine: SplatSelectionEngine
-    private let history = SplatEditHistory()
     private var store: EditableSplatStore
     private var previewTransform: PreviewTransformState?
     private var previewTransformIndices: [UInt32]
+    private var previewTransformTouchedIndices: [Int]
     private var transformPalette: [simd_float4x4]
+    private var undoStack: [SplatEditHistoryEntry] = []
+    private var redoStack: [SplatEditHistoryEntry] = []
 
     public init(points: [SplatScenePoint], renderer: SplatRenderer) async throws {
         self.renderer = renderer
         self.selectionEngine = try SplatSelectionEngine(device: renderer.device)
         self.store = EditableSplatStore(points: points)
         self.previewTransformIndices = Array(repeating: 0, count: points.count)
+        self.previewTransformTouchedIndices = []
         self.transformPalette = [matrix_identity_float4x4, matrix_identity_float4x4]
 
         if renderer.splatCount == 0 {
@@ -495,34 +561,35 @@ public actor SplatEditor {
         }
 
         try renderer.ensureEditingResources(pointCount: points.count)
-        try syncRendererState()
+        try replaceRendererState()
     }
 
     public func select(_ query: SplatSelectionQuery,
                        mode: SelectionCombineMode,
                        viewport: SplatRenderer.ViewportDescriptor) async throws {
-        let before = store.snapshot
         let selected = try await selectionEngine.select(
             query: query,
             viewport: viewport,
             renderer: renderer
         )
 
-        store.applySelection(indices: selected, mode: mode)
-        await history.pushUndo(before)
-        try syncRendererState()
+        let changes = store.applySelection(indices: selected, mode: mode)
+        try applyStateHistory(changes)
     }
 
     public func beginPreviewTransform(pivot: SIMD3<Float>) async {
         previewTransform = PreviewTransformState(pivot: pivot, transform: .identity)
-
-        previewTransformIndices = Array(repeating: 0, count: store.points.count)
-        for index in store.selectedIndices {
+        previewTransformTouchedIndices = store.selectedIndices
+        for index in previewTransformTouchedIndices {
             previewTransformIndices[index] = 1
         }
         transformPalette[1] = matrix_identity_float4x4
 
-        try? syncRendererState()
+        let values = Array(repeating: UInt32(1), count: previewTransformTouchedIndices.count)
+        try? renderer.setPreviewTransformActive(!previewTransformTouchedIndices.isEmpty)
+        renderer.beginInteraction()
+        try? renderer.updateTransformIndices(at: previewTransformTouchedIndices, values: values)
+        try? renderer.updateTransformPalette(transformPalette)
     }
 
     public func updatePreviewTransform(_ transform: SplatEditTransform) async throws {
@@ -532,7 +599,7 @@ public actor SplatEditor {
 
         previewTransform = PreviewTransformState(pivot: current.pivot, transform: transform)
         transformPalette[1] = float4x4(transform: transform, pivot: current.pivot)
-        try syncRendererState()
+        try renderer.updateTransformPalette(transformPalette)
     }
 
     public func commitPreviewTransform() async throws {
@@ -540,79 +607,45 @@ public actor SplatEditor {
             throw SplatEditorError.previewTransformNotActive
         }
 
-        let before = store.snapshot
-        let changedIndices = store.applyCommittedTransform(current.transform, pivot: current.pivot)
-        await history.pushUndo(before)
-
-        previewTransform = nil
-        previewTransformIndices = Array(repeating: 0, count: store.points.count)
-        transformPalette[1] = matrix_identity_float4x4
-
-        try renderer.updateSplats(store.points, at: changedIndices)
-        try syncRendererState()
+        let changes = store.applyCommittedTransform(current.transform, pivot: current.pivot)
+        try clearPreviewTransformState()
+        try applyPointHistory(changes)
     }
 
     public func cancelPreviewTransform() async {
-        previewTransform = nil
-        previewTransformIndices = Array(repeating: 0, count: store.points.count)
-        transformPalette[1] = matrix_identity_float4x4
-        try? syncRendererState()
+        try? clearPreviewTransformState()
     }
 
     public func hideSelection() async throws {
-        let before = store.snapshot
-        store.hideSelection()
-        await history.pushUndo(before)
-        try syncRendererState()
+        try applyStateHistory(store.hideSelection())
     }
 
     public func lockSelection() async throws {
-        let before = store.snapshot
-        store.lockSelection()
-        await history.pushUndo(before)
-        try syncRendererState()
+        try applyStateHistory(store.lockSelection())
     }
 
     public func selectAll() async throws {
-        let before = store.snapshot
-        store.selectAllVisible()
-        await history.pushUndo(before)
-        try syncRendererState()
+        try applyStateHistory(store.selectAllVisible())
     }
 
     public func clearSelection() async throws {
-        let before = store.snapshot
-        store.clearSelection()
-        await history.pushUndo(before)
-        try syncRendererState()
+        try applyStateHistory(store.clearSelection())
     }
 
     public func invertSelection() async throws {
-        let before = store.snapshot
-        store.invertSelection()
-        await history.pushUndo(before)
-        try syncRendererState()
+        try applyStateHistory(store.invertSelection())
     }
 
     public func unhideAll() async throws {
-        let before = store.snapshot
-        store.unhideAll()
-        await history.pushUndo(before)
-        try syncRendererState()
+        try applyStateHistory(store.unhideAll())
     }
 
     public func unlockAll() async throws {
-        let before = store.snapshot
-        store.unlockAll()
-        await history.pushUndo(before)
-        try syncRendererState()
+        try applyStateHistory(store.unlockAll())
     }
 
     public func deleteSelection() async throws {
-        let before = store.snapshot
-        store.deleteSelection()
-        await history.pushUndo(before)
-        try syncRendererState()
+        try applyStateHistory(store.deleteSelection())
     }
 
     public func duplicateSelection() async throws {
@@ -620,38 +653,40 @@ public actor SplatEditor {
         let changedIndices = store.duplicateSelection()
         guard !changedIndices.isEmpty else { return }
 
-        await history.pushUndo(before)
+        pushHistory(.snapshot(before))
+        previewTransform = nil
         try renderer.replaceAllSplats(with: store.points)
-        try syncRendererState()
+        previewTransformIndices = Array(repeating: 0, count: store.points.count)
+        previewTransformTouchedIndices = []
+        transformPalette[1] = matrix_identity_float4x4
+        try replaceRendererState()
     }
 
     public func separateSelection() async throws {
         let before = store.snapshot
         guard store.separateSelection() else { return }
 
-        await history.pushUndo(before)
+        pushHistory(.snapshot(before))
+        previewTransform = nil
         try renderer.replaceAllSplats(with: store.points)
-        try syncRendererState()
+        previewTransformIndices = Array(repeating: 0, count: store.points.count)
+        previewTransformTouchedIndices = []
+        transformPalette[1] = matrix_identity_float4x4
+        try replaceRendererState()
     }
 
     public func undo() async throws {
-        guard let previous = await history.popUndo(current: store.snapshot) else { return }
-        store.restore(previous)
-        previewTransform = nil
-        previewTransformIndices = Array(repeating: 0, count: store.points.count)
-        transformPalette[1] = matrix_identity_float4x4
-        try renderer.replaceAllSplats(with: store.points)
-        try syncRendererState()
+        guard let entry = undoStack.popLast() else { return }
+        try clearPreviewTransformState()
+        try applyHistoryEntry(entry, useNewValues: false)
+        redoStack.append(entry)
     }
 
     public func redo() async throws {
-        guard let next = await history.popRedo(current: store.snapshot) else { return }
-        store.restore(next)
-        previewTransform = nil
-        previewTransformIndices = Array(repeating: 0, count: store.points.count)
-        transformPalette[1] = matrix_identity_float4x4
-        try renderer.replaceAllSplats(with: store.points)
-        try syncRendererState()
+        guard let entry = redoStack.popLast() else { return }
+        try clearPreviewTransformState()
+        try applyHistoryEntry(entry, useNewValues: true)
+        undoStack.append(entry)
     }
 
     public func exportVisiblePoints() async throws -> [SplatScenePoint] {
@@ -672,15 +707,13 @@ public actor SplatEditor {
             viewport: viewport
         ) else { return }
 
-        let before = store.snapshot
         let selected = store.floodFillIndices(
             seedIndex: seedIndex,
             threshold: threshold,
             viewport: viewport
         )
-        store.applySelection(indices: selected, mode: mode)
-        await history.pushUndo(before)
-        try syncRendererState()
+        let changes = store.applySelection(indices: selected, mode: mode)
+        try applyStateHistory(changes)
     }
 
     public func selectColorMatch(normalized: SIMD2<Float>,
@@ -693,11 +726,9 @@ public actor SplatEditor {
             viewport: viewport
         ) else { return }
 
-        let before = store.snapshot
         let selected = store.colorMatchIndices(referenceIndex: referenceIndex, threshold: threshold)
-        store.applySelection(indices: selected, mode: mode)
-        await history.pushUndo(before)
-        try syncRendererState()
+        let changes = store.applySelection(indices: selected, mode: mode)
+        try applyStateHistory(changes)
     }
 
     public func pickPoint(normalized: SIMD2<Float>,
@@ -712,54 +743,81 @@ public actor SplatEditor {
         return store.points[nearestIndex]
     }
 
-    private func syncRendererState() throws {
+    private func replaceRendererState() throws {
         let rawStates = store.states.map(\.rawValue)
-        try renderer.updateEditingState(
+        try renderer.replaceEditingState(
             rawStates,
             transformIndices: previewTransformIndices,
             transformPalette: transformPalette
         )
     }
 
-    private func projectedDistanceSquared(point: SplatScenePoint,
-                                          target: SIMD2<Float>,
-                                          viewport: SplatRenderer.ViewportDescriptor) -> Float {
-        let clip = viewport.projectionMatrix * viewport.viewMatrix * SIMD4<Float>(point.position, 1)
-        guard abs(clip.w) > .ulpOfOne else { return .greatestFiniteMagnitude }
+    private func pushHistory(_ entry: SplatEditHistoryEntry) {
+        undoStack.append(entry)
+        redoStack.removeAll(keepingCapacity: true)
+    }
 
-        let ndc = clip / clip.w
-        let normalized = SIMD2<Float>(
-            (ndc.x + 1) * 0.5,
-            1 - ((ndc.y + 1) * 0.5)
-        )
-        let delta = normalized - target
-        return simd_dot(delta, delta)
+    private func applyStateHistory(_ changes: [EditableSplatStateChange]) throws {
+        guard !changes.isEmpty else { return }
+        pushHistory(.states(changes))
+        try renderer.updateEditStates(at: changes.map(\.index), values: changes.map(\.newState.rawValue))
+    }
+
+    private func applyPointHistory(_ changes: [EditableSplatPointChange]) throws {
+        guard !changes.isEmpty else { return }
+        pushHistory(.points(changes))
+        try renderer.updateSplats(store.points, at: changes.map(\.index))
+    }
+
+    private func applyHistoryEntry(_ entry: SplatEditHistoryEntry, useNewValues: Bool) throws {
+        switch entry {
+        case .states(let changes):
+            store.applyStateChanges(changes, useNewValues: useNewValues)
+            let values = useNewValues ? changes.map(\.newState.rawValue) : changes.map(\.oldState.rawValue)
+            try renderer.updateEditStates(at: changes.map(\.index), values: values)
+        case .points(let changes):
+            store.applyPointChanges(changes, useNewValues: useNewValues)
+            try renderer.updateSplats(store.points, at: changes.map(\.index))
+        case .snapshot(let snapshot):
+            store.restore(snapshot)
+            previewTransform = nil
+            previewTransformIndices = Array(repeating: 0, count: store.points.count)
+            previewTransformTouchedIndices = []
+            transformPalette[1] = matrix_identity_float4x4
+            try renderer.replaceAllSplats(with: store.points)
+            try replaceRendererState()
+        }
+    }
+
+    private func clearPreviewTransformState() throws {
+        guard previewTransform != nil || !previewTransformTouchedIndices.isEmpty else { return }
+
+        previewTransform = nil
+        transformPalette[1] = matrix_identity_float4x4
+
+        if !previewTransformTouchedIndices.isEmpty {
+            for index in previewTransformTouchedIndices {
+                previewTransformIndices[index] = 0
+            }
+            let values = Array(repeating: UInt32(0), count: previewTransformTouchedIndices.count)
+            try renderer.updateTransformIndices(at: previewTransformTouchedIndices, values: values)
+        }
+
+        previewTransformTouchedIndices.removeAll(keepingCapacity: true)
+        try renderer.updateTransformPalette(transformPalette)
+        try renderer.setPreviewTransformActive(false)
+        renderer.endInteraction()
     }
 
     private func pickNearestIndex(normalized: SIMD2<Float>,
                                   radius: Float,
                                   viewport: SplatRenderer.ViewportDescriptor) async throws -> Int? {
-        let indices = try await selectionEngine.select(
-            query: .point(normalized: normalized, radius: radius),
+        try await selectionEngine.pickNearest(
+            normalized: normalized,
+            radius: radius,
             viewport: viewport,
             renderer: renderer
         )
-
-        guard !indices.isEmpty else { return nil }
-
-        return indices.min { lhs, rhs in
-            let lhsDistance = projectedDistanceSquared(
-                point: store.points[lhs],
-                target: normalized,
-                viewport: viewport
-            )
-            let rhsDistance = projectedDistanceSquared(
-                point: store.points[rhs],
-                target: normalized,
-                viewport: viewport
-            )
-            return lhsDistance < rhsDistance
-        }
     }
 }
 

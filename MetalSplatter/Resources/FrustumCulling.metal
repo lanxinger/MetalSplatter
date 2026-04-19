@@ -17,7 +17,8 @@ kernel void frustumCullSplats(uint index [[thread_position_in_grid]],
                              device uint* visibleIndices [[ buffer(1) ]],
                              device atomic_uint* visibleCount [[ buffer(2) ]],
                              constant FrustumCullData& cullData [[ buffer(3) ]],
-                             constant uint& splatCount [[ buffer(4) ]]) {
+                             const device uint *editStates [[ buffer(4) ]],
+                             constant uint& splatCount [[ buffer(5) ]]) {
     // Note: visibleIndices buffer must be at least splatCount elements (all could be visible)
 
     // Threadgroup memory for visible indices batching
@@ -36,10 +37,16 @@ kernel void frustumCullSplats(uint index [[thread_position_in_grid]],
     bool visible = false;
 
     if (inBounds) {
+        visible = true;
+        if (editStates != nullptr) {
+            uint editState = editStates[index];
+            if ((editState & ((1u << 1) | (1u << 3))) != 0u) {
+                visible = false;
+            }
+        }
+
         // Load splat position
         float3 splatPos = float3(inputSplats[index].position);
-
-        visible = true;
 
         // Distance culling (optional, skip if maxDistance is very large)
         if (cullData.maxDistance < 10000.0) {

@@ -50,11 +50,18 @@ void countingSortHistogram(
     constant float3& cameraForward [[buffer(4)]],
     constant bool& sortByDistance [[buffer(5)]],
     device ushort* cachedBins [[buffer(6)]],  // NEW: Cache bin indices (ushort saves memory vs uint)
+    const device uint *editStates [[buffer(7)]],
     uint tid [[thread_position_in_grid]],
     uint threadCount [[threads_per_grid]]
 ) {
     // Each thread processes multiple splats for better efficiency
     for (uint i = tid; i < params.splatCount; i += threadCount) {
+        if (editStates != nullptr) {
+            uint editState = editStates[i];
+            if ((editState & ((1u << 1) | (1u << 3))) != 0u) {
+                continue;
+            }
+        }
         float3 splatPos = float3(splats[i].position);
 
         float depth;
@@ -93,10 +100,17 @@ void countingSortHistogramWeighted(
     constant bool& sortByDistance [[buffer(5)]],
     device ushort* cachedBins [[buffer(6)]],
     constant CameraRelativeBinParams& binParams [[buffer(7)]],
+    const device uint *editStates [[buffer(8)]],
     uint tid [[thread_position_in_grid]],
     uint threadCount [[threads_per_grid]]
 ) {
     for (uint i = tid; i < params.splatCount; i += threadCount) {
+        if (editStates != nullptr) {
+            uint editState = editStates[i];
+            if ((editState & ((1u << 1) | (1u << 3))) != 0u) {
+                continue;
+            }
+        }
         float3 splatPos = float3(splats[i].position);
 
         float depth;
@@ -337,10 +351,17 @@ void countingSortScatter(
     device atomic_uint* binOffsets [[buffer(1)]],   // Current write position per bin (initialized from prefix sum)
     device int32_t* sortedIndices [[buffer(2)]],
     constant CountingSortParams& params [[buffer(3)]],
+    const device uint *editStates [[buffer(4)]],
     uint tid [[thread_position_in_grid]],
     uint threadCount [[threads_per_grid]]
 ) {
     for (uint i = tid; i < params.splatCount; i += threadCount) {
+        if (editStates != nullptr) {
+            uint editState = editStates[i];
+            if ((editState & ((1u << 1) | (1u << 3))) != 0u) {
+                continue;
+            }
+        }
         // Use cached bin index - no depth calculation needed!
         uint bin = uint(cachedBins[i]);
 

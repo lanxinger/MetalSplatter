@@ -14,11 +14,20 @@
 kernel void computeSplatDistances(uint index [[thread_position_in_grid]],
                                   constant Splat* splatArray [[buffer(0)]],
                                   device float* distances [[buffer(1)]],
-                                  constant float3& cameraPosition [[buffer(2)]],
-                                  constant float3& cameraForward [[buffer(3)]],
-                                  constant bool& sortByDistance [[buffer(4)]],
-                                  constant uint& splatCount [[buffer(5)]]) {
+                                  const device uint *editStates [[buffer(2)]],
+                                  constant float3& cameraPosition [[buffer(3)]],
+                                  constant float3& cameraForward [[buffer(4)]],
+                                  constant bool& sortByDistance [[buffer(5)]],
+                                  constant uint& splatCount [[buffer(6)]]) {
     if (index >= splatCount) return;
+
+    if (editStates != nullptr) {
+        uint editState = editStates[index];
+        if ((editState & ((1u << 1) | (1u << 3))) != 0u) {
+            distances[index] = -INFINITY;
+            return;
+        }
+    }
 
     // Direct coalesced read - GPU L2 cache handles this efficiently
     float3 splatPos = float3(splatArray[index].position);
@@ -38,10 +47,11 @@ kernel void computeSplatDistancesWithCaching(uint index [[thread_position_in_gri
                                              uint tid [[thread_index_in_threadgroup]],
                                              constant Splat* splatArray [[buffer(0)]],
                                              device float* distances [[buffer(1)]],
-                                             constant float3& cameraPosition [[buffer(2)]],
-                                             constant float3& cameraForward [[buffer(3)]],
-                                             constant bool& sortByDistance [[buffer(4)]],
-                                             constant uint& splatCount [[buffer(5)]]) {
+                                             const device uint *editStates [[buffer(2)]],
+                                             constant float3& cameraPosition [[buffer(3)]],
+                                             constant float3& cameraForward [[buffer(4)]],
+                                             constant bool& sortByDistance [[buffer(5)]],
+                                             constant uint& splatCount [[buffer(6)]]) {
     // Threadgroup memory for position caching
     threadgroup float3 positions[256];
 
@@ -52,6 +62,14 @@ kernel void computeSplatDistancesWithCaching(uint index [[thread_position_in_gri
     threadgroup_barrier(mem_flags::mem_threadgroup);
 
     if (index < splatCount) {
+        if (editStates != nullptr) {
+            uint editState = editStates[index];
+            if ((editState & ((1u << 1) | (1u << 3))) != 0u) {
+                distances[index] = -INFINITY;
+                return;
+            }
+        }
+
         float3 splatPos = positions[tid];
         float3 delta = splatPos - cameraPosition;
 
