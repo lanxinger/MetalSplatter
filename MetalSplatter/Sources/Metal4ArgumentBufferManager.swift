@@ -25,6 +25,8 @@ public class Metal4ArgumentBufferManager {
     // Resource management
     private var splatBuffers: [MTLBuffer] = []
     private var uniformBuffers: [MTLBuffer] = []
+    private var boundSplatBufferIDs: [Int: ObjectIdentifier] = [:]
+    private var boundUniformBufferIDs: [Int: ObjectIdentifier] = [:]
     private var trackedAllocations: Set<ObjectIdentifier> = []
     private var queuesWithAttachedResidencySet: Set<ObjectIdentifier> = []
     private let lock = NSLock()
@@ -103,16 +105,20 @@ public class Metal4ArgumentBufferManager {
         lock.lock()
         defer { lock.unlock() }
 
-        // Use real Metal API to encode buffer into argument buffer
-        encoder.setArgumentBuffer(argBuffer, offset: 0)
-        encoder.setBuffer(buffer, offset: 0, index: index)
+        let bufferID = ObjectIdentifier(buffer)
+
+        if boundSplatBufferIDs[index] != bufferID {
+            // Use real Metal API to encode buffer into argument buffer only when the binding changed.
+            encoder.setArgumentBuffer(argBuffer, offset: 0)
+            encoder.setBuffer(buffer, offset: 0, index: index)
+            boundSplatBufferIDs[index] = bufferID
+            Self.log.debug("Registered splat buffer at index \(index) using real MTLArgumentEncoder")
+        }
 
         if !splatBuffers.contains(where: { $0 === buffer }) {
             splatBuffers.append(buffer)
         }
         registerAllocationIfNeeded(buffer)
-
-        Self.log.debug("Registered splat buffer at index \(index) using real MTLArgumentEncoder")
     }
 
     public func registerUniformBuffer(_ buffer: MTLBuffer, at index: Int = 1) throws {
@@ -124,15 +130,19 @@ public class Metal4ArgumentBufferManager {
         lock.lock()
         defer { lock.unlock() }
 
-        encoder.setArgumentBuffer(argBuffer, offset: 0)
-        encoder.setBuffer(buffer, offset: 0, index: index)
+        let bufferID = ObjectIdentifier(buffer)
+
+        if boundUniformBufferIDs[index] != bufferID {
+            encoder.setArgumentBuffer(argBuffer, offset: 0)
+            encoder.setBuffer(buffer, offset: 0, index: index)
+            boundUniformBufferIDs[index] = bufferID
+            Self.log.debug("Registered uniform buffer at index \(index)")
+        }
 
         if !uniformBuffers.contains(where: { $0 === buffer }) {
             uniformBuffers.append(buffer)
         }
         registerAllocationIfNeeded(buffer)
-
-        Self.log.debug("Registered uniform buffer at index \(index)")
     }
 
     public func registerAdditionalBuffer(_ buffer: MTLBuffer) {

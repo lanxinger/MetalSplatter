@@ -923,6 +923,8 @@ class MetalKitSceneRenderer: NSObject, MTKViewDelegate {
     /// This tests the GPU SIMD-group parallel bounds computation
     func setDebugAABB(_ enabled: Bool) {
         if let splat = modelRenderer as? SplatRenderer {
+            let wasEnabled = splat.debugOptions.contains(.showAABB)
+            guard wasEnabled != enabled else { return }
             if enabled {
                 splat.debugOptions.insert(.showAABB)
             } else {
@@ -943,6 +945,7 @@ class MetalKitSceneRenderer: NSObject, MTKViewDelegate {
     /// When enabled, splats outside the camera's view frustum are filtered out before rendering
     func setFrustumCulling(_ enabled: Bool) {
         if let splat = modelRenderer as? SplatRenderer {
+            guard splat.frustumCullingEnabled != enabled else { return }
             splat.frustumCullingEnabled = enabled
             Self.log.info("Frustum culling \(enabled ? "enabled" : "disabled")")
         }
@@ -963,6 +966,7 @@ class MetalKitSceneRenderer: NSObject, MTKViewDelegate {
                 Self.log.info("Mesh shaders not supported on this device")
                 return
             }
+            guard splat.meshShaderEnabled != enabled else { return }
             splat.meshShaderEnabled = enabled
             if enabled {
                 Self.log.info("Mesh shader rendering enabled - geometry generated on GPU")
@@ -984,6 +988,7 @@ class MetalKitSceneRenderer: NSObject, MTKViewDelegate {
     /// Best for large scenes (50k+ splats) where camera movement is intermittent
     func setBatchPrecompute(_ enabled: Bool) {
         if let splat = modelRenderer as? SplatRenderer {
+            guard splat.batchPrecomputeEnabled != enabled else { return }
             splat.batchPrecomputeEnabled = enabled
             if enabled {
                 Self.log.info("Metal 4 TensorOps batch precompute enabled")
@@ -1005,6 +1010,7 @@ class MetalKitSceneRenderer: NSObject, MTKViewDelegate {
     /// Best paired with TAA for noise reduction - eliminates need for depth sorting
     func setDitheredTransparency(_ enabled: Bool) {
         if let splat = modelRenderer as? SplatRenderer {
+            guard splat.useDitheredTransparency != enabled else { return }
             splat.useDitheredTransparency = enabled
             // Dithered transparency requires single-stage pipeline, which is only used when
             // highQualityDepth is false. Multi-stage pipeline (used with highQualityDepth=true)
@@ -1029,6 +1035,7 @@ class MetalKitSceneRenderer: NSObject, MTKViewDelegate {
     /// When disabled, only base color is used - significant performance gain but no view-dependent lighting
     func setSHRendering(_ enabled: Bool) {
         if let fastSH = modelRenderer as? FastSHSplatRenderer {
+            guard fastSH.shRenderingEnabled != enabled else { return }
             fastSH.shRenderingEnabled = enabled
             if enabled {
                 Self.log.info("SH rendering enabled - view-dependent lighting active")
@@ -1050,6 +1057,7 @@ class MetalKitSceneRenderer: NSObject, MTKViewDelegate {
     /// Best for very large scenes (>100K splats) where GPU parallelism outweighs multi-pass overhead
     func setMetal4Sorting(_ enabled: Bool) {
         if let splat = modelRenderer as? SplatRenderer {
+            guard splat.useMetal4Sorting != enabled else { return }
             splat.useMetal4Sorting = enabled
             if enabled {
                 Self.log.info("Metal 4 GPU radix sorting enabled (>100K splat threshold)")
@@ -1091,6 +1099,7 @@ class MetalKitSceneRenderer: NSObject, MTKViewDelegate {
     /// - linear: Better for translation-heavy movement (walking through scene)
     func setSortingMode(_ mode: SplatRenderer.SortingMode) {
         if let splat = modelRenderer as? SplatRenderer {
+            guard splat.sortingMode != mode else { return }
             splat.sortingMode = mode
             switch mode {
             case .auto:
@@ -1115,6 +1124,7 @@ class MetalKitSceneRenderer: NSObject, MTKViewDelegate {
     /// Best for scenes trained with 2D Gaussian Splatting (flat/planar splats).
     func set2DGSMode(_ enabled: Bool) {
         if let splat = modelRenderer as? SplatRenderer {
+            guard splat.use2DGSMode != enabled else { return }
             splat.use2DGSMode = enabled
             if enabled {
                 Self.log.info("2DGS mode enabled - oriented splats with normal extraction")
