@@ -1515,6 +1515,11 @@ struct MetalKitRendererView: ViewRepresentable {
         private let targetFrameTime: TimeInterval = 1.0 / 60.0
         private let minRenderScale: CGFloat = 0.55
         private let maxRenderScale: CGFloat = 1.0
+        private let interactionRenderScaleFloor: CGFloat = 0.55
+        private let interactionRenderScaleRestoreDelay: TimeInterval = 0.20
+        private var activeCameraInteractionCount = 0
+        private var temporaryInteractionRenderScale: CGFloat?
+        private var restoreInteractionRenderScaleWorkItem: DispatchWorkItem?
 #endif
         
         init(_ parent: MetalKitRendererView) {
@@ -1548,7 +1553,7 @@ struct MetalKitRendererView: ViewRepresentable {
             }
 
 #if os(iOS)
-            renderer?.setInternalRenderScale(parent.renderScale)
+            renderer?.setInternalRenderScale(effectiveRenderScale)
 #endif
             parent.editingController.attach(renderer: renderer)
         }
@@ -1583,6 +1588,47 @@ struct MetalKitRendererView: ViewRepresentable {
         }
         
 #if os(iOS)
+        fileprivate var effectiveRenderScale: CGFloat {
+            temporaryInteractionRenderScale ?? parent.renderScale
+        }
+
+        @MainActor
+        private func beginCameraInteraction() {
+            restoreInteractionRenderScaleWorkItem?.cancel()
+            restoreInteractionRenderScaleWorkItem = nil
+            activeCameraInteractionCount += 1
+
+            guard activeCameraInteractionCount == 1 else { return }
+
+            let baseScale = max(minRenderScale, min(parent.renderScale, maxRenderScale))
+            let reducedScale = max(
+                interactionRenderScaleFloor,
+                min(baseScale * 0.85, baseScale - 0.08)
+            )
+            guard reducedScale < baseScale - 0.005 else { return }
+
+            temporaryInteractionRenderScale = reducedScale
+            renderer?.setInternalRenderScale(reducedScale)
+        }
+
+        @MainActor
+        private func endCameraInteraction() {
+            activeCameraInteractionCount = max(0, activeCameraInteractionCount - 1)
+            guard activeCameraInteractionCount == 0 else { return }
+
+            restoreInteractionRenderScaleWorkItem?.cancel()
+
+            let workItem = DispatchWorkItem { [weak self] in
+                guard let self else { return }
+                guard self.activeCameraInteractionCount == 0 else { return }
+                self.temporaryInteractionRenderScale = nil
+                self.renderer?.setInternalRenderScale(self.parent.renderScale)
+            }
+            restoreInteractionRenderScaleWorkItem = workItem
+            DispatchQueue.main.asyncAfter(deadline: .now() + interactionRenderScaleRestoreDelay,
+                                          execute: workItem)
+        }
+
         @MainActor
         func configureAdaptiveRenderScale() {
             guard parent.adaptiveRenderScaleEnabled else {
@@ -1705,7 +1751,7 @@ struct MetalKitRendererView: ViewRepresentable {
         )
 
 #if os(iOS)
-        renderer?.setInternalRenderScale(renderScale)
+        renderer?.setInternalRenderScale(coordinator.effectiveRenderScale)
         coordinator.configureAdaptiveRenderScale()
 #endif
 
@@ -1886,8 +1932,9 @@ struct MetalKitRendererView: ViewRepresentable {
             }
 
             // --- Call endUserInteraction on gesture end ---
-            if gesture.state == .ended || gesture.state == .cancelled {
+            if gesture.state == .ended || gesture.state == .cancelled || gesture.state == .failed {
                 renderer.endUserInteraction()
+                endCameraInteraction()
                 lastPanLocation = nil // Reset last location
                 // Clear associated objects used for tracking state during the pan
                 objc_setAssociatedObject(self, &MetalKitRendererView.Coordinator.verticalRotationKey, nil, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
@@ -1901,6 +1948,7 @@ struct MetalKitRendererView: ViewRepresentable {
                 // ROTATION (single finger)
                 switch gesture.state {
                 case .began:
+                    beginCameraInteraction()
                     lastPanLocation = location
                     lastRotation = renderer.rotation
                     let vert = renderer.verticalRotation
@@ -1923,6 +1971,7 @@ struct MetalKitRendererView: ViewRepresentable {
                 // PANNING (two fingers)
                 switch gesture.state {
                 case .began:
+                    beginCameraInteraction()
                     let initial = renderer.translation
                     objc_setAssociatedObject(self, &MetalKitRendererView.Coordinator.pan2TranslationKey, initial, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
                 case .changed:
@@ -1973,14 +2022,16 @@ struct MetalKitRendererView: ViewRepresentable {
             }
 
             // --- Call endUserInteraction on gesture end ---
-            if gesture.state == .ended || gesture.state == .cancelled {
+            if gesture.state == .ended || gesture.state == .cancelled || gesture.state == .failed {
                 renderer.endUserInteraction()
+                endCameraInteraction()
                 return // Don't process further if ended/cancelled
             }
             // --- End change ---
 
             switch gesture.state {
             case .began:
+                beginCameraInteraction()
                 zoom = renderer.zoom
             case .changed:
                 let newZoom = max(0.1, min(zoom * Float(gesture.scale), 20.0))
@@ -2024,14 +2075,16 @@ struct MetalKitRendererView: ViewRepresentable {
             }
 
             // --- Call endUserInteraction on gesture end ---
-            if gesture.state == .ended || gesture.state == .cancelled {
+            if gesture.state == .ended || gesture.state == .cancelled || gesture.state == .failed {
                 renderer.endUserInteraction()
+                endCameraInteraction()
                 return // Don't process further if ended/cancelled
             }
             // --- End change ---
 
             switch gesture.state {
             case .began:
+                beginCameraInteraction()
                 lastRollRotation = renderer.rollRotation
             case .changed:
                 let newRollRotation = lastRollRotation - Float(gesture.rotation)
