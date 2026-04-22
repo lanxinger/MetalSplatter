@@ -190,8 +190,17 @@ struct ContentView: View {
         guard !didAttemptStartupSceneLoad else { return }
         didAttemptStartupSceneLoad = true
 
+        let arguments = CommandLine.arguments
+        let startupPathFromArguments: String? = {
+            guard let index = arguments.firstIndex(of: "--startup-scene-path"),
+                  arguments.indices.contains(arguments.index(after: index)) else {
+                return nil
+            }
+            return arguments[arguments.index(after: index)]
+        }()
+
         let environment = ProcessInfo.processInfo.environment
-        guard let startupPath = environment["METALSPLATTER_STARTUP_SCENE_PATH"],
+        guard let startupPath = startupPathFromArguments ?? environment["METALSPLATTER_STARTUP_SCENE_PATH"],
               !startupPath.isEmpty else { return }
 
         let startupURL = URL(fileURLWithPath: startupPath)

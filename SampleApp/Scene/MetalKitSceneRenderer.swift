@@ -90,9 +90,94 @@ class MetalKitSceneRenderer: NSObject, MTKViewDelegate {
         var isEnabled: Bool { logInterval > 0 }
     }
 
+    private struct InteractionBenchmarkConfiguration {
+        let targetZoom: Float
+        let interactionWarmupFrames: Int
+        let interactionSampleFrames: Int
+        let settledWarmupFrames: Int
+        let settledSampleFrames: Int
+        let outputPath: String?
+
+        static var current: InteractionBenchmarkConfiguration? {
+            let arguments = CommandLine.arguments
+
+            func value(after flag: String) -> String? {
+                guard let index = arguments.firstIndex(of: flag),
+                      arguments.indices.contains(arguments.index(after: index)) else {
+                    return nil
+                }
+                return arguments[arguments.index(after: index)]
+            }
+
+            guard let zoomValue = value(after: "--interaction-benchmark-zoom"),
+                  let targetZoom = Float(zoomValue) else {
+                return nil
+            }
+
+            let interactionWarmupFrames = Int(value(after: "--interaction-benchmark-warmup-frames") ?? "") ?? 15
+            let interactionSampleFrames = Int(value(after: "--interaction-benchmark-sample-frames") ?? "") ?? 45
+            let settledWarmupFrames = Int(value(after: "--interaction-benchmark-settle-warmup-frames") ?? "") ?? 20
+            let settledSampleFrames = Int(value(after: "--interaction-benchmark-settle-sample-frames") ?? "") ?? 45
+            let defaultOutputPath = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)
+                .first?
+                .appendingPathComponent("interaction-benchmark.txt")
+                .path
+
+            return InteractionBenchmarkConfiguration(
+                targetZoom: max(0.1, targetZoom),
+                interactionWarmupFrames: max(0, interactionWarmupFrames),
+                interactionSampleFrames: max(1, interactionSampleFrames),
+                settledWarmupFrames: max(0, settledWarmupFrames),
+                settledSampleFrames: max(1, settledSampleFrames),
+                outputPath: value(after: "--interaction-benchmark-output") ?? defaultOutputPath
+            )
+        }
+    }
+
+    private struct InteractionBenchmarkAccumulator {
+        var frameCount = 0
+        var totalFrameTime: TimeInterval = 0
+        var totalSortTime: TimeInterval = 0
+        var lastSplatCount = 0
+
+        mutating func record(_ stats: SplatRenderer.FrameStatistics) {
+            frameCount += 1
+            totalFrameTime += stats.frameTime
+            totalSortTime += stats.sortDuration ?? 0
+            lastSplatCount = stats.splatCount
+        }
+
+        func result() -> InteractionBenchmarkResult {
+            let sampleCount = max(frameCount, 1)
+            return InteractionBenchmarkResult(
+                sampleCount: frameCount,
+                averageFrameMs: totalFrameTime / Double(sampleCount) * 1000,
+                averageSortMs: totalSortTime / Double(sampleCount) * 1000,
+                splatCount: lastSplatCount
+            )
+        }
+    }
+
+    private struct InteractionBenchmarkResult {
+        let sampleCount: Int
+        let averageFrameMs: Double
+        let averageSortMs: Double
+        let splatCount: Int
+    }
+
+    private enum InteractionBenchmarkPhase {
+        case interactionWarmup(remainingFrames: Int)
+        case interactionMeasure(InteractionBenchmarkAccumulator)
+        case settledWarmup(remainingFrames: Int, interactionResult: InteractionBenchmarkResult)
+        case settledMeasure(InteractionBenchmarkAccumulator, interactionResult: InteractionBenchmarkResult)
+        case completed
+    }
+
     private let profilingConfiguration = ProfilingConfiguration.current
+    private let interactionBenchmarkConfiguration = InteractionBenchmarkConfiguration.current
     private var profiledFrameSampleCount = 0
     private var profiledFrameTimeAccumulator: TimeInterval = 0
+    private var interactionBenchmarkPhase: InteractionBenchmarkPhase?
 
     let inFlightSemaphore = DispatchSemaphore(value: Constants.maxSimultaneousRenders)
 
@@ -202,6 +287,7 @@ class MetalKitSceneRenderer: NSObject, MTKViewDelegate {
         currentLoadID = loadID
         metal4BindlessAttemptedLoadID = nil
         meshShaderCapabilityCheckedLoadID = nil
+        interactionBenchmarkPhase = nil
 
         modelRenderer = nil
         splatEditor = nil
@@ -310,6 +396,7 @@ class MetalKitSceneRenderer: NSObject, MTKViewDelegate {
             if autoFitEnabled {
                 await optimizeViewportForModel(splat)
             }
+            beginInteractionBenchmarkIfNeeded()
         case .sampleBox:
             do {
                 modelRenderer = try SampleBoxRenderer(device: device,
@@ -811,7 +898,11 @@ class MetalKitSceneRenderer: NSObject, MTKViewDelegate {
     private func updateFrameTimeBridge() {
         guard let splat = modelRenderer as? SplatRenderer else { return }
         let frameTimeCallback = onFrameTimeUpdate
-        guard frameTimeCallback != nil || profilingConfiguration.isEnabled else {
+        let interactionBenchmarkActive =
+            interactionBenchmarkConfiguration != nil && interactionBenchmarkPhase != .completed
+        guard frameTimeCallback != nil
+                || profilingConfiguration.isEnabled
+                || interactionBenchmarkActive else {
             splat.onFrameReady = nil
             return
         }
@@ -830,6 +921,8 @@ class MetalKitSceneRenderer: NSObject, MTKViewDelegate {
     }
 
     private func recordProfilingSample(_ stats: SplatRenderer.FrameStatistics) {
+        recordInteractionBenchmarkSample(stats)
+
         guard profilingConfiguration.isEnabled else { return }
 
         profiledFrameSampleCount += 1
@@ -848,6 +941,117 @@ class MetalKitSceneRenderer: NSObject, MTKViewDelegate {
 
         profiledFrameSampleCount = 0
         profiledFrameTimeAccumulator = 0
+    }
+
+    private func beginInteractionBenchmarkIfNeeded() {
+        guard let configuration = interactionBenchmarkConfiguration else { return }
+        guard modelRenderer is SplatRenderer else { return }
+        guard interactionBenchmarkPhase == nil else { return }
+
+        interactionBenchmarkPhase = .interactionWarmup(remainingFrames: configuration.interactionWarmupFrames)
+        resetInteractionBenchmarkOutputIfNeeded()
+        emitInteractionBenchmarkLog(
+            "BENCHMARK start zoom=\(String(format: "%.2f", configuration.targetZoom)) interactionWarmupFrames=\(configuration.interactionWarmupFrames) interactionSampleFrames=\(configuration.interactionSampleFrames) settledWarmupFrames=\(configuration.settledWarmupFrames) settledSampleFrames=\(configuration.settledSampleFrames)"
+        )
+        setUserZoom(configuration.targetZoom)
+        requestRedraw()
+    }
+
+    private func recordInteractionBenchmarkSample(_ stats: SplatRenderer.FrameStatistics) {
+        guard let configuration = interactionBenchmarkConfiguration,
+              let phase = interactionBenchmarkPhase else { return }
+
+        switch phase {
+        case .interactionWarmup(let remainingFrames):
+            if remainingFrames > 0 {
+                interactionBenchmarkPhase = .interactionWarmup(remainingFrames: remainingFrames - 1)
+                return
+            }
+
+            interactionBenchmarkPhase = .interactionMeasure(InteractionBenchmarkAccumulator())
+            emitInteractionBenchmarkLog("BENCHMARK phase=interaction status=measuring")
+
+        case .interactionMeasure(var accumulator):
+            accumulator.record(stats)
+            if accumulator.frameCount < configuration.interactionSampleFrames {
+                interactionBenchmarkPhase = .interactionMeasure(accumulator)
+                return
+            }
+
+            let interactionResult = accumulator.result()
+            emitInteractionBenchmarkLog(
+                "BENCHMARK phase=interaction avgFrameMs=\(String(format: "%.2f", interactionResult.averageFrameMs)) avgSortMs=\(String(format: "%.2f", interactionResult.averageSortMs)) samples=\(interactionResult.sampleCount) splats=\(interactionResult.splatCount)"
+            )
+            endUserInteraction()
+            lastRotationUpdateTimestamp = nil
+            interactionBenchmarkPhase = .settledWarmup(
+                remainingFrames: configuration.settledWarmupFrames,
+                interactionResult: interactionResult
+            )
+            requestRedraw()
+
+        case .settledWarmup(let remainingFrames, let interactionResult):
+            if remainingFrames > 0 {
+                interactionBenchmarkPhase = .settledWarmup(
+                    remainingFrames: remainingFrames - 1,
+                    interactionResult: interactionResult
+                )
+                return
+            }
+
+            interactionBenchmarkPhase = .settledMeasure(
+                InteractionBenchmarkAccumulator(),
+                interactionResult: interactionResult
+            )
+            emitInteractionBenchmarkLog("BENCHMARK phase=settled status=measuring")
+
+        case .settledMeasure(var accumulator, let interactionResult):
+            accumulator.record(stats)
+            if accumulator.frameCount < configuration.settledSampleFrames {
+                interactionBenchmarkPhase = .settledMeasure(accumulator, interactionResult: interactionResult)
+                return
+            }
+
+            let settledResult = accumulator.result()
+            let savingsMs = settledResult.averageFrameMs - interactionResult.averageFrameMs
+            let savingsPercent = settledResult.averageFrameMs > 0
+                ? savingsMs / settledResult.averageFrameMs * 100
+                : 0
+            emitInteractionBenchmarkLog(
+                "BENCHMARK phase=settled avgFrameMs=\(String(format: "%.2f", settledResult.averageFrameMs)) avgSortMs=\(String(format: "%.2f", settledResult.averageSortMs)) samples=\(settledResult.sampleCount) splats=\(settledResult.splatCount)"
+            )
+            emitInteractionBenchmarkLog(
+                "BENCHMARK summary zoom=\(String(format: "%.2f", configuration.targetZoom)) interactionAvgFrameMs=\(String(format: "%.2f", interactionResult.averageFrameMs)) settledAvgFrameMs=\(String(format: "%.2f", settledResult.averageFrameMs)) frameTimeSavingsMs=\(String(format: "%.2f", savingsMs)) interactionFasterPercent=\(String(format: "%.1f", savingsPercent)) interactionAvgSortMs=\(String(format: "%.2f", interactionResult.averageSortMs)) settledAvgSortMs=\(String(format: "%.2f", settledResult.averageSortMs))"
+            )
+            interactionBenchmarkPhase = .completed
+            updateFrameTimeBridge()
+
+        case .completed:
+            return
+        }
+    }
+
+    private func resetInteractionBenchmarkOutputIfNeeded() {
+        guard let outputPath = interactionBenchmarkConfiguration?.outputPath else { return }
+        try? "".write(toFile: outputPath, atomically: true, encoding: .utf8)
+    }
+
+    private func emitInteractionBenchmarkLog(_ message: String) {
+        print(message)
+
+        guard let outputPath = interactionBenchmarkConfiguration?.outputPath else { return }
+        let outputURL = URL(fileURLWithPath: outputPath)
+        let line = "\(message)\n"
+
+        if FileManager.default.fileExists(atPath: outputURL.path),
+           let handle = try? FileHandle(forWritingTo: outputURL) {
+            defer { try? handle.close() }
+            _ = try? handle.seekToEnd()
+            try? handle.write(contentsOf: Data(line.utf8))
+            return
+        }
+
+        try? line.write(to: outputURL, atomically: true, encoding: .utf8)
     }
 
 #if os(iOS) && canImport(MetalFX)

@@ -151,6 +151,8 @@ public class SplatRenderer: @unchecked Sendable {
     private var lastVisibleCount: Int = 0
     private var lastFrustumCullCameraPosition: SIMD3<Float>?
     private var lastFrustumCullCameraForward: SIMD3<Float>?
+    private var lastFrustumCullProjectionMatrix: simd_float4x4?
+    private var currentFrustumCullProjectionMatrix: simd_float4x4?
     private var lastFrustumCullTime: CFAbsoluteTime = 0
     private var frustumCullDirtyDueToData = true
     
@@ -482,6 +484,7 @@ public class SplatRenderer: @unchecked Sendable {
     private var qualityFrustumCullPositionEpsilon: Float = 0.01
     private var qualityFrustumCullDirectionEpsilon: Float = 0.0001
     private var qualityMinimumFrustumCullInterval: TimeInterval = 0
+    private var qualityHighQualityDepth: Bool = true
     
     /// Interaction mode sort parameters (relaxed for performance)
     public var interactionSortPositionEpsilon: Float = 0.05      // 5cm during interaction
@@ -662,6 +665,8 @@ public class SplatRenderer: @unchecked Sendable {
     // Reference camera used to drive sorting (typically viewport[0])
     private var sortCameraPosition: SIMD3<Float> = .zero
     private var sortCameraForward: SIMD3<Float> = .init(x: 0, y: 0, z: -1)
+    private var currentSortViewMatrix: simd_float4x4?
+    private var lastSortedViewMatrix: simd_float4x4?
     private var lastSortedCameraPosition: SIMD3<Float>?
     private var lastSortedCameraForward: SIMD3<Float>?
     private var sortDirtyDueToData = true
@@ -2706,6 +2711,7 @@ public class SplatRenderer: @unchecked Sendable {
         qualityFrustumCullPositionEpsilon = frustumCullPositionEpsilon
         qualityFrustumCullDirectionEpsilon = frustumCullDirectionEpsilon
         qualityMinimumFrustumCullInterval = minimumFrustumCullInterval
+        qualityHighQualityDepth = highQualityDepth
 
         // Apply relaxed interaction settings
         sortPositionEpsilon = interactionSortPositionEpsilon
@@ -2714,8 +2720,9 @@ public class SplatRenderer: @unchecked Sendable {
         frustumCullPositionEpsilon = interactionFrustumCullPositionEpsilon
         frustumCullDirectionEpsilon = interactionFrustumCullDirectionEpsilon
         minimumFrustumCullInterval = interactionMinimumFrustumCullInterval
-        
-        Self.log.debug("Interaction mode started - sort thresholds relaxed")
+        highQualityDepth = false
+
+        Self.log.debug("Interaction mode started - sort thresholds relaxed, using single-stage depth path")
     }
     
     /// End interaction mode - restores quality sort parameters and triggers final sort
@@ -2733,6 +2740,7 @@ public class SplatRenderer: @unchecked Sendable {
         frustumCullPositionEpsilon = qualityFrustumCullPositionEpsilon
         frustumCullDirectionEpsilon = qualityFrustumCullDirectionEpsilon
         minimumFrustumCullInterval = qualityMinimumFrustumCullInterval
+        highQualityDepth = qualityHighQualityDepth
         
         // Schedule a final high-quality sort after a brief delay
         // This allows the last frame to render before the sort overhead kicks in
@@ -2787,9 +2795,19 @@ public class SplatRenderer: @unchecked Sendable {
         if useDitheredTransparency {
             return false
         }
+        let now = CFAbsoluteTimeGetCurrent()
+        if sortDirtyDueToData {
+            return true
+        }
+        if effectiveMinimumSortInterval > 0 && (now - lastSortTime) < effectiveMinimumSortInterval {
+            return false
+        }
+        if Self.viewMatrixAffectsSort(currentSortViewMatrix, lastSortedViewMatrix) {
+            return true
+        }
         return Self.shouldRunCameraDrivenUpdate(
-            dirty: sortDirtyDueToData,
-            now: CFAbsoluteTimeGetCurrent(),
+            dirty: false,
+            now: now,
             lastUpdateTime: lastSortTime,
             minimumInterval: effectiveMinimumSortInterval,
             currentPosition: sortCameraPosition,
@@ -2802,7 +2820,14 @@ public class SplatRenderer: @unchecked Sendable {
     }
 
     private func shouldUpdateFrustumCullingForCurrentCamera() -> Bool {
-        Self.shouldRunCameraDrivenUpdate(
+        if Self.projectionMatrixChanged(
+            currentFrustumCullProjectionMatrix,
+            lastFrustumCullProjectionMatrix
+        ) {
+            return true
+        }
+
+        return Self.shouldRunCameraDrivenUpdate(
             dirty: frustumCullDirtyDueToData,
             now: CFAbsoluteTimeGetCurrent(),
             lastUpdateTime: lastFrustumCullTime,
@@ -2841,6 +2866,42 @@ public class SplatRenderer: @unchecked Sendable {
         let positionDelta = simd_distance(currentPosition, lastPosition)
         let forwardDelta = 1 - simd_dot(simd_normalize(currentForward), simd_normalize(lastForward))
         return positionDelta > positionEpsilon || forwardDelta > directionEpsilon
+    }
+
+    private static func viewMatrixAffectsSort(
+        _ current: simd_float4x4?,
+        _ previous: simd_float4x4?,
+        positionEpsilon: Float = 0.0005,
+        forwardEpsilon: Float = 0.0001
+    ) -> Bool {
+        guard let current else { return false }
+        guard let previous else { return true }
+
+        let positionDelta = simd_length(current.columns.3 - previous.columns.3)
+        if positionDelta > positionEpsilon {
+            return true
+        }
+
+        let currentForward = simd_normalize(SIMD3<Float>(current.columns.2.x, current.columns.2.y, current.columns.2.z))
+        let previousForward = simd_normalize(SIMD3<Float>(previous.columns.2.x, previous.columns.2.y, previous.columns.2.z))
+        let forwardDelta = 1 - simd_dot(currentForward, previousForward)
+        return forwardDelta > forwardEpsilon
+    }
+
+    private static func projectionMatrixChanged(
+        _ current: simd_float4x4?,
+        _ previous: simd_float4x4?,
+        epsilon: Float = 0.001
+    ) -> Bool {
+        guard let current else { return false }
+        guard let previous else { return true }
+
+        let totalDelta =
+            simd_length(current.columns.0 - previous.columns.0) +
+            simd_length(current.columns.1 - previous.columns.1) +
+            simd_length(current.columns.2 - previous.columns.2) +
+            simd_length(current.columns.3 - previous.columns.3)
+        return totalDelta > epsilon
     }
 
     /// Determines whether spherical harmonics should be re-evaluated based on camera direction change.
@@ -2899,6 +2960,8 @@ public class SplatRenderer: @unchecked Sendable {
         cameraWorldForward = cameraForwardsTemp.mean?.normalized ?? .init(x: 0, y: 0, z: -1)
         sortCameraPosition = cameraPositionsTemp.first ?? .zero
         sortCameraForward = cameraForwardsTemp.first?.normalized ?? .init(x: 0, y: 0, z: -1)
+        currentSortViewMatrix = viewports.first?.viewMatrix
+        currentFrustumCullProjectionMatrix = viewports.first?.projectionMatrix
 
         if !isSorting && shouldResortForCurrentCamera() {
             resort()
@@ -3015,6 +3078,7 @@ public class SplatRenderer: @unchecked Sendable {
            let firstViewport = viewports.first {
             lastFrustumCullCameraPosition = sortCameraPosition
             lastFrustumCullCameraForward = sortCameraForward
+            lastFrustumCullProjectionMatrix = firstViewport.projectionMatrix
             lastFrustumCullTime = CFAbsoluteTimeGetCurrent()
             frustumCullDirtyDueToData = false
             encodeFrustumCulling(viewport: firstViewport, to: commandBuffer)
@@ -3409,6 +3473,7 @@ public class SplatRenderer: @unchecked Sendable {
         sortStartTime: CFAbsoluteTime,
         cameraWorldPosition: SIMD3<Float>,
         cameraWorldForward: SIMD3<Float>,
+        sortViewMatrix: simd_float4x4?,
         dataDirtySnapshot: UInt64,
         useGPU: Bool
     ) {
@@ -3434,6 +3499,7 @@ public class SplatRenderer: @unchecked Sendable {
             self.onSortComplete?(elapsed)
             self.lastSortedCameraPosition = cameraWorldPosition
             self.lastSortedCameraForward = cameraWorldForward
+            self.lastSortedViewMatrix = sortViewMatrix
             self.lastSortTime = CFAbsoluteTimeGetCurrent()
             if self.sortDataRevision == dataDirtySnapshot {
                 self.sortDirtyDueToData = false
@@ -3469,6 +3535,7 @@ public class SplatRenderer: @unchecked Sendable {
 
         let cameraWorldForward = sortCameraForward
         let cameraWorldPosition = sortCameraPosition
+        let sortViewMatrix = currentSortViewMatrix
         let sortStartTime = CFAbsoluteTimeGetCurrent()
 
         // Compute effective sort mode based on camera motion (auto mode tracks rotation vs translation)
@@ -3544,6 +3611,7 @@ public class SplatRenderer: @unchecked Sendable {
                                 sortStartTime: sortStartTime,
                                 cameraWorldPosition: cameraWorldPosition,
                                 cameraWorldForward: cameraWorldForward,
+                                sortViewMatrix: sortViewMatrix,
                                 dataDirtySnapshot: dataDirtySnapshot,
                                 useGPU: true
                             )
@@ -3610,6 +3678,7 @@ public class SplatRenderer: @unchecked Sendable {
                             sortStartTime: sortStartTime,
                             cameraWorldPosition: cameraWorldPosition,
                             cameraWorldForward: cameraWorldForward,
+                            sortViewMatrix: sortViewMatrix,
                             dataDirtySnapshot: dataDirtySnapshot,
                             useGPU: useGPU
                         )
@@ -3707,6 +3776,7 @@ public class SplatRenderer: @unchecked Sendable {
                             sortStartTime: sortStartTime,
                             cameraWorldPosition: cameraWorldPosition,
                             cameraWorldForward: cameraWorldForward,
+                            sortViewMatrix: sortViewMatrix,
                             dataDirtySnapshot: dataDirtySnapshot,
                             useGPU: useGPU
                         )
@@ -3766,6 +3836,7 @@ public class SplatRenderer: @unchecked Sendable {
                         sortStartTime: sortStartTime,
                         cameraWorldPosition: cameraWorldPosition,
                         cameraWorldForward: cameraWorldForward,
+                        sortViewMatrix: sortViewMatrix,
                         dataDirtySnapshot: dataDirtySnapshot,
                         useGPU: useGPU
                     )

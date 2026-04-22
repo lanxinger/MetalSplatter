@@ -31,6 +31,15 @@ struct SampleApp: App {
             }
         }
 
+        if let startupScenePathIndex = arguments.firstIndex(of: "--startup-scene-path"),
+           arguments.indices.contains(arguments.index(after: startupScenePathIndex)) {
+            let startupPath = arguments[arguments.index(after: startupScenePathIndex)]
+            let startupURL = URL(fileURLWithPath: startupPath)
+            if FileManager.default.fileExists(atPath: startupURL.path) {
+                return .gaussianSplat(startupURL)
+            }
+        }
+
         let environment = ProcessInfo.processInfo.environment
         if let bundledSceneName = environment["METALSPLATTER_BUNDLED_SCENE_NAME"],
            !bundledSceneName.isEmpty {
