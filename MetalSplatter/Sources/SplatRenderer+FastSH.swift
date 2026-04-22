@@ -32,6 +32,7 @@ extension SplatRenderer {
     struct SplatSH {
         var position: MTLPackedFloat3
         var baseColor: UInt32              // Base color (DC term) + opacity, RGBA8 unorm
+        var tintColor: SIMD4<Float>        // Animation tint/alpha multiplier in linear space
         var rotation: simd_float4          // Quaternion (x,y,z,w)
         var covA: PackedHalf3
         var covB: PackedHalf3
@@ -43,6 +44,7 @@ extension SplatRenderer {
         init(splat: Splat, rotation: simd_quatf, shIndex: UInt32 = 0, shDegree: UInt16 = 0) {
             self.position = splat.position
             self.baseColor = splat.packedColor
+            self.tintColor = SIMD4<Float>(1, 1, 1, 1)
             self.rotation = rotation.vector
             self.covA = splat.covA
             self.covB = splat.covB
@@ -90,6 +92,8 @@ public class FastSHSplatRenderer: SplatRenderer, @unchecked Sendable {
     // Extended splat buffer for SH
     private var splatSHBuffer: MetalBuffer<SplatSH>
     private var splatSHBufferPrime: MetalBuffer<SplatSH>
+    private var animatedSplatSHBuffer: MetalBuffer<SplatSH>?
+    private var lastAppliedAnimationTimeSH: Float?
     private let splatSHBufferPool: MetalBufferPool<SplatSH>
 
     private struct FastSHShaderParameters {
@@ -158,6 +162,14 @@ public class FastSHSplatRenderer: SplatRenderer, @unchecked Sendable {
             print("Failed to initialize fast SH pipeline: \(error)")
         }
     }
+
+    deinit {
+        if let animatedSplatSHBuffer {
+            splatSHBufferPool.release(animatedSplatSHBuffer)
+        }
+        splatSHBufferPool.release(splatSHBuffer)
+        splatSHBufferPool.release(splatSHBufferPrime)
+    }
     
     private func setupFastSHPipeline(library: MTLLibrary) {
         do {
@@ -198,7 +210,7 @@ public class FastSHSplatRenderer: SplatRenderer, @unchecked Sendable {
     }
     
     /// Load splats with SH coefficients support
-    public func loadSplatsWithSH(_ splats: [SplatScenePoint]) async throws {
+    private func loadSplatsWithSHSynchronously(_ splats: [SplatScenePoint]) throws {
         // Extract unique SH coefficient sets and build palette
         var uniqueSHSets: [[SIMD3<Float>]] = []
         var shSetToIndex: [[SIMD3<Float>]: UInt32] = [:]
@@ -295,8 +307,12 @@ public class FastSHSplatRenderer: SplatRenderer, @unchecked Sendable {
             splatSHBuffer.append(splatSH)
         }
         
-        // Also fill regular splat buffer for compatibility
-        try add(splats)
+        // Also fill regular splat buffer for sorting/culling compatibility
+        try replaceAllSplats(with: splats)
+    }
+
+    public func loadSplatsWithSH(_ splats: [SplatScenePoint]) async throws {
+        try loadSplatsWithSHSynchronously(splats)
     }
     
     private func ensureSHBufferCapacity(_ capacity: Int) throws {
@@ -317,6 +333,23 @@ public class FastSHSplatRenderer: SplatRenderer, @unchecked Sendable {
         try await newPoints.read(from: reader)
         renderMode = Self.renderMode(from: reader.renderMode)
         try await loadSplatsWithSH(newPoints.points)
+    }
+
+    public override func replaceSceneLayers(_ layers: [SplatSceneLayer]) throws {
+        let allPoints = layers.flatMap(\.points)
+        splatSHBuffer.count = 0
+        splatSHBufferPrime.count = 0
+        if let animatedSplatSHBuffer {
+            splatSHBufferPool.release(animatedSplatSHBuffer)
+            self.animatedSplatSHBuffer = nil
+            lastAppliedAnimationTimeSH = nil
+        }
+        try loadSplatsWithSHSynchronously(allPoints)
+        try replaceAllSplats(with: allPoints, sceneCounts: layers.map { $0.points.count })
+    }
+
+    public func replaceSceneLayersWithSH(_ layers: [SplatSceneLayer]) async throws {
+        try replaceSceneLayers(layers)
     }
     
 }
@@ -343,12 +376,19 @@ extension FastSHSplatRenderer {
             )
         }
 
+        let didUpdateAnimatedSplats = updateAnimatedSplatsIfNeeded(to: commandBuffer)
+        updateAnimatedSHSplatsIfNeeded(to: commandBuffer, forceRebuild: didUpdateAnimatedSplats)
+
         // Use fast SH pipeline if enabled and available
         if fastSHConfig.enabled,
            let pipeline = fastSHPipelineState,
            shPaletteBuffer != nil,
            shDegree > 0,
            shCoefficientsPerEntry > 0 {
+            switchToNextDynamicBuffer()
+            updateUniforms(forViewports: splatViewports,
+                           splatCount: UInt32(splatCount),
+                           indexedSplatCount: UInt32(min(splatCount, Constants.maxIndexedSplatCount)))
 
             // Render using fast SH pipeline
             try renderWithFastSH(viewports: viewports,
@@ -414,7 +454,7 @@ extension FastSHSplatRenderer {
         renderEncoder.setRenderPipelineState(pipelineState)
 
         // Set buffers
-        renderEncoder.setVertexBuffer(splatSHBuffer.buffer, offset: 0, index: BufferIndex.splat.rawValue)
+        renderEncoder.setVertexBuffer(activeSplatSHBuffer.buffer, offset: 0, index: BufferIndex.splat.rawValue)
         renderEncoder.setVertexBuffer(dynamicUniformBuffers, offset: uniformBufferOffset, index: BufferIndex.uniforms.rawValue)
 
         // GPU-only sorting: pass sorted indices buffer to shader
@@ -487,5 +527,65 @@ extension FastSHSplatRenderer {
         )
 
         renderEncoder.endEncoding()
+    }
+
+    private var activeSplatSHBuffer: MetalBuffer<SplatSH> {
+        animationEnabled ? (animatedSplatSHBuffer ?? splatSHBuffer) : splatSHBuffer
+    }
+
+    private func updateAnimatedSHSplatsIfNeeded(to commandBuffer: MTLCommandBuffer, forceRebuild: Bool) {
+        guard animationEnabled, let configuration = animationConfiguration else {
+            if let animatedSplatSHBuffer {
+                self.animatedSplatSHBuffer = nil
+                lastAppliedAnimationTimeSH = nil
+                commandBuffer.addCompletedHandler { [weak self] _ in
+                    self?.splatSHBufferPool.release(animatedSplatSHBuffer)
+                }
+            }
+            return
+        }
+
+        if !forceRebuild, let animatedSplatSHBuffer, lastAppliedAnimationTimeSH == configuration.time, animatedSplatSHBuffer.count == sourceScenePoints.count {
+            return
+        }
+
+        let animatedSplatSHBuffer: MetalBuffer<SplatSH>
+        do {
+            animatedSplatSHBuffer = try splatSHBufferPool.acquire(minimumCapacity: max(sourceScenePoints.count, 1))
+        } catch {
+            Self.log.error("Failed to allocate animated SH splat buffer: \(error)")
+            return
+        }
+        animatedSplatSHBuffer.count = 0
+
+        for (index, point) in sourceScenePoints.enumerated() {
+            let sceneIndex = index < animationSceneIndices.count ? Int(animationSceneIndices[index]) : 0
+            let sample = SplatAnimationEngine.apply(
+                point: point,
+                globalIndex: index,
+                sceneIndex: sceneIndex,
+                sceneMetrics: animationSceneMetrics,
+                configuration: configuration
+            )
+
+            let baseSplat = Splat(sample.point)
+            let shIndex = shPaletteMap[index] ?? UInt32.max
+            let shDeg = shPaletteMap[index] != nil ? UInt16(shDegree) : 0
+            var splatSH = SplatSH(splat: baseSplat,
+                                  rotation: sample.point.rotation.normalized,
+                                  shIndex: shIndex,
+                                  shDegree: shDeg)
+            splatSH.tintColor = SIMD4<Float>(sample.tint.x, sample.tint.y, sample.tint.z, 1)
+            animatedSplatSHBuffer.append(splatSH)
+        }
+
+        let previousAnimatedBuffer = self.animatedSplatSHBuffer
+        self.animatedSplatSHBuffer = animatedSplatSHBuffer
+        lastAppliedAnimationTimeSH = configuration.time
+        if let previousAnimatedBuffer {
+            commandBuffer.addCompletedHandler { [weak self] _ in
+                self?.splatSHBufferPool.release(previousAnimatedBuffer)
+            }
+        }
     }
 }

@@ -27,6 +27,12 @@ struct MetalKitSceneView: View {
     @State private var ditheredTransparencyEnabled = false // Stochastic transparency - disabled by default
     @State private var metal4SortingEnabled = true // Metal 4 GPU radix sort - enabled by default
     @State private var use2DGSMode = false // 2DGS planar rendering - disabled by default
+    @State private var splatAnimationEnabled = false
+    @State private var splatAnimationEffectRawValue = SplatAnimationEffect.spread.rawValue
+    @State private var splatAnimationPlaying = true
+    @State private var splatAnimationSpeed = 1.0
+    @State private var splatAnimationIntensity = 1.0
+    @State private var splatAnimationResetCounter = 0
     @State private var renderScale: CGFloat = 0.66 // iOS fill-rate control: 66% scale ~= 44% pixels
     @State private var adaptiveRenderScaleEnabled = false // Opt-in to avoid visible resolution pumping artifacts
 
@@ -44,6 +50,12 @@ struct MetalKitSceneView: View {
                 ditheredTransparencyEnabled: $ditheredTransparencyEnabled,
                 metal4SortingEnabled: $metal4SortingEnabled,
                 use2DGSMode: $use2DGSMode,
+                splatAnimationEnabled: $splatAnimationEnabled,
+                splatAnimationEffectRawValue: $splatAnimationEffectRawValue,
+                splatAnimationPlaying: $splatAnimationPlaying,
+                splatAnimationSpeed: $splatAnimationSpeed,
+                splatAnimationIntensity: $splatAnimationIntensity,
+                splatAnimationResetCounter: $splatAnimationResetCounter,
                 renderScale: $renderScale,
                 adaptiveRenderScaleEnabled: $adaptiveRenderScaleEnabled
             )
@@ -134,202 +146,28 @@ struct MetalKitSceneView: View {
                     
                     VStack {
                         HStack {
-                        VStack(alignment: .leading, spacing: 12) {
-                            // Header with close button
-                            HStack {
-                                Text("Render Settings")
-                                    .font(.headline)
-                                
-                                Spacer()
-                                
-                                Button(action: {
-                                    showSettings = false
-                                }) {
-                                    Image(systemName: "xmark.circle.fill")
-                                        .font(.title3)
-                                        .foregroundColor(.secondary)
-                                }
+                            SplatSettingsPanel(
+                                fastSHEnabled: $fastSHEnabled,
+                                metal4BindlessEnabled: $metal4BindlessEnabled,
+                                showDebugAABB: $showDebugAABB,
+                                frustumCullingEnabled: $frustumCullingEnabled,
+                                meshShaderEnabled: $meshShaderEnabled,
+                                ditheredTransparencyEnabled: $ditheredTransparencyEnabled,
+                                metal4SortingEnabled: $metal4SortingEnabled,
+                                use2DGSMode: $use2DGSMode,
+                                splatAnimationEnabled: $splatAnimationEnabled,
+                                splatAnimationEffectRawValue: $splatAnimationEffectRawValue,
+                                splatAnimationPlaying: $splatAnimationPlaying,
+                                splatAnimationSpeed: $splatAnimationSpeed,
+                                splatAnimationIntensity: $splatAnimationIntensity,
+                                splatAnimationResetCounter: $splatAnimationResetCounter,
+                                renderScale: $renderScale,
+                                adaptiveRenderScaleEnabled: $adaptiveRenderScaleEnabled,
+                                onDismiss: { showSettings = false }
+                            )
+                            .onTapGesture {
+                                // Prevent tap-through to background
                             }
-                            .padding(.bottom, 4)
-                            
-                            // Fast SH Toggle
-                            Toggle(isOn: $fastSHEnabled) {
-                                VStack(alignment: .leading, spacing: 2) {
-                                    Text("Fast Spherical Harmonics")
-                                        .font(.subheadline)
-                                    Text("Optimized SH evaluation for better performance")
-                                        .font(.caption)
-                                        .foregroundColor(.secondary)
-                                }
-                            }
-                            
-                            Divider()
-                            
-                            // Debug AABB Toggle - tests GPU SIMD-group bounds computation
-                            Toggle(isOn: $showDebugAABB) {
-                                VStack(alignment: .leading, spacing: 2) {
-                                    Text("Show Bounding Box")
-                                        .font(.subheadline)
-                                    Text("Visualize AABB computed by GPU SIMD-group reduction")
-                                        .font(.caption)
-                                        .foregroundColor(.secondary)
-                                }
-                            }
-                            
-                            Divider()
-                            
-                            // Frustum Culling Toggle
-                            Toggle(isOn: $frustumCullingEnabled) {
-                                VStack(alignment: .leading, spacing: 2) {
-                                    Text("Frustum Culling")
-                                        .font(.subheadline)
-                                    Text("GPU pre-filters splats outside camera view")
-                                        .font(.caption)
-                                        .foregroundColor(.secondary)
-                                }
-                            }
-
-                            Divider()
-
-                            // Dithered Transparency Toggle
-                            Toggle(isOn: $ditheredTransparencyEnabled) {
-                                VStack(alignment: .leading, spacing: 2) {
-                                    Text("Dithered Transparency")
-                                        .font(.subheadline)
-                                    Text("Order-independent, no sorting needed (best with TAA)")
-                                        .font(.caption)
-                                        .foregroundColor(.secondary)
-                                }
-                            }
-
-                            Divider()
-
-                            // Mesh Shader Toggle (Metal 3+)
-                            Toggle(isOn: $meshShaderEnabled) {
-                                VStack(alignment: .leading, spacing: 2) {
-                                    HStack {
-                                        Text("Mesh Shaders")
-                                            .font(.subheadline)
-                                        Text("(Metal 3+)")
-                                            .font(.caption2)
-                                            .foregroundColor(.blue)
-                                    }
-                                    Text("Generate geometry on GPU - compute once per splat")
-                                        .font(.caption)
-                                        .foregroundColor(.secondary)
-                                }
-                            }
-                            
-                            Divider()
-                            
-                            // Metal 4 Bindless Toggle
-                            Toggle(isOn: $metal4BindlessEnabled) {
-                                VStack(alignment: .leading, spacing: 2) {
-                                    HStack {
-                                        Text("Metal 4 Bindless Resources")
-                                            .font(.subheadline)
-                                        Text("(Full Feature Set)")
-                                            .font(.caption2)
-                                            .foregroundColor(.green)
-                                            .padding(.horizontal, 6)
-                                            .padding(.vertical, 2)
-                                            .background(Color.blue.opacity(0.1))
-                                            .cornerRadius(4)
-                                    }
-                                    Text("50-80% CPU overhead reduction for large scenes (iOS 26+)")
-                                        .font(.caption)
-                                        .foregroundColor(.secondary)
-                                }
-                            }
-                            
-                            if metal4BindlessEnabled {
-                                VStack(alignment: .leading, spacing: 4) {
-                                    Label("Metal 4 Active", systemImage: "checkmark.circle.fill")
-                                        .font(.caption)
-                                        .foregroundColor(.green)
-                                    Text("• Argument tables enabled\n• Residency sets active\n• Bindless rendering mode")
-                                        .font(.caption2)
-                                        .foregroundColor(.secondary)
-                                        .padding(.leading, 20)
-                                }
-                                .padding(.top, 4)
-                            }
-
-                            Divider()
-
-                            // Metal 4 GPU Sorting Toggle
-                            Toggle(isOn: $metal4SortingEnabled) {
-                                VStack(alignment: .leading, spacing: 2) {
-                                    HStack {
-                                        Text("Metal 4 GPU Sorting")
-                                            .font(.subheadline)
-                                        Text("(iOS 26+)")
-                                            .font(.caption2)
-                                            .foregroundColor(.purple)
-                                    }
-                                    Text("Stable radix sort for large scenes (>100K splats)")
-                                        .font(.caption)
-                                        .foregroundColor(.secondary)
-                                }
-                            }
-
-                            Divider()
-
-                            // 2DGS Mode Toggle
-                            Toggle(isOn: $use2DGSMode) {
-                                VStack(alignment: .leading, spacing: 2) {
-                                    Text("2DGS Rendering Mode")
-                                        .font(.subheadline)
-                                    Text("Flat oriented splats with normal extraction")
-                                        .font(.caption)
-                                        .foregroundColor(.secondary)
-                                }
-                            }
-
-#if os(iOS)
-                            Divider()
-
-                            VStack(alignment: .leading, spacing: 6) {
-                                Toggle(isOn: $adaptiveRenderScaleEnabled) {
-                                    VStack(alignment: .leading, spacing: 2) {
-                                        Text("Adaptive Render Scale")
-                                            .font(.subheadline)
-                                        Text("Dynamically adjusts scale to hold frame time")
-                                            .font(.caption)
-                                            .foregroundColor(.secondary)
-                                    }
-                                }
-
-                                HStack {
-                                    Text("Render Scale")
-                                        .font(.subheadline)
-                                    Spacer()
-                                    Text("\(Int(renderScale * 100))%")
-                                        .font(.caption)
-                                        .foregroundColor(.secondary)
-                                }
-
-                                Slider(value: $renderScale, in: 0.55...1.0, step: 0.05)
-
-                                Text("Lower values reduce fragment cost and thermal throttling")
-                                    .font(.caption)
-                                    .foregroundColor(.secondary)
-                            }
-#endif
-
-                        }
-                        .padding()
-#if os(iOS)
-                        .background(Color(UIColor.systemBackground).opacity(0.9))
-#else
-                        .background(Color(NSColor.controlBackgroundColor).opacity(0.9))
-#endif
-                        .cornerRadius(10)
-                        .shadow(radius: 5)
-                        .frame(maxWidth: 400)
-                        .onTapGesture {
-                            // Prevent tap-through to background
-                        }
                         
                         Spacer()
                     }
@@ -378,6 +216,361 @@ struct MetalKitSceneView: View {
         // Navigate to AR view with current model
         navigateToAR = true
         #endif
+    }
+}
+
+private enum SplatSettingsCategory: String, CaseIterable, Identifiable {
+    case rendering
+    case performance
+    case animation
+    case display
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .rendering: return "Rendering"
+        case .performance: return "Performance"
+        case .animation: return "Animation"
+        case .display: return "Display"
+        }
+    }
+
+    var systemImage: String {
+        switch self {
+        case .rendering: return "paintpalette"
+        case .performance: return "speedometer"
+        case .animation: return "sparkles"
+        case .display: return "display"
+        }
+    }
+}
+
+private struct SplatSettingsPanel: View {
+    @Binding var fastSHEnabled: Bool
+    @Binding var metal4BindlessEnabled: Bool
+    @Binding var showDebugAABB: Bool
+    @Binding var frustumCullingEnabled: Bool
+    @Binding var meshShaderEnabled: Bool
+    @Binding var ditheredTransparencyEnabled: Bool
+    @Binding var metal4SortingEnabled: Bool
+    @Binding var use2DGSMode: Bool
+    @Binding var splatAnimationEnabled: Bool
+    @Binding var splatAnimationEffectRawValue: UInt32
+    @Binding var splatAnimationPlaying: Bool
+    @Binding var splatAnimationSpeed: Double
+    @Binding var splatAnimationIntensity: Double
+    @Binding var splatAnimationResetCounter: Int
+    @Binding var renderScale: CGFloat
+    @Binding var adaptiveRenderScaleEnabled: Bool
+    let onDismiss: () -> Void
+
+    @State private var selectedCategory: SplatSettingsCategory = .rendering
+
+    private var availableCategories: [SplatSettingsCategory] {
+#if os(iOS)
+        SplatSettingsCategory.allCases
+#else
+        [.rendering, .performance, .animation]
+#endif
+    }
+
+    private var selectedAnimationEffect: SplatAnimationEffect {
+        SplatAnimationEffect(rawValue: splatAnimationEffectRawValue) ?? .spread
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            header
+
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 8) {
+                    ForEach(availableCategories) { category in
+                        Button {
+                            selectedCategory = category
+                        } label: {
+                            Label(category.title, systemImage: category.systemImage)
+                                .font(.subheadline.weight(.semibold))
+                                .foregroundStyle(selectedCategory == category ? Color.white : Color.primary)
+                                .padding(.horizontal, 12)
+                                .padding(.vertical, 8)
+                                .background(selectedCategory == category ? Color.accentColor : Color.secondary.opacity(0.12))
+                                .clipShape(Capsule())
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+            }
+
+            ScrollView {
+                VStack(alignment: .leading, spacing: 12) {
+                    content
+                }
+                .padding(.vertical, 2)
+            }
+            .frame(maxHeight: 420)
+        }
+        .padding(16)
+#if os(iOS)
+        .background(Color(UIColor.systemBackground).opacity(0.96))
+#else
+        .background(Color(NSColor.controlBackgroundColor).opacity(0.96))
+#endif
+        .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+        .shadow(radius: 12)
+        .frame(maxWidth: 440)
+    }
+
+    private var header: some View {
+        HStack(alignment: .top, spacing: 12) {
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Render Settings")
+                    .font(.headline)
+                Text("Grouped controls keep the renderer options manageable as the sample app grows.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            Spacer()
+
+            Button(action: onDismiss) {
+                Image(systemName: "xmark.circle.fill")
+                    .font(.title3)
+                    .foregroundStyle(.secondary)
+            }
+            .buttonStyle(.plain)
+        }
+    }
+
+    @ViewBuilder
+    private var content: some View {
+        switch selectedCategory {
+        case .rendering:
+            SplatSettingsSection("Shading") {
+                settingsToggle(
+                    title: "Fast Spherical Harmonics",
+                    subtitle: "Optimized SH evaluation for better performance",
+                    isOn: $fastSHEnabled
+                )
+                settingsToggle(
+                    title: "Dithered Transparency",
+                    subtitle: "Order-independent transparency without depth sorting",
+                    isOn: $ditheredTransparencyEnabled
+                )
+                settingsToggle(
+                    title: "2DGS Rendering Mode",
+                    subtitle: "Flat oriented splats with normal extraction",
+                    isOn: $use2DGSMode
+                )
+            }
+
+        case .performance:
+            SplatSettingsSection("GPU Pipeline") {
+                settingsToggle(
+                    title: "Frustum Culling",
+                    subtitle: "GPU pre-filters splats outside camera view",
+                    isOn: $frustumCullingEnabled
+                )
+                settingsToggle(
+                    title: "Mesh Shaders",
+                    subtitle: "Generate geometry on GPU and cut per-splat vertex work",
+                    isOn: $meshShaderEnabled,
+                    badge: "Metal 3+",
+                    badgeTint: .blue
+                )
+                settingsToggle(
+                    title: "Metal 4 Bindless Resources",
+                    subtitle: "Lower CPU overhead with argument tables and residency sets",
+                    isOn: $metal4BindlessEnabled,
+                    badge: "Metal 4",
+                    badgeTint: .green
+                )
+                settingsToggle(
+                    title: "Metal 4 GPU Sorting",
+                    subtitle: "Stable radix sort for very large splat counts",
+                    isOn: $metal4SortingEnabled,
+                    badge: "iOS 26+",
+                    badgeTint: .purple
+                )
+            }
+
+            SplatSettingsSection("Diagnostics") {
+                settingsToggle(
+                    title: "Show Bounding Box",
+                    subtitle: "Visualize the GPU-computed scene bounds",
+                    isOn: $showDebugAABB
+                )
+
+                if metal4BindlessEnabled {
+                    Label("Argument tables enabled, residency sets active, bindless path selected.", systemImage: "checkmark.circle.fill")
+                        .font(.caption)
+                        .foregroundStyle(.green)
+                        .padding(.top, 2)
+                }
+            }
+
+        case .animation:
+            SplatSettingsSection("Playback") {
+                settingsToggle(
+                    title: "Spark-Style Splat Animation",
+                    subtitle: "Drives reveal and transition effects on both standard and Fast SH renderers",
+                    isOn: $splatAnimationEnabled
+                )
+
+                if splatAnimationEnabled {
+                    VStack(alignment: .leading, spacing: 10) {
+                        Picker("Effect", selection: $splatAnimationEffectRawValue) {
+                            ForEach(SplatAnimationEffect.allCases, id: \.rawValue) { effect in
+                                Text(effect.displayName).tag(effect.rawValue)
+                            }
+                        }
+                        .pickerStyle(.menu)
+
+                        HStack(spacing: 10) {
+                            Button(splatAnimationPlaying ? "Pause" : "Play") {
+                                splatAnimationPlaying.toggle()
+                            }
+                            .buttonStyle(.bordered)
+
+                            Button("Reset") {
+                                splatAnimationPlaying = true
+                                splatAnimationResetCounter += 1
+                            }
+                            .buttonStyle(.bordered)
+
+                            Spacer()
+
+                            Text(selectedAnimationEffect.displayName)
+                                .font(.caption.weight(.semibold))
+                                .foregroundStyle(.secondary)
+                        }
+
+                        settingsSlider(
+                            label: "Speed",
+                            value: $splatAnimationSpeed,
+                            range: 0.1...3.0
+                        )
+                        settingsSlider(
+                            label: "Intensity",
+                            value: $splatAnimationIntensity,
+                            range: 0.1...2.0
+                        )
+                    }
+                    .padding(.top, 4)
+                }
+            }
+
+        case .display:
+#if os(iOS)
+            SplatSettingsSection("Resolution") {
+                settingsToggle(
+                    title: "Adaptive Render Scale",
+                    subtitle: "Dynamically adjusts internal resolution to hold frame time",
+                    isOn: $adaptiveRenderScaleEnabled
+                )
+
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack {
+                        Text("Render Scale")
+                            .font(.subheadline)
+                        Spacer()
+                        Text("\(Int(renderScale * 100))%")
+                            .font(.caption.monospacedDigit())
+                            .foregroundStyle(.secondary)
+                    }
+
+                    Slider(value: $renderScale, in: 0.55...1.0, step: 0.05)
+
+                    Text("Lower values reduce fragment cost and thermal throttling.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+#endif
+        }
+    }
+
+    private func settingsToggle(title: String,
+                                subtitle: String,
+                                isOn: Binding<Bool>,
+                                badge: String? = nil,
+                                badgeTint: Color = .blue) -> some View {
+        Toggle(isOn: isOn) {
+            VStack(alignment: .leading, spacing: 3) {
+                HStack(spacing: 6) {
+                    Text(title)
+                        .font(.subheadline)
+                    if let badge {
+                        Text(badge)
+                            .font(.caption2.weight(.semibold))
+                            .foregroundStyle(badgeTint)
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 2)
+                            .background(badgeTint.opacity(0.12))
+                            .clipShape(Capsule())
+                    }
+                }
+                Text(subtitle)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    private func settingsSlider(label: String,
+                                value: Binding<Double>,
+                                range: ClosedRange<Double>) -> some View {
+        HStack {
+            Text(label)
+                .font(.subheadline)
+                .frame(width: 58, alignment: .leading)
+            Slider(value: value, in: range)
+            Text(String(format: "%.2f", value.wrappedValue))
+                .font(.caption.monospacedDigit())
+                .frame(width: 42)
+        }
+    }
+}
+
+private struct SplatSettingsSection<Content: View>: View {
+    let title: String
+    @ViewBuilder let content: Content
+
+    init(_ title: String, @ViewBuilder content: () -> Content) {
+        self.title = title
+        self.content = content()
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text(title)
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.secondary)
+                .textCase(.uppercase)
+
+            VStack(alignment: .leading, spacing: 12) {
+                content
+            }
+            .padding(14)
+            .background(Color.secondary.opacity(0.08))
+            .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+        }
+    }
+}
+
+private extension SplatAnimationEffect {
+    var displayName: String {
+        switch self {
+        case .magic: return "Magic"
+        case .spread: return "Spread"
+        case .unroll: return "Unroll"
+        case .twister: return "Twister"
+        case .rain: return "Rain"
+        case .spherical: return "Spherical"
+        case .explosion: return "Explosion"
+        case .flow: return "Flow"
+        case .morph: return "Morph"
+        }
     }
 }
 
@@ -1294,6 +1487,12 @@ struct MetalKitRendererView: ViewRepresentable {
     @Binding var ditheredTransparencyEnabled: Bool
     @Binding var metal4SortingEnabled: Bool
     @Binding var use2DGSMode: Bool
+    @Binding var splatAnimationEnabled: Bool
+    @Binding var splatAnimationEffectRawValue: UInt32
+    @Binding var splatAnimationPlaying: Bool
+    @Binding var splatAnimationSpeed: Double
+    @Binding var splatAnimationIntensity: Double
+    @Binding var splatAnimationResetCounter: Int
     @Binding var renderScale: CGFloat
     @Binding var adaptiveRenderScaleEnabled: Bool
 
@@ -1308,6 +1507,7 @@ struct MetalKitRendererView: ViewRepresentable {
         private var pendingLoadTask: Task<Void, Never>?
         private var lastRequestedModel: ModelIdentifier?
         private var editTransformActive = false
+        private var lastAppliedAnimationResetCounter = 0
 #if os(iOS)
         private var frameTimeEMA: TimeInterval = 1.0 / 60.0
         private var hasFrameTimeSample = false
@@ -1336,6 +1536,16 @@ struct MetalKitRendererView: ViewRepresentable {
             renderer?.setDitheredTransparency(parent.ditheredTransparencyEnabled)
             renderer?.setMetal4Sorting(parent.metal4SortingEnabled)
             renderer?.set2DGSMode(parent.use2DGSMode)
+            renderer?.setSplatAnimation(
+                effect: parent.selectedAnimationEffect,
+                isPlaying: parent.splatAnimationEnabled && parent.splatAnimationPlaying,
+                speed: Float(parent.splatAnimationSpeed),
+                intensity: Float(parent.splatAnimationIntensity)
+            )
+            if lastAppliedAnimationResetCounter != parent.splatAnimationResetCounter {
+                lastAppliedAnimationResetCounter = parent.splatAnimationResetCounter
+                renderer?.resetSplatAnimation()
+            }
 
 #if os(iOS)
             renderer?.setInternalRenderScale(parent.renderScale)
@@ -1354,6 +1564,9 @@ struct MetalKitRendererView: ViewRepresentable {
             pendingLoadTask = Task { [weak self, weak renderer] in
                 do {
                     try await renderer?.load(requestedModel)
+                    await MainActor.run {
+                        self?.updateSettings()
+                    }
                     await self?.parent.editingController.refreshSnapshot()
                 } catch is CancellationError {
                     // Newer model request superseded this load.
@@ -1431,6 +1644,11 @@ struct MetalKitRendererView: ViewRepresentable {
         Coordinator(self)
     }
 
+    private var selectedAnimationEffect: SplatAnimationEffect? {
+        guard splatAnimationEnabled else { return nil }
+        return SplatAnimationEffect(rawValue: splatAnimationEffectRawValue) ?? .spread
+    }
+
 #if os(macOS)
     func makeNSView(context: NSViewRepresentableContext<MetalKitRendererView>) -> MTKView {
         makeView(context.coordinator)
@@ -1479,6 +1697,12 @@ struct MetalKitRendererView: ViewRepresentable {
         renderer?.setDitheredTransparency(ditheredTransparencyEnabled)
         renderer?.setMetal4Sorting(metal4SortingEnabled)
         renderer?.set2DGSMode(use2DGSMode)
+        renderer?.setSplatAnimation(
+            effect: selectedAnimationEffect,
+            isPlaying: splatAnimationEnabled && splatAnimationPlaying,
+            speed: Float(splatAnimationSpeed),
+            intensity: Float(splatAnimationIntensity)
+        )
 
 #if os(iOS)
         renderer?.setInternalRenderScale(renderScale)

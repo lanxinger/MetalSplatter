@@ -133,6 +133,10 @@ class MetalKitSceneRenderer: NSObject, MTKViewDelegate {
     private var startRollRotation: Float = 0.0
     private var startZoom: Float = 1.0
     private var startTranslation: SIMD2<Float> = .zero
+    private var splatAnimationTemplate: SplatAnimationConfiguration?
+    private var splatAnimationTimeOffset: Float = 0
+    private var splatAnimationReferenceTime: CFTimeInterval?
+    private var splatAnimationPlaying = true
 
     init?(_ metalKitView: MTKView) {
         guard let device = metalKitView.device else { return nil }
@@ -661,6 +665,8 @@ class MetalKitSceneRenderer: NSObject, MTKViewDelegate {
         guard let modelRenderer else { return }
         guard let drawable = view.currentDrawable else { return }
 
+        syncSplatAnimation()
+
         _ = inFlightSemaphore.wait(timeout: DispatchTime.distantFuture)
 
         guard let commandBuffer = commandBufferManager.makeCommandBuffer() else {
@@ -749,6 +755,10 @@ class MetalKitSceneRenderer: NSObject, MTKViewDelegate {
         commandBuffer.present(drawable)
 
         commandBuffer.commit()
+
+        if splatAnimationTemplate != nil && splatAnimationPlaying {
+            requestRedraw()
+        }
     }
     
     // MARK: - Render Methods
@@ -1208,6 +1218,55 @@ class MetalKitSceneRenderer: NSObject, MTKViewDelegate {
         #endif
     }
 
+    func setSplatAnimation(effect: SplatAnimationEffect?,
+                           isPlaying: Bool,
+                           speed: Float,
+                           intensity: Float) {
+        let clampedSpeed = max(speed, 0.05)
+        let clampedIntensity = max(intensity, 0)
+        let previousSpeed = max(splatAnimationTemplate?.speed ?? clampedSpeed, 0.05)
+        let currentPhaseTime = currentSplatAnimationTime() * previousSpeed
+        let previousPlaying = splatAnimationPlaying
+
+        splatAnimationTimeOffset = currentPhaseTime / clampedSpeed
+        splatAnimationReferenceTime = CACurrentMediaTime()
+        splatAnimationPlaying = isPlaying
+
+        guard let effect else {
+            splatAnimationTemplate = nil
+            if let splat = modelRenderer as? SplatRenderer {
+                splat.animationConfiguration = nil
+            }
+            requestRedraw()
+            return
+        }
+
+        if splatAnimationTemplate == nil {
+            splatAnimationTimeOffset = 0
+        }
+
+        var template = splatAnimationTemplate ?? SplatAnimationConfiguration(effect: effect)
+        template.effect = effect
+        template.speed = clampedSpeed
+        template.intensity = clampedIntensity
+        splatAnimationTemplate = template
+
+        if previousPlaying != isPlaying && isPlaying {
+            splatAnimationReferenceTime = CACurrentMediaTime()
+        }
+
+        syncSplatAnimation()
+        requestRedraw()
+    }
+
+    func resetSplatAnimation() {
+        guard splatAnimationTemplate != nil else { return }
+        splatAnimationTimeOffset = 0
+        splatAnimationReferenceTime = CACurrentMediaTime()
+        syncSplatAnimation()
+        requestRedraw()
+    }
+
     // MARK: - User Interaction API
     #if os(iOS) || os(macOS)
     
@@ -1346,6 +1405,32 @@ class MetalKitSceneRenderer: NSObject, MTKViewDelegate {
         }
         
         return nil
+    }
+
+    private func currentSplatAnimationTime() -> Float {
+        guard splatAnimationTemplate != nil else { return 0 }
+        guard splatAnimationPlaying, let referenceTime = splatAnimationReferenceTime else {
+            return splatAnimationTimeOffset
+        }
+        return splatAnimationTimeOffset + Float(CACurrentMediaTime() - referenceTime)
+    }
+
+    private func syncSplatAnimation() {
+        guard let splat = modelRenderer as? SplatRenderer else { return }
+        guard var configuration = splatAnimationTemplate else {
+            if splat.animationConfiguration != nil {
+                splat.animationConfiguration = nil
+            }
+            return
+        }
+
+        if splatAnimationReferenceTime == nil, splatAnimationPlaying {
+            splatAnimationReferenceTime = CACurrentMediaTime()
+        }
+        configuration.time = currentSplatAnimationTime()
+        if splat.animationConfiguration != configuration {
+            splat.animationConfiguration = configuration
+        }
     }
 }
 

@@ -112,6 +112,22 @@ final class SplatEditorTests: XCTestCase {
         XCTAssertEqual(store.points[5].position, store.points[2].position)
     }
 
+    func testEditableStorePreservesSceneIndicesAcrossSnapshotEdits() {
+        var store = EditableSplatStore(points: makePoints(), sceneIndices: [0, 0, 1, 1])
+        _ = store.applySelection(indices: [1, 2], mode: .replace)
+
+        let snapshot = store.snapshot
+        _ = store.duplicateSelection()
+        XCTAssertEqual(store.sceneIndices, [0, 0, 1, 1, 0, 1])
+
+        store.restore(snapshot)
+        XCTAssertEqual(store.sceneIndices, [0, 0, 1, 1])
+
+        _ = store.applySelection(indices: [1, 3], mode: .replace)
+        XCTAssertTrue(store.separateSelection())
+        XCTAssertEqual(store.sceneIndices, [0, 1])
+    }
+
     func testEditableStoreSeparateSelectionKeepsOnlySelectedPoints() {
         var store = EditableSplatStore(points: makePoints())
         _ = store.applySelection(indices: [1, 3], mode: .replace)
@@ -123,6 +139,22 @@ final class SplatEditorTests: XCTestCase {
         XCTAssertEqual(store.selectedIndices, [0, 1])
         XCTAssertEqual(store.points[0].position, SIMD3<Float>(0.0, 0.0, -2.0))
         XCTAssertEqual(store.points[1].position, SIMD3<Float>(0.75, 0.75, -2.0))
+    }
+
+    func testRendererReplaceAllSplatsPreservesExplicitSceneIndices() throws {
+        let renderer = try makeRenderer()
+        let layers = [
+            SplatSceneLayer(points: Array(makePoints().prefix(2))),
+            SplatSceneLayer(points: Array(makePoints().suffix(2)))
+        ]
+        try renderer.replaceSceneLayers(layers)
+
+        let duplicatedPoints = makePoints() + [makePoints()[0], makePoints()[2]]
+        try renderer.replaceAllSplats(with: duplicatedPoints, sceneIndices: [0, 0, 1, 1, 0, 1])
+
+        XCTAssertEqual(renderer.animationSceneIndices, [0, 0, 1, 1, 0, 1])
+        XCTAssertEqual(renderer.animationSceneCounts, [3, 3])
+        XCTAssertEqual(renderer.animationSceneMetrics.count, 2)
     }
 
     func testRendererUpdateEditingStateClampsTransformIndicesToPointCount() throws {

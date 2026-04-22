@@ -372,6 +372,13 @@ public class SplatRenderer: @unchecked Sendable {
         }
     }
 
+    public var animationConfiguration: SplatAnimationConfiguration? {
+        didSet {
+            animationDirty = true
+            markRenderableSetDirty()
+        }
+    }
+
     // MARK: - Morton Ordering
 
     /// When true, splats added via `add(_:)` will be reordered using Morton codes
@@ -704,6 +711,13 @@ public class SplatRenderer: @unchecked Sendable {
 
     // splatBuffer contains one entry for each gaussian splat (static, never reordered)
     var splatBuffer: MetalBuffer<Splat>
+    var animatedSplatBuffer: MetalBuffer<Splat>?
+    internal var sourceScenePoints: [SplatScenePoint] = []
+    internal var animationSceneIndices: [UInt32] = []
+    internal var animationSceneCounts: [Int] = []
+    internal var animationSceneMetrics: [SplatAnimationSceneMetrics] = []
+    internal var animationDirty = true
+    internal var lastAppliedAnimationTime: Float?
     
     // GPU-only sorting: sorted indices buffer holds the depth-sorted order
     // Shaders use this to index into splatBuffer in the correct render order
@@ -1194,6 +1208,9 @@ public class SplatRenderer: @unchecked Sendable {
         // Return buffers to pools for reuse
         splatBufferPool.release(splatBuffer)
         splatBufferPool.release(splatBufferPrime)
+        if let animatedSplatBuffer {
+            splatBufferPool.release(animatedSplatBuffer)
+        }
         indexBufferPool.release(indexBuffer)
         // Release double-buffered sort index buffers
         if let bufferA = sortedIndicesBufferA {
@@ -1208,7 +1225,17 @@ public class SplatRenderer: @unchecked Sendable {
         // Clear current buffers and return them to pools
         splatBufferPool.release(splatBuffer)
         splatBufferPool.release(splatBufferPrime)
+        if let animatedSplatBuffer {
+            splatBufferPool.release(animatedSplatBuffer)
+            self.animatedSplatBuffer = nil
+        }
         resetEditingTracking()
+        sourceScenePoints.removeAll(keepingCapacity: false)
+        animationSceneIndices.removeAll(keepingCapacity: false)
+        animationSceneCounts.removeAll(keepingCapacity: false)
+        animationSceneMetrics.removeAll(keepingCapacity: false)
+        animationDirty = true
+        lastAppliedAnimationTime = nil
         
         // Invalidate cached bounds
         cachedBounds = nil
@@ -1696,6 +1723,23 @@ public class SplatRenderer: @unchecked Sendable {
         }
 
         splatBuffer.append(orderedPoints.map { Splat($0) })
+        sourceScenePoints.append(contentsOf: orderedPoints)
+        if animationSceneIndices.isEmpty {
+            animationSceneIndices = Array(repeating: 0, count: sourceScenePoints.count)
+            animationSceneCounts = [sourceScenePoints.count]
+        } else {
+            let targetSceneIndex = animationSceneIndices.last ?? 0
+            animationSceneIndices.append(contentsOf: Array(repeating: targetSceneIndex, count: orderedPoints.count))
+            if animationSceneCounts.isEmpty {
+                animationSceneCounts = [sourceScenePoints.count]
+            } else {
+                animationSceneCounts[animationSceneCounts.count - 1] += orderedPoints.count
+            }
+        }
+        animationSceneMetrics = Self.makeSceneMetrics(points: sourceScenePoints,
+                                                      sceneIndices: animationSceneIndices,
+                                                      sceneCounts: animationSceneCounts)
+        animationDirty = true
         markGeometryDirty()  // New splats affect geometry and require re-sorting
         colorsDirty = true   // New splats also have new colors
         try ensureEditingResources(pointCount: splatBuffer.count)
@@ -1869,13 +1913,38 @@ public class SplatRenderer: @unchecked Sendable {
                 values[index] = Splat(points[index])
             }
         }
+        for index in indices where index >= 0 && index < sourceScenePoints.count && index < points.count {
+            sourceScenePoints[index] = points[index]
+        }
+        if !sourceScenePoints.isEmpty {
+            let sceneCounts = animationSceneCounts.isEmpty ? [sourceScenePoints.count] : animationSceneCounts
+            animationSceneMetrics = Self.makeSceneMetrics(points: sourceScenePoints,
+                                                          sceneIndices: animationSceneIndices,
+                                                          sceneCounts: sceneCounts)
+            animationDirty = true
+        }
         markGeometryDirty()
     }
 
-    internal func replaceAllSplats(with points: [SplatScenePoint]) throws {
+    public func replaceSceneLayers(_ layers: [SplatSceneLayer]) throws {
+        let allPoints = layers.flatMap(\.points)
+        let counts = layers.map { $0.points.count }
+        try replaceAllSplats(with: allPoints, sceneCounts: counts)
+    }
+
+    internal func replaceAllSplats(with points: [SplatScenePoint],
+                                   sceneCounts: [Int]? = nil,
+                                   sceneIndices: [UInt32]? = nil) throws {
         try ensureAdditionalCapacity(points.count)
         splatBuffer.count = 0
         splatBuffer.append(points.map { Splat($0) })
+        if let sceneIndices, sceneIndices.count == points.count {
+            setAnimationSourcePoints(points, sceneIndices: sceneIndices)
+        } else if let sceneCounts, sceneCounts.reduce(0, +) == points.count {
+            setAnimationSourcePoints(points, sceneCounts: sceneCounts)
+        } else {
+            setAnimationSourcePoints(points)
+        }
         markGeometryDirty()
         colorsDirty = true
         resetEditingTracking()
@@ -2053,18 +2122,31 @@ public class SplatRenderer: @unchecked Sendable {
                     for i in 0..<min(colors.count, bufferCount) {
                         let c = colors[i]
                         values[i].packedColor = SplatRenderer.packRGBA8(c.x, c.y, c.z, c.w)
+                        if i < sourceScenePoints.count {
+                            sourceScenePoints[i].color = .linearFloat(SIMD3<Float>(c.x, c.y, c.z))
+                            sourceScenePoints[i].opacity = .linearFloat(c.w)
+                        }
                     }
                 case .range(let colors, let range):
                     for (i, colorIndex) in range.enumerated() where colorIndex < bufferCount {
                         let c = colors[i]
                         values[colorIndex].packedColor = SplatRenderer.packRGBA8(c.x, c.y, c.z, c.w)
+                        if colorIndex < sourceScenePoints.count {
+                            sourceScenePoints[colorIndex].color = .linearFloat(SIMD3<Float>(c.x, c.y, c.z))
+                            sourceScenePoints[colorIndex].opacity = .linearFloat(c.w)
+                        }
                     }
                 case .single(let color, let index):
                     guard index < bufferCount else { continue }
                     values[index].packedColor = SplatRenderer.packRGBA8(color.x, color.y, color.z, color.w)
+                    if index < sourceScenePoints.count {
+                        sourceScenePoints[index].color = .linearFloat(SIMD3<Float>(color.x, color.y, color.z))
+                        sourceScenePoints[index].opacity = .linearFloat(color.w)
+                    }
                 }
             }
         }
+        animationDirty = true
     }
 
     /// Marks that geometry has changed and requires re-sorting and bounds update.
@@ -2075,7 +2157,26 @@ public class SplatRenderer: @unchecked Sendable {
         frustumCullDirtyDueToData = true
         sortDataRevision &+= 1
         boundsDirty = true
+        animationDirty = true
         invalidatePrecomputedData()
+    }
+
+    internal func markAnimationDependentDataDirty() {
+        sortDirtyDueToData = true
+        frustumCullDirtyDueToData = true
+        sortDataRevision &+= 1
+        boundsDirty = true
+        invalidatePrecomputedData()
+    }
+
+    internal func acquireAnimatedSplatBuffer(minimumCapacity: Int) throws -> MetalBuffer<Splat> {
+        try splatBufferPool.acquire(minimumCapacity: minimumCapacity)
+    }
+
+    internal func releaseAnimatedSplatBuffer(_ buffer: MetalBuffer<Splat>, on commandBuffer: MTLCommandBuffer) {
+        commandBuffer.addCompletedHandler { [weak self] (_: MTLCommandBuffer) in
+            self?.splatBufferPool.release(buffer)
+        }
     }
 
     /// Get cached AABB bounds - returns immediately with cached value (never blocks).
@@ -2210,7 +2311,7 @@ public class SplatRenderer: @unchecked Sendable {
         }
         computeEncoder.label = "Compute Bounds Parallel"
         computeEncoder.setComputePipelineState(computePipeline)
-        computeEncoder.setBuffer(splatBuffer.buffer, offset: 0, index: 0)
+        computeEncoder.setBuffer(activeSplatBufferForRendering.buffer, offset: 0, index: 0)
 
         var count = UInt32(splatCount)
         computeEncoder.setBytes(&count, length: MemoryLayout<UInt32>.size, index: 1)
@@ -2255,7 +2356,7 @@ public class SplatRenderer: @unchecked Sendable {
         let expectedCount = splatCount
         guard expectedCount > 0 else { return nil }
 
-        return splatBuffer.withLockedValues { values, count in
+        return activeSplatBufferForRendering.withLockedValues { values, count in
             let actualCount = min(count, expectedCount)
             var minBounds = SIMD3<Float>(repeating: .infinity)
             var maxBounds = SIMD3<Float>(repeating: -.infinity)
@@ -2441,7 +2542,7 @@ public class SplatRenderer: @unchecked Sendable {
         computeEncoder.label = "Batch Precompute Splats"
         computeEncoder.setComputePipelineState(precomputePipeline)
         
-        computeEncoder.setBuffer(splatBuffer.buffer, offset: 0, index: 0)
+        computeEncoder.setBuffer(activeSplatBufferForRendering.buffer, offset: 0, index: 0)
         computeEncoder.setBuffer(precomputedBuffer, offset: 0, index: 1)
         computeEncoder.setBytes(&uniforms, length: MemoryLayout<Uniforms>.stride, index: 2)
         computeEncoder.setBytes(&splatCountValue, length: MemoryLayout<UInt32>.stride, index: 3)
@@ -2526,7 +2627,7 @@ public class SplatRenderer: @unchecked Sendable {
         }
         cullEncoder.label = "Frustum Culling"
         cullEncoder.setComputePipelineState(cullPipeline)
-        cullEncoder.setBuffer(splatBuffer.buffer, offset: 0, index: 0)
+        cullEncoder.setBuffer(activeSplatBufferForRendering.buffer, offset: 0, index: 0)
         cullEncoder.setBuffer(indicesBuffer, offset: 0, index: 1)
         cullEncoder.setBuffer(countBuffer, offset: 0, index: 2)
         cullEncoder.setBuffer(cullDataBuffer, offset: 0, index: 3)
@@ -2890,6 +2991,7 @@ public class SplatRenderer: @unchecked Sendable {
         // Apply any pending color updates before GPU work begins.
         // This prevents CPU/GPU data races on the shared splatBuffer.
         applyPendingColorUpdates()
+        updateAnimatedSplatsIfNeeded(to: commandBuffer)
         schedulePendingBufferRelease(on: commandBuffer)
 
         let splatCount = splatBuffer.count
@@ -2975,11 +3077,11 @@ public class SplatRenderer: @unchecked Sendable {
             // Set buffers for object/mesh shaders
             // BufferIndex matches: 0=uniforms, 1=splats, 2=sortedIndices
             renderEncoder.setObjectBuffer(dynamicUniformBuffers, offset: uniformBufferOffset, index: BufferIndex.uniforms.rawValue)
-            renderEncoder.setObjectBuffer(splatBuffer.buffer, offset: 0, index: BufferIndex.splat.rawValue)
+            renderEncoder.setObjectBuffer(activeSplatBufferForRendering.buffer, offset: 0, index: BufferIndex.splat.rawValue)
             renderEncoder.setObjectBuffer(sortedIndices.buffer, offset: 0, index: BufferIndex.sortedIndices.rawValue)
             
             renderEncoder.setMeshBuffer(dynamicUniformBuffers, offset: uniformBufferOffset, index: BufferIndex.uniforms.rawValue)
-            renderEncoder.setMeshBuffer(splatBuffer.buffer, offset: 0, index: BufferIndex.splat.rawValue)
+            renderEncoder.setMeshBuffer(activeSplatBufferForRendering.buffer, offset: 0, index: BufferIndex.splat.rawValue)
             renderEncoder.setMeshBuffer(sortedIndices.buffer, offset: 0, index: BufferIndex.sortedIndices.rawValue)
 
             // Bind precomputed buffer if TensorOps precompute is enabled and data is valid
@@ -3097,7 +3199,7 @@ public class SplatRenderer: @unchecked Sendable {
         }
 
         renderEncoder.setVertexBuffer(dynamicUniformBuffers, offset: uniformBufferOffset, index: BufferIndex.uniforms.rawValue)
-        renderEncoder.setVertexBuffer(splatBuffer.buffer, offset: 0, index: BufferIndex.splat.rawValue)
+        renderEncoder.setVertexBuffer(activeSplatBufferForRendering.buffer, offset: 0, index: BufferIndex.splat.rawValue)
         if let editStateBuffer {
             renderEncoder.setVertexBuffer(editStateBuffer, offset: 0, index: BufferIndex.editState.rawValue)
         }
@@ -3415,7 +3517,7 @@ public class SplatRenderer: @unchecked Sendable {
 
                         do {
                             try sorter.sort(
-                                splats: splatBuffer.buffer,
+                                splats: activeSplatBufferForRendering.buffer,
                                 count: splatCount,
                                 cameraPosition: cameraWorldPosition,
                                 cameraForward: cameraWorldForward,
@@ -3477,7 +3579,7 @@ public class SplatRenderer: @unchecked Sendable {
                     do {
                             try sorter.sort(
                                 commandBuffer: commandBuffer,
-                                splatBuffer: splatBuffer.buffer,
+                                splatBuffer: activeSplatBufferForRendering.buffer,
                                 editStateBuffer: self.editStateBuffer,
                                 outputBuffer: indexOutputBuffer.buffer,
                                 cameraPosition: cameraWorldPosition,
@@ -3556,7 +3658,7 @@ public class SplatRenderer: @unchecked Sendable {
                     var count = UInt32(splatCount)
 
                     computeEncoder.setComputePipelineState(computePipelineState)
-                    computeEncoder.setBuffer(splatBuffer.buffer, offset: 0, index: 0)
+                    computeEncoder.setBuffer(activeSplatBufferForRendering.buffer, offset: 0, index: 0)
                     computeEncoder.setBuffer(distanceBuffer.buffer, offset: 0, index: 1)
                     if let editStateBuffer = self.editStateBuffer {
                         computeEncoder.setBuffer(editStateBuffer, offset: 0, index: 2)
@@ -3619,7 +3721,7 @@ public class SplatRenderer: @unchecked Sendable {
 
                 // Copy positions under lock to ensure pointer validity during sort
                 // This avoids holding the lock during the slow sort operation
-                splatBuffer.withLockedValues { values, count in
+                activeSplatBufferForRendering.withLockedValues { values, count in
                     actualCount = count
                     if orderAndDepthTempSort.count != actualCount {
                         orderAndDepthTempSort = Array(

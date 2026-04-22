@@ -29,6 +29,7 @@ struct FastSHParams {
 typedef struct {
     packed_float3 position;
     uint packedBaseColor;        // Base color (DC term) + opacity, RGBA8 unorm
+    float4 tintColor;            // Animation tint/alpha multiplier in linear space
     float4 rotation;             // Quaternion (x,y,z,w)
     packed_half3 covA;
     packed_half3 covB;
@@ -65,7 +66,9 @@ Splat evaluateSplatWithSH(SplatSH splatSH,
     // Skip SH evaluation if flag is set (camera hasn't moved enough to warrant update)
     // This reuses cached base colors from previous evaluation
     if (params.skipSHEvaluation != 0) {
-        splat.packedColor = splatSH.packedBaseColor;
+        half4 baseColor = unpackSplatColor(splatSH.packedBaseColor);
+        half4 tintColor = half4(splatSH.tintColor);
+        splat.packedColor = pack_half_to_unorm4x8(half4(baseColor.rgb * tintColor.rgb, baseColor.a * tintColor.a));
         return splat;
     }
 
@@ -91,9 +94,12 @@ Splat evaluateSplatWithSH(SplatSH splatSH,
         half4 shColor = evaluateSHHalf(localDirection, coeffs, params.degree);
         // Preserve original alpha from base color, combine with SH-evaluated RGB
         half baseAlpha = unpackSplatColor(splatSH.packedBaseColor).a;
-        splat.packedColor = pack_half_to_unorm4x8(half4(shColor.rgb, baseAlpha));
+        half4 tintColor = half4(splatSH.tintColor);
+        splat.packedColor = pack_half_to_unorm4x8(half4(shColor.rgb * tintColor.rgb, baseAlpha * tintColor.a));
     } else {
-        splat.packedColor = splatSH.packedBaseColor;
+        half4 baseColor = unpackSplatColor(splatSH.packedBaseColor);
+        half4 tintColor = half4(splatSH.tintColor);
+        splat.packedColor = pack_half_to_unorm4x8(half4(baseColor.rgb * tintColor.rgb, baseColor.a * tintColor.a));
     }
 
     return splat;

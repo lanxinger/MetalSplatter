@@ -107,6 +107,7 @@ struct EditableSplatPointChange: Sendable {
 struct EditableSplatStoreSnapshot: Sendable {
     var points: [SplatScenePoint]
     var states: [EditableSplatState]
+    var sceneIndices: [UInt32]
 }
 
 enum SplatEditHistoryEntry: Sendable {
@@ -125,19 +126,26 @@ struct EditableSplatStore: Sendable {
 
     var points: [SplatScenePoint]
     var states: [EditableSplatState]
+    var sceneIndices: [UInt32]
 
-    init(points: [SplatScenePoint]) {
+    init(points: [SplatScenePoint], sceneIndices: [UInt32]? = nil) {
         self.points = points
         self.states = Array(repeating: [], count: points.count)
+        if let sceneIndices, sceneIndices.count == points.count {
+            self.sceneIndices = sceneIndices
+        } else {
+            self.sceneIndices = Array(repeating: 0, count: points.count)
+        }
     }
 
     var snapshot: EditableSplatStoreSnapshot {
-        EditableSplatStoreSnapshot(points: points, states: states)
+        EditableSplatStoreSnapshot(points: points, states: states, sceneIndices: sceneIndices)
     }
 
     mutating func restore(_ snapshot: EditableSplatStoreSnapshot) {
         points = snapshot.points
         states = snapshot.states
+        sceneIndices = snapshot.sceneIndices
     }
 
     var selectedIndices: [Int] {
@@ -348,6 +356,7 @@ struct EditableSplatStore: Sendable {
         let insertionStart = points.count
         let duplicates = sourceIndices.map { points[$0] }
         points.append(contentsOf: duplicates)
+        sceneIndices.append(contentsOf: sourceIndices.map { sceneIndices[$0] })
 
         for index in sourceIndices {
             states[index].remove(.selected)
@@ -369,6 +378,7 @@ struct EditableSplatStore: Sendable {
         guard !sourceIndices.isEmpty else { return false }
 
         points = sourceIndices.map { points[$0] }
+        sceneIndices = sourceIndices.map { sceneIndices[$0] }
         states = sourceIndices.map { index in
             var state = states[index]
             state.remove([.hidden, .deleted, .locked])
@@ -549,7 +559,10 @@ public actor SplatEditor {
     public init(points: [SplatScenePoint], renderer: SplatRenderer) async throws {
         self.renderer = renderer
         self.selectionEngine = try SplatSelectionEngine(device: renderer.device)
-        self.store = EditableSplatStore(points: points)
+        let initialSceneIndices = renderer.animationSceneIndices.count == points.count
+            ? renderer.animationSceneIndices
+            : Array(repeating: 0, count: points.count)
+        self.store = EditableSplatStore(points: points, sceneIndices: initialSceneIndices)
         self.previewTransformIndices = Array(repeating: 0, count: points.count)
         self.previewTransformTouchedIndices = []
         self.transformPalette = [matrix_identity_float4x4, matrix_identity_float4x4]
@@ -655,7 +668,7 @@ public actor SplatEditor {
 
         pushHistory(.snapshot(before))
         previewTransform = nil
-        try renderer.replaceAllSplats(with: store.points)
+        try renderer.replaceAllSplats(with: store.points, sceneIndices: store.sceneIndices)
         previewTransformIndices = Array(repeating: 0, count: store.points.count)
         previewTransformTouchedIndices = []
         transformPalette[1] = matrix_identity_float4x4
@@ -668,7 +681,7 @@ public actor SplatEditor {
 
         pushHistory(.snapshot(before))
         previewTransform = nil
-        try renderer.replaceAllSplats(with: store.points)
+        try renderer.replaceAllSplats(with: store.points, sceneIndices: store.sceneIndices)
         previewTransformIndices = Array(repeating: 0, count: store.points.count)
         previewTransformTouchedIndices = []
         transformPalette[1] = matrix_identity_float4x4
@@ -784,7 +797,7 @@ public actor SplatEditor {
             previewTransformIndices = Array(repeating: 0, count: store.points.count)
             previewTransformTouchedIndices = []
             transformPalette[1] = matrix_identity_float4x4
-            try renderer.replaceAllSplats(with: store.points)
+            try renderer.replaceAllSplats(with: store.points, sceneIndices: store.sceneIndices)
             try replaceRendererState()
         }
     }
