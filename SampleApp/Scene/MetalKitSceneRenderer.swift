@@ -898,8 +898,14 @@ class MetalKitSceneRenderer: NSObject, MTKViewDelegate {
     private func updateFrameTimeBridge() {
         guard let splat = modelRenderer as? SplatRenderer else { return }
         let frameTimeCallback = onFrameTimeUpdate
-        let interactionBenchmarkActive =
-            interactionBenchmarkConfiguration != nil && interactionBenchmarkPhase != .completed
+        let interactionBenchmarkActive: Bool
+        if interactionBenchmarkConfiguration == nil {
+            interactionBenchmarkActive = false
+        } else if case .completed = interactionBenchmarkPhase {
+            interactionBenchmarkActive = false
+        } else {
+            interactionBenchmarkActive = true
+        }
         guard frameTimeCallback != nil
                 || profilingConfiguration.isEnabled
                 || interactionBenchmarkActive else {
