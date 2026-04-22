@@ -47,10 +47,11 @@ public class MPSArgSort {
             guard let commandBuffer = commandQueue.makeCommandBuffer() else {
                 throw SortError.failedToCreateCommandBuffer
             }
-            callAsFunction(commandBuffer: commandBuffer,
-                           input: input,
-                           output: output,
-                           count: count)
+            encodeImpl(commandBuffer: commandBuffer,
+                       input: input,
+                       output: output,
+                       count: count,
+                       waitUntilCompleted: true)
             commandBuffer.commit()
             commandBuffer.waitUntilCompleted()
             if commandBuffer.status != .completed {
@@ -59,17 +60,31 @@ public class MPSArgSort {
         }
     }
 
-    private func callAsFunction(
+    func encode(
         commandBuffer: any MTLCommandBuffer,
         input: any MTLBuffer,
         output: any MTLBuffer,
         count: Int
     ) {
+        encodeImpl(commandBuffer: commandBuffer,
+                   input: input,
+                   output: output,
+                   count: count,
+                   waitUntilCompleted: false)
+    }
+
+    private func encodeImpl(
+        commandBuffer: any MTLCommandBuffer,
+        input: any MTLBuffer,
+        output: any MTLBuffer,
+        count: Int,
+        waitUntilCompleted: Bool
+    ) {
         let shape: [NSNumber] = [count as NSNumber]
         let inputData = MPSGraphTensorData(input, shape: shape, dataType: dataType)
         let outputData = MPSGraphTensorData(output, shape: shape, dataType: .int32)
         let executionDescriptor = MPSGraphExecutableExecutionDescriptor()
-        executionDescriptor.waitUntilCompleted = true
+        executionDescriptor.waitUntilCompleted = waitUntilCompleted
         graphExecutable.encode(to: MPSCommandBuffer(commandBuffer: commandBuffer),
                                inputs: [inputData],
                                results: [outputData],

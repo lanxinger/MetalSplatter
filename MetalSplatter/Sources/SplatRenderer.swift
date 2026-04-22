@@ -376,6 +376,7 @@ public class SplatRenderer: @unchecked Sendable {
 
     public var animationConfiguration: SplatAnimationConfiguration? {
         didSet {
+            guard animationConfiguration != oldValue else { return }
             animationDirty = true
             markRenderableSetDirty()
         }
@@ -1709,7 +1710,7 @@ public class SplatRenderer: @unchecked Sendable {
             try ensureAdditionalCapacity(points.count)
         } catch {
             Self.log.error("Failed to grow buffers: \(error)")
-            return
+            throw error
         }
 
         // Apply Morton ordering if enabled (improves GPU cache coherency)
@@ -2802,9 +2803,6 @@ public class SplatRenderer: @unchecked Sendable {
         if effectiveMinimumSortInterval > 0 && (now - lastSortTime) < effectiveMinimumSortInterval {
             return false
         }
-        if Self.viewMatrixAffectsSort(currentSortViewMatrix, lastSortedViewMatrix) {
-            return true
-        }
         return Self.shouldRunCameraDrivenUpdate(
             dirty: false,
             now: now,
@@ -2866,26 +2864,6 @@ public class SplatRenderer: @unchecked Sendable {
         let positionDelta = simd_distance(currentPosition, lastPosition)
         let forwardDelta = 1 - simd_dot(simd_normalize(currentForward), simd_normalize(lastForward))
         return positionDelta > positionEpsilon || forwardDelta > directionEpsilon
-    }
-
-    private static func viewMatrixAffectsSort(
-        _ current: simd_float4x4?,
-        _ previous: simd_float4x4?,
-        positionEpsilon: Float = 0.0005,
-        forwardEpsilon: Float = 0.0001
-    ) -> Bool {
-        guard let current else { return false }
-        guard let previous else { return true }
-
-        let positionDelta = simd_length(current.columns.3 - previous.columns.3)
-        if positionDelta > positionEpsilon {
-            return true
-        }
-
-        let currentForward = simd_normalize(SIMD3<Float>(current.columns.2.x, current.columns.2.y, current.columns.2.z))
-        let previousForward = simd_normalize(SIMD3<Float>(previous.columns.2.x, previous.columns.2.y, previous.columns.2.z))
-        let forwardDelta = 1 - simd_dot(currentForward, previousForward)
-        return forwardDelta > forwardEpsilon
     }
 
     private static func projectionMatrixChanged(
@@ -3204,6 +3182,9 @@ public class SplatRenderer: @unchecked Sendable {
                                           for: commandBuffer) else {
             return
         }
+        defer {
+            renderEncoder.endEncoding()
+        }
 
         let indexCount = indexedSplatCount * 6
         if indexBuffer.count < indexCount {
@@ -3356,7 +3337,6 @@ public class SplatRenderer: @unchecked Sendable {
                       let vertexBuffer = aabbVertexBuffer,
                       let indexBuffer = aabbIndexBuffer else {
                     Self.log.warning("Debug AABB pipeline not initialized")
-                    renderEncoder.endEncoding()
                     return
                 }
 
@@ -3377,8 +3357,6 @@ public class SplatRenderer: @unchecked Sendable {
                 Self.log.error("Failed to draw debug AABB: \(error)")
             }
         }
-
-        renderEncoder.endEncoding()
 
         lastFrameTime = CFAbsoluteTimeGetCurrent() - frameStartTime
         frameCount += 1
@@ -3507,10 +3485,6 @@ public class SplatRenderer: @unchecked Sendable {
             self.finishSort()
 
             Self.log.debug("Async sort completed in \(String(format: "%.1f", elapsed * 1000))ms")
-
-            if self.shouldResortForCurrentCamera() {
-                self.resort(useGPU: useGPU)
-            }
         }
     }
 
@@ -3753,33 +3727,42 @@ public class SplatRenderer: @unchecked Sendable {
                             return
                         }
 
-                        // Run argsort (synchronous, but we're in a completion handler so not blocking main thread)
-                        // Uses cached MPSArgSort to avoid graph recompilation overhead per frame
-                        do {
-                            try self.cachedMPSArgSort(commandQueue: sortQueue,
-                                    input: distanceBuffer.buffer,
-                                    output: indexOutputBuffer.buffer,
-                                    count: splatCount)
-                        } catch {
-                            Self.log.error("MPSArgSort failed: \(error)")
+                        guard let argSortCommandBuffer = sortQueue.makeCommandBuffer() else {
+                            Self.log.error("Failed to create MPS arg sort command buffer.")
                             self.sortDistanceBufferPool.release(distanceBuffer)
                             self.sortIndexBufferPool.release(indexOutputBuffer)
                             self.finishSort()
                             return
                         }
+                        argSortCommandBuffer.addCompletedHandler { [weak self] buffer in
+                            guard let self = self else { return }
 
-                        // Release distance buffer (only used by MPS path)
-                        self.sortDistanceBufferPool.release(distanceBuffer)
+                            self.sortDistanceBufferPool.release(distanceBuffer)
 
-                        self.finishSort(
-                            indexOutputBuffer: indexOutputBuffer,
-                            sortStartTime: sortStartTime,
-                            cameraWorldPosition: cameraWorldPosition,
-                            cameraWorldForward: cameraWorldForward,
-                            sortViewMatrix: sortViewMatrix,
-                            dataDirtySnapshot: dataDirtySnapshot,
-                            useGPU: useGPU
+                            if buffer.status != .completed {
+                                Self.log.error("MPSArgSort command buffer failed: \(String(describing: buffer.error))")
+                                self.sortIndexBufferPool.release(indexOutputBuffer)
+                                self.finishSort()
+                                return
+                            }
+
+                            self.finishSort(
+                                indexOutputBuffer: indexOutputBuffer,
+                                sortStartTime: sortStartTime,
+                                cameraWorldPosition: cameraWorldPosition,
+                                cameraWorldForward: cameraWorldForward,
+                                sortViewMatrix: sortViewMatrix,
+                                dataDirtySnapshot: dataDirtySnapshot,
+                                useGPU: useGPU
+                            )
+                        }
+                        self.cachedMPSArgSort.encode(
+                            commandBuffer: argSortCommandBuffer,
+                            input: distanceBuffer.buffer,
+                            output: indexOutputBuffer.buffer,
+                            count: splatCount
                         )
+                        argSortCommandBuffer.commit()
                     }
                     commandBuffer.commit()
                     return  // Exit Task - completion handler will finish sort

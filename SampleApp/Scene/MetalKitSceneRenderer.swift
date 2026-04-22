@@ -791,12 +791,7 @@ class MetalKitSceneRenderer: NSObject, MTKViewDelegate {
         }
 
         // --- Handle Reset Animation ---
-        if isAnimatingReset {
-            guard let startTime = animationStartTime else {
-                // Should not happen, but safety check
-                isAnimatingReset = false
-                return
-            }
+        if isAnimatingReset, let startTime = animationStartTime {
             let timeElapsed = Date().timeIntervalSince(startTime)
             let progress = min(timeElapsed / animationDuration, 1.0)
             let t = smoothStep(Float(progress)) // Eased progress
@@ -823,7 +818,14 @@ class MetalKitSceneRenderer: NSObject, MTKViewDelegate {
                 #endif
             }
         } else {
-             // Only update auto-rotation if not animating reset and not interacting
+            if isAnimatingReset {
+                // Recover from inconsistent reset state without stranding an in-flight slot.
+                isAnimatingReset = false
+                animationStartTime = nil
+                userIsInteracting = false
+                lastRotationUpdateTimestamp = nil
+            }
+            // Only update auto-rotation if not animating reset and not interacting
             updateRotation()
         }
         // --- End Animation Handling ---
@@ -1461,6 +1463,7 @@ class MetalKitSceneRenderer: NSObject, MTKViewDelegate {
         let previousSpeed = max(splatAnimationTemplate?.speed ?? clampedSpeed, 0.05)
         let currentPhaseTime = currentSplatAnimationTime() * previousSpeed
         let previousPlaying = splatAnimationPlaying
+        let previousTemplate = splatAnimationTemplate
 
         splatAnimationTimeOffset = currentPhaseTime / clampedSpeed
         splatAnimationReferenceTime = CACurrentMediaTime()
@@ -1469,9 +1472,13 @@ class MetalKitSceneRenderer: NSObject, MTKViewDelegate {
         guard let effect else {
             splatAnimationTemplate = nil
             if let splat = modelRenderer as? SplatRenderer {
-                splat.animationConfiguration = nil
+                if splat.animationConfiguration != nil {
+                    splat.animationConfiguration = nil
+                }
             }
-            requestRedraw()
+            if previousTemplate != nil || previousPlaying != isPlaying {
+                requestRedraw()
+            }
             return
         }
 
