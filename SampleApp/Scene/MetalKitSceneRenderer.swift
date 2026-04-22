@@ -138,6 +138,46 @@ class MetalKitSceneRenderer: NSObject, MTKViewDelegate {
     private var splatAnimationReferenceTime: CFTimeInterval?
     private var splatAnimationPlaying = true
 
+    private nonisolated static func prepareGaussianSplatRenderer(
+        device: MTLDevice,
+        colorFormat: MTLPixelFormat,
+        depthFormat: MTLPixelFormat,
+        sampleCount: Int,
+        points: [SplatScenePoint],
+        maxSimultaneousRenders: Int,
+        useFastSH: Bool
+    ) async throws -> SplatRenderer {
+        try await Task.detached(priority: .userInitiated) {
+            let renderer: SplatRenderer
+            if useFastSH {
+                let fastRenderer = try FastSHSplatRenderer(
+                    device: device,
+                    colorFormat: colorFormat,
+                    depthFormat: depthFormat,
+                    sampleCount: sampleCount,
+                    maxViewCount: 1,
+                    maxSimultaneousRenders: maxSimultaneousRenders
+                )
+                try await fastRenderer.loadSplatsWithSH(points)
+                renderer = fastRenderer
+            } else {
+                let standardRenderer = try SplatRenderer(
+                    device: device,
+                    colorFormat: colorFormat,
+                    depthFormat: depthFormat,
+                    sampleCount: sampleCount,
+                    maxViewCount: 1,
+                    maxSimultaneousRenders: maxSimultaneousRenders
+                )
+                try standardRenderer.add(points)
+                renderer = standardRenderer
+            }
+
+            renderer.prewarmRenderPipelines()
+            return renderer
+        }.value
+    }
+
     init?(_ metalKitView: MTKView) {
         guard let device = metalKitView.device else { return nil }
         self.device = device
@@ -182,6 +222,7 @@ class MetalKitSceneRenderer: NSObject, MTKViewDelegate {
             let colorPixelFormat = metalKitView.colorPixelFormat
             let depthStencilPixelFormat = metalKitView.depthStencilPixelFormat
             let sampleCount = metalKitView.sampleCount
+            let maxSimultaneousRenders = Constants.maxSimultaneousRenders
 
             // Auto-detect SH data in the loaded model — use FastSH when present
             let hasSHData = cachedModel.points.contains { point in
@@ -194,29 +235,15 @@ class MetalKitSceneRenderer: NSObject, MTKViewDelegate {
             
             // Create and load splat entirely in nonisolated context
             let points = cachedModel.points // Explicit copy for isolation
-            let splat = try await Task {
-                if useFastSH {
-                    // Use Fast SH renderer with cached data
-                    let renderer = try FastSHSplatRenderer(device: deviceRef,
-                                                         colorFormat: colorPixelFormat,
-                                                         depthFormat: depthStencilPixelFormat,
-                                                         sampleCount: sampleCount,
-                                                         maxViewCount: 1,
-                                                         maxSimultaneousRenders: Constants.maxSimultaneousRenders)
-                    try await renderer.loadSplatsWithSH(points)
-                    return renderer as SplatRenderer // Cast to base class
-                } else {
-                    // Use regular renderer with cached data
-                    let renderer = try SplatRenderer(device: deviceRef,
-                                                    colorFormat: colorPixelFormat,
-                                                    depthFormat: depthStencilPixelFormat,
-                                                    sampleCount: sampleCount,
-                                                    maxViewCount: 1,
-                                                    maxSimultaneousRenders: Constants.maxSimultaneousRenders)
-                    try renderer.add(points)
-                    return renderer
-                }
-            }.value
+            let splat = try await Self.prepareGaussianSplatRenderer(
+                device: deviceRef,
+                colorFormat: colorPixelFormat,
+                depthFormat: depthStencilPixelFormat,
+                sampleCount: sampleCount,
+                points: points,
+                maxSimultaneousRenders: maxSimultaneousRenders,
+                useFastSH: useFastSH
+            )
 
             if cachedModel.renderMode == .mip {
                 splat.renderMode = .mip
@@ -253,9 +280,6 @@ class MetalKitSceneRenderer: NSObject, MTKViewDelegate {
                 }
             }
 
-            // Prewarm active render pipelines before first draw to avoid early JIT stalls.
-            splat.prewarmRenderPipelines()
-            
             // Configure Fast SH if using FastSHSplatRenderer
             if let fastRenderer = splat as? FastSHSplatRenderer {
                 // Apply settings from FastSHSettings object

@@ -7,6 +7,7 @@ import Foundation
 @preconcurrency import MetalSplatter
 import os
 import simd
+import SplatIO
 import SwiftUI
 
 @MainActor
@@ -32,6 +33,52 @@ class ARSceneRenderer: NSObject, MTKViewDelegate {
     var isARSessionActive = false
     private var noRendererLogCount = 0
     private let maxNoRendererLogs = 3
+
+    private nonisolated static func prepareGaussianSplatRenderer(
+        device: MTLDevice,
+        colorFormat: MTLPixelFormat,
+        depthFormat: MTLPixelFormat,
+        sampleCount: Int,
+        maxSimultaneousRenders: Int,
+        points: [SplatScenePoint]
+    ) async throws -> SplatRenderer {
+        try await Task.detached(priority: .userInitiated) {
+            let hasSHData = points.contains { point in
+                if case .sphericalHarmonic(let coeffs) = point.color, coeffs.count > 1 {
+                    return true
+                }
+                return false
+            }
+
+            let renderer: SplatRenderer
+            if hasSHData {
+                let fastRenderer = try FastSHSplatRenderer(
+                    device: device,
+                    colorFormat: colorFormat,
+                    depthFormat: depthFormat,
+                    sampleCount: sampleCount,
+                    maxViewCount: 1,
+                    maxSimultaneousRenders: maxSimultaneousRenders
+                )
+                try await fastRenderer.loadSplatsWithSH(points)
+                renderer = fastRenderer
+            } else {
+                let standardRenderer = try SplatRenderer(
+                    device: device,
+                    colorFormat: colorFormat,
+                    depthFormat: depthFormat,
+                    sampleCount: sampleCount,
+                    maxViewCount: 1,
+                    maxSimultaneousRenders: maxSimultaneousRenders
+                )
+                try standardRenderer.add(points)
+                renderer = standardRenderer
+            }
+
+            renderer.prewarmRenderPipelines()
+            return renderer
+        }.value
+    }
     
     init?(_ metalKitView: MTKView) {
         guard let device = metalKitView.device else { return nil }
@@ -75,21 +122,25 @@ class ARSceneRenderer: NSObject, MTKViewDelegate {
             let sampleCount = metalKitView.sampleCount
             let maxSimultaneousRenders = Constants.maxSimultaneousRenders
 
-            // Create AR splat renderer entirely in nonisolated context
             let points = cachedModel.points // Explicit copy for isolation
-            let renderer = try await Task {
-                let arRenderer = try ARSplatRenderer(
-                    device: deviceRef,
-                    colorFormat: colorPixelFormat,
-                    depthFormat: depthStencilPixelFormat,
-                    sampleCount: sampleCount,
-                    maxViewCount: 1,
-                    maxSimultaneousRenders: maxSimultaneousRenders
-                )
-                try arRenderer.add(points)
-                arRenderer.setSourceFormat(url: url)  // Set format for coordinate transformation
-                return arRenderer
-            }.value
+            let preparedRenderer = try await Self.prepareGaussianSplatRenderer(
+                device: deviceRef,
+                colorFormat: colorPixelFormat,
+                depthFormat: depthStencilPixelFormat,
+                sampleCount: sampleCount,
+                maxSimultaneousRenders: maxSimultaneousRenders,
+                points: points
+            )
+            let renderer = try ARSplatRenderer(
+                device: deviceRef,
+                colorFormat: colorPixelFormat,
+                depthFormat: depthStencilPixelFormat,
+                sampleCount: sampleCount,
+                maxViewCount: 1,
+                maxSimultaneousRenders: maxSimultaneousRenders,
+                preparedCoreRenderer: preparedRenderer
+            )
+            renderer.setSourceFormat(url: url)  // Set format for coordinate transformation
             
             arSplatRenderer = renderer
             noRendererLogCount = 0 // Reset log throttling

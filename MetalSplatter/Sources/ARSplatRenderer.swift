@@ -215,7 +215,8 @@ public class ARSplatRenderer: NSObject {
                 depthFormat: MTLPixelFormat,
                 sampleCount: Int,
                 maxViewCount: Int = 1,
-                maxSimultaneousRenders: Int = 3) throws {
+                maxSimultaneousRenders: Int = 3,
+                preparedCoreRenderer: SplatRenderer? = nil) throws {
         self.device = device
         
         guard let commandQueue = device.makeCommandQueue() else {
@@ -265,7 +266,12 @@ public class ARSplatRenderer: NSObject {
         }
         
         // Initialize core splat renderer - try FastSHSplatRenderer first for better performance
-        if let fastRenderer = try? FastSHSplatRenderer(
+        if let preparedCoreRenderer {
+            self.splatRenderer = preparedCoreRenderer
+            self.fastSHRenderer = preparedCoreRenderer as? FastSHSplatRenderer
+            self.fastSHRenderer?.fastSHConfig.enabled = true
+            print("ARSplatRenderer: ✅ Using prepared splat renderer")
+        } else if let fastRenderer = try? FastSHSplatRenderer(
             device: device,
             colorFormat: colorFormat,
             depthFormat: depthFormat,

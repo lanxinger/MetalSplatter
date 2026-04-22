@@ -51,6 +51,8 @@ public class MPSArgSort {
                            input: input,
                            output: output,
                            count: count)
+            commandBuffer.commit()
+            commandBuffer.waitUntilCompleted()
             if commandBuffer.status != .completed {
                 throw SortError.commandBufferFailed(commandBuffer.error)
             }

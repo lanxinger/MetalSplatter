@@ -4,6 +4,16 @@ import CoreGraphics
 import Compression
 import Dispatch
 import ZIPFoundation
+import os
+
+private let sogsV2Log = Logger(subsystem: "com.metalsplatter.splatio", category: "SOGSSceneReaderV2")
+
+@inline(__always)
+private func traceSOGSV2(_ message: @autoclosure @escaping () -> String) {
+#if DEBUG
+    sogsV2Log.debug("\(message(), privacy: .public)")
+#endif
+}
 
 /// Thread-safe counter for use in concurrent code.
 ///
@@ -42,34 +52,34 @@ public class SplatSOGSSceneReaderV2: SplatSceneReader, @unchecked Sendable {
         self.sourceURL = sourceURL
         self.baseURL = sourceURL.deletingLastPathComponent()
         
-        print("SplatSOGSSceneReaderV2: Initializing with URL: \(sourceURL.path)")
+        traceSOGSV2("Initializing with \(sourceURL.lastPathComponent)")
         
         let filename = sourceURL.lastPathComponent.lowercased()
         
         // Check if this is a bundled .sog file
         if filename.hasSuffix(".sog") {
-            print("SplatSOGSSceneReaderV2: Detected bundled .sog format")
+            traceSOGSV2("Detected bundled .sog format")
             self.zipArchive = try SOGSZipArchive(sourceURL)
         } else if filename == "meta.json" || filename.hasSuffix(".json") {
-            print("SplatSOGSSceneReaderV2: Detected standalone meta.json format")
+            traceSOGSV2("Detected standalone meta.json format")
             self.zipArchive = nil
         } else {
-            print("SplatSOGSSceneReaderV2: Invalid filename: \(filename)")
+            traceSOGSV2("Invalid filename: \(filename)")
             throw SOGSV2Error.invalidMetadata
         }
     }
     
     public func readScene() throws -> [SplatScenePoint] {
-        print("SplatSOGSSceneReaderV2: Loading SOGS v2 metadata...")
+        traceSOGSV2("Loading SOGS v2 metadata")
         
         // Load metadata from either zip archive or standalone file
         let metaData: Data
         if let zipArchive = zipArchive {
             metaData = try zipArchive.extractFile("meta.json")
-            print("SplatSOGSSceneReaderV2: Loaded metadata from zip archive")
+            traceSOGSV2("Loaded metadata from zip archive")
         } else {
             metaData = try loadStandaloneFile(sourceURL)
-            print("SplatSOGSSceneReaderV2: Loaded metadata from standalone file")
+            traceSOGSV2("Loaded metadata from standalone file")
         }
         
         // First try to decode as v2
@@ -83,22 +93,22 @@ public class SplatSOGSSceneReaderV2: SplatSceneReader, @unchecked Sendable {
             }
             
             metadata = decodedMetadata
-            print("SplatSOGSSceneReaderV2: Successfully parsed SOGS v2 metadata")
-            print("SplatSOGSSceneReaderV2: Found \(metadata.count) splats, antialias: \(metadata.antialias ?? false)")
+            traceSOGSV2("Successfully parsed SOGS v2 metadata")
+            traceSOGSV2("Found \(metadata.count) splats, antialias: \(metadata.antialias ?? false)")
             
         } catch let error as DecodingError {
-            print("SplatSOGSSceneReaderV2: Failed to parse as v2 metadata: \(error)")
+            sogsV2Log.error("Failed to parse v2 metadata: \(error.localizedDescription, privacy: .public)")
             throw SOGSV2Error.invalidMetadata
         } catch let error as SOGSV2Error {
             throw error
         } catch {
-            print("SplatSOGSSceneReaderV2: Unexpected error parsing metadata: \(error)")
+            sogsV2Log.error("Unexpected metadata parsing error: \(error.localizedDescription, privacy: .public)")
             throw SOGSV2Error.invalidMetadata
         }
         
         // Load and decode all WebP textures
         let compressedData = try loadCompressedDataV2(metadata: metadata)
-        print("SplatSOGSSceneReaderV2: Successfully loaded all v2 WebP textures")
+        traceSOGSV2("Successfully loaded all v2 WebP textures")
         
         // Decompress and convert to SplatScenePoint format
         return try decompressDataV2(compressedData)
@@ -130,7 +140,7 @@ public class SplatSOGSSceneReaderV2: SplatSceneReader, @unchecked Sendable {
         metadata: SOGSMetadataV2,
         completion: @escaping (Result<SOGSCompressedDataV2, Error>) -> Void
     ) {
-        print("SplatSOGSSceneReaderV2: Loading v2 WebP texture files...")
+        traceSOGSV2("Loading v2 WebP texture files")
 
         // Validate required file lists upfront
         guard metadata.means.files.count == 2 else {
@@ -159,7 +169,7 @@ public class SplatSOGSSceneReaderV2: SplatSceneReader, @unchecked Sendable {
             let shNHasCodebook = shN.codebook.count >= 256
 
             if !(shNHasRange || shNHasCodebook) {
-                print("SplatSOGSSceneReaderV2: SH metadata missing codebook/range - disabling SH data")
+                sogsV2Log.warning("SH metadata missing codebook/range; disabling SH data")
                 sanitizedMetadata = metadataWithoutSphericalHarmonics(metadata)
             } else {
                 for filename in shN.files {
@@ -172,7 +182,7 @@ public class SplatSOGSSceneReaderV2: SplatSceneReader, @unchecked Sendable {
                 }
 
                 if shCentroidsFilename == nil || shLabelsFilename == nil {
-                    print("SplatSOGSSceneReaderV2: Missing SH centroid/label textures - disabling SH data")
+                    sogsV2Log.warning("Missing SH centroid/label textures; disabling SH data")
                     sanitizedMetadata = metadataWithoutSphericalHarmonics(metadata)
                     shCentroidsFilename = nil
                     shLabelsFilename = nil
@@ -262,7 +272,7 @@ public class SplatSOGSSceneReaderV2: SplatSceneReader, @unchecked Sendable {
                     guard let filename = resolvedSHCentroidsFilename else { throw SOGSV2Error.invalidMetadata }
                     let image = try loadWebP(filename)
                     shCentroids.set(image)
-                    print("SplatSOGSSceneReaderV2: Loaded SH centroids texture")
+                    traceSOGSV2("Loaded SH centroids texture")
                 } catch {
                     loadingErrors.withValue { $0.append(error) }
                 }
@@ -276,7 +286,7 @@ public class SplatSOGSSceneReaderV2: SplatSceneReader, @unchecked Sendable {
                     guard let filename = resolvedSHLabelsFilename else { throw SOGSV2Error.invalidMetadata }
                     let image = try loadWebP(filename)
                     shLabels.set(image)
-                    print("SplatSOGSSceneReaderV2: Loaded SH labels texture")
+                    traceSOGSV2("Loaded SH labels texture")
                 } catch {
                     loadingErrors.withValue { $0.append(error) }
                 }
@@ -320,7 +330,7 @@ public class SplatSOGSSceneReaderV2: SplatSceneReader, @unchecked Sendable {
                 return
             }
 
-            print("SplatSOGSSceneReaderV2: Successfully loaded all v2 WebP textures")
+            traceSOGSV2("Successfully loaded all v2 WebP textures")
             completion(.success(SOGSCompressedDataV2(
                 metadata: sanitizedMetadata,
                 means_l: means_l,
@@ -348,43 +358,43 @@ public class SplatSOGSSceneReaderV2: SplatSceneReader, @unchecked Sendable {
     }
     
     private func loadAndDecodeWebPV2(_ filename: String) throws -> WebPDecoder.DecodedImage {
-        print("SplatSOGSSceneReaderV2: Loading WebP file: \(filename)")
+        traceSOGSV2("Loading WebP file: \(filename)")
         
         let webpData: Data
         
         // Load from either zip archive or standalone file system
         if let zipArchive = zipArchive {
             webpData = try zipArchive.extractFile(filename)
-            print("SplatSOGSSceneReaderV2: Loaded \(webpData.count) bytes from zip: \(filename)")
+            traceSOGSV2("Loaded \(webpData.count) bytes from zip: \(filename)")
         } else {
             webpData = try loadStandaloneFile(baseURL.appendingPathComponent(filename))
-            print("SplatSOGSSceneReaderV2: Loaded \(webpData.count) bytes from filesystem: \(filename)")
+            traceSOGSV2("Loaded \(webpData.count) bytes from filesystem: \(filename)")
         }
         
         // Validate WebP signature
         if webpData.count >= 12 {
             let riffHeader = webpData.prefix(4)
             let webpSignature = webpData.dropFirst(8).prefix(4)
-            print("SplatSOGSSceneReaderV2: RIFF header: \(riffHeader.map { String(format: "%02X", $0) }.joined())")
-            print("SplatSOGSSceneReaderV2: WebP signature: \(webpSignature.map { String(format: "%02X", $0) }.joined())")
+            traceSOGSV2("RIFF header: \(riffHeader.map { String(format: "%02X", $0) }.joined())")
+            traceSOGSV2("WebP signature: \(webpSignature.map { String(format: "%02X", $0) }.joined())")
         }
         
         // Decode WebP data
         do {
             // Try Core Image first (iOS 14+/macOS 11+)
             let result = try WebPDecoder.decode(webpData)
-            print("SplatSOGSSceneReaderV2: Successfully decoded \(filename) - \(result.width)x\(result.height), \(result.bytesPerPixel) bpp")
+            traceSOGSV2("Successfully decoded \(filename) - \(result.width)x\(result.height), \(result.bytesPerPixel) bpp")
             return result
         } catch {
-            print("SplatSOGSSceneReaderV2: Core Image decode failed for \(filename): \(error)")
+            traceSOGSV2("Core Image decode failed for \(filename): \(error.localizedDescription)")
             
             // Fallback to ImageIO
             do {
                 let result = try WebPDecoder.decodeWithImageIO(webpData)
-                print("SplatSOGSSceneReaderV2: Successfully decoded \(filename) using ImageIO")
+                traceSOGSV2("Successfully decoded \(filename) using ImageIO")
                 return result
             } catch {
-                print("SplatSOGSSceneReaderV2: Both decoders failed for \(filename): \(error)")
+                sogsV2Log.error("Both decoders failed for \(filename, privacy: .public): \(error.localizedDescription, privacy: .public)")
                 throw SOGSV2Error.webpDecodingFailed("Failed to decode \(filename): \(error)")
             }
         }
@@ -435,17 +445,17 @@ public class SplatSOGSSceneReaderV2: SplatSceneReader, @unchecked Sendable {
 
         if let shN = metadata.shN {
             if let bands = shN.bands, !(1...3).contains(bands) {
-                print("SplatSOGSSceneReaderV2: Validation warning - shN.bands \(bands) outside 1...3, ignoring hint.")
+                sogsV2Log.warning("Validation warning: shN.bands \(bands) outside 1...3; ignoring hint")
             }
 
             if let count = shN.count, count < 0 {
-                print("SplatSOGSSceneReaderV2: Validation warning - shN.count < 0, ignoring hint.")
+                sogsV2Log.warning("Validation warning: shN.count < 0; ignoring hint")
             }
 
             let shNHasRange = (shN.mins?.count ?? 0) > 0 && (shN.maxs?.count ?? 0) > 0
             let shNHasCodebook = shN.codebook.count >= 256
             guard shNHasRange || shNHasCodebook else {
-                print("SplatSOGSSceneReaderV2: Validation warning - shN missing codebook/range, SH decoding may be lossy")
+                sogsV2Log.warning("Validation warning: shN missing codebook/range; SH decoding may be lossy")
                 throw SOGSV2Error.invalidMetadata
             }
 
@@ -466,7 +476,7 @@ public class SplatSOGSSceneReaderV2: SplatSceneReader, @unchecked Sendable {
             }
 
             if labels.width != baseWidth || labels.height != baseHeight {
-                print("SplatSOGSSceneReaderV2: Validation warning - SH labels texture padded to \(labels.width)x\(labels.height), expected \(baseWidth)x\(baseHeight)")
+                sogsV2Log.warning("Validation warning: SH labels texture padded to \(labels.width)x\(labels.height); expected \(baseWidth)x\(baseHeight)")
             }
 
             guard centroids.width % 64 == 0 else {
@@ -480,7 +490,7 @@ public class SplatSOGSSceneReaderV2: SplatSceneReader, @unchecked Sendable {
 
             if let coefficientsFromMetadata = shN.coefficientsPerEntry,
                coefficientsFromMetadata != coefficientsFromTexture {
-                print("SplatSOGSSceneReaderV2: Validation warning - shN bands hint (\(coefficientsFromMetadata)) does not match texture layout (\(coefficientsFromTexture)), using texture data.")
+                sogsV2Log.warning("Validation warning: shN bands hint \(coefficientsFromMetadata) does not match texture layout \(coefficientsFromTexture); using texture data")
             }
 
             let paletteCapacity = centroids.height * 64
@@ -489,7 +499,7 @@ public class SplatSOGSSceneReaderV2: SplatSceneReader, @unchecked Sendable {
             }
 
             if let count = shN.count, count > paletteCapacity {
-                print("SplatSOGSSceneReaderV2: Validation warning - shN palette hint (\(count)) exceeds texture capacity (\(paletteCapacity)), clamping to texture.")
+                sogsV2Log.warning("Validation warning: shN palette hint \(count) exceeds texture capacity \(paletteCapacity); clamping")
             }
         }
     }
@@ -508,9 +518,9 @@ public class SplatSOGSSceneReaderV2: SplatSceneReader, @unchecked Sendable {
     
     private func decompressDataV2(_ compressedData: SOGSCompressedDataV2) throws -> [SplatScenePoint] {
         let totalSplats = compressedData.numSplats
-        print("SplatSOGSSceneReaderV2: Decompressing \(totalSplats) v2 splats...")
-        print("SplatSOGSSceneReaderV2: Texture dimensions: \(compressedData.textureWidth)x\(compressedData.textureHeight)")
-        print("SplatSOGSSceneReaderV2: Has spherical harmonics: \(compressedData.hasSphericalHarmonics)")
+        traceSOGSV2("Decompressing \(totalSplats) v2 splats")
+        traceSOGSV2("Texture dimensions: \(compressedData.textureWidth)x\(compressedData.textureHeight)")
+        traceSOGSV2("Has spherical harmonics: \(compressedData.hasSphericalHarmonics)")
 
         guard totalSplats > 0 else {
             return []
@@ -556,7 +566,7 @@ public class SplatSOGSSceneReaderV2: SplatSceneReader, @unchecked Sendable {
 
             let processed = progressCounter.add(descriptor.count)
             if processed == totalSplats || processed % logStep == 0 {
-                print("SplatSOGSSceneReaderV2: Batch processed \(processed)/\(totalSplats) splats")
+                traceSOGSV2("Batch processed \(processed)/\(totalSplats) splats")
             }
         }
 
@@ -566,7 +576,7 @@ public class SplatSOGSSceneReaderV2: SplatSceneReader, @unchecked Sendable {
             allPoints.append(contentsOf: chunk)
         }
 
-        print("SplatSOGSSceneReaderV2: Successfully decompressed \(allPoints.count) v2 points")
+        traceSOGSV2("Successfully decompressed \(allPoints.count) v2 points")
         return allPoints
     }
 
@@ -587,11 +597,11 @@ public class SplatSOGSSceneReaderV2: SplatSceneReader, @unchecked Sendable {
 
             if batchIndex % 10 == 0 || batchIndex == numBatches - 1 {
                 let processed = min(startIndex + currentBatchSize, compressedData.numSplats)
-                print("SplatSOGSSceneReaderV2: Batch processed \(processed)/\(compressedData.numSplats) splats")
+                traceSOGSV2("Batch processed \(processed)/\(compressedData.numSplats) splats")
             }
         }
 
-        print("SplatSOGSSceneReaderV2: Successfully decompressed \(allPoints.count) v2 points")
+        traceSOGSV2("Successfully decompressed \(allPoints.count) v2 points")
         return allPoints
     }
 }
@@ -618,7 +628,7 @@ private class SOGSZipArchive {
             self.archiveBackingData = nil
             self.shouldStopAccessing = stopAccessOnDeinit
         } catch {
-            print("SOGSZipArchive: File access archive init failed: \(error). Falling back to in-memory loading.")
+            sogsV2Log.warning("File-access archive init failed: \(error.localizedDescription, privacy: .public). Falling back to in-memory loading")
             do {
                 backingData = try Data(contentsOf: zipURL)
                 if stopAccessOnDeinit {
@@ -636,7 +646,7 @@ private class SOGSZipArchive {
             }
         }
         
-        print("SOGSZipArchive: Opened \(zipURL.lastPathComponent)")
+        traceSOGSV2("Opened archive \(zipURL.lastPathComponent)")
         
         var entryCount = 0
         var entries: [String: ZipEntry] = [:]
@@ -644,11 +654,11 @@ private class SOGSZipArchive {
             entryCount += 1
             let compressed = entry.compressedSize
             let uncompressed = entry.uncompressedSize
-            print("  - \(entry.path) (compressed: \(compressed), uncompressed: \(uncompressed))")
+            traceSOGSV2("Archive entry \(entry.path) (compressed: \(compressed), uncompressed: \(uncompressed))")
             entries[entry.path] = entry
         }
         self.entriesByName = entries
-        print("SOGSZipArchive: Found \(entryCount) files in archive")
+        traceSOGSV2("Found \(entryCount) files in archive")
     }
     
     deinit {
@@ -663,18 +673,18 @@ private class SOGSZipArchive {
     func extractFile(_ filename: String) throws -> Data {
         return try archiveQueue.sync(execute: { () throws -> Data in
             guard let entry = entriesByName[filename] else {
-                print("SOGSZipArchive: File not found: \(filename)")
+                traceSOGSV2("Archive file not found: \(filename)")
                 throw SplatSOGSSceneReaderV2.SOGSV2Error.missingFile(filename)
             }
 
             // Pre-validate size from ZIP directory (trusted for non-malicious files)
             let uncompressedSize = entry.uncompressedSize
             if uncompressedSize > Self.maxExtractedFileSize {
-                print("SOGSZipArchive: File \(filename) too large: \(uncompressedSize) bytes")
+                sogsV2Log.warning("Archive file \(filename, privacy: .public) too large: \(uncompressedSize) bytes")
                 throw SplatSOGSSceneReaderV2.SOGSV2Error.fileTooLarge(filename)
             }
 
-            print("SOGSZipArchive: Extracting \(filename)...")
+            traceSOGSV2("Extracting \(filename)")
             var extractedData = Data()
 
             // Reserve with capped size
@@ -700,16 +710,16 @@ private class SOGSZipArchive {
 
                 // Check if extraction was aborted due to size
                 if tooLarge {
-                    print("SOGSZipArchive: Extraction of \(filename) aborted - output too large")
+                    sogsV2Log.warning("Extraction of \(filename, privacy: .public) aborted because output exceeded limit")
                     throw SplatSOGSSceneReaderV2.SOGSV2Error.fileTooLarge(filename)
                 }
 
-                print("SOGSZipArchive: Extracted \(extractedData.count) bytes")
+                traceSOGSV2("Extracted \(extractedData.count) bytes")
                 return extractedData
             } catch let error as SplatSOGSSceneReaderV2.SOGSV2Error {
                 throw error  // Re-throw our own errors
             } catch {
-                print("SOGSZipArchive: Failed to extract \(filename): \(error)")
+                sogsV2Log.error("Failed to extract \(filename, privacy: .public): \(error.localizedDescription, privacy: .public)")
                 throw SplatSOGSSceneReaderV2.SOGSV2Error.zipDecodingFailed("Failed to extract \(filename): \(error.localizedDescription)")
             }
         })

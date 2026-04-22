@@ -40,6 +40,11 @@ public actor StreamingLODManager {
     /// Callback when a node is unloaded
     public var onNodeUnloaded: ((String) -> Void)?
 
+    private enum LoadPlan: Sendable {
+        case external(URL, Int)
+        case inline(Int)
+    }
+
     /// Whether the manager is actively streaming
     public private(set) var isStreaming: Bool = false
 
@@ -121,19 +126,28 @@ public actor StreamingLODManager {
         loadingNodes.insert(nodeID)
         isStreaming = true
 
-        Task {
+        let plan: LoadPlan
+        do {
+            plan = try makeLoadPlan(nodeID: nodeID)
+        } catch {
+            Self.log.error("Failed to prepare node \(nodeID): \(error.localizedDescription)")
+            await completeLoading(nodeID: nodeID, success: false, memoryBytes: 0)
+            return
+        }
+
+        Task.detached(priority: .userInitiated) { [weak self] in
             do {
-                let memoryUsed = try await loadNodeData(nodeID: nodeID)
-                await completeLoading(nodeID: nodeID, success: true, memoryBytes: memoryUsed)
+                let memoryUsed = try Self.executeLoadPlan(plan)
+                await self?.completeLoading(nodeID: nodeID, success: true, memoryBytes: memoryUsed)
             } catch {
                 Self.log.error("Failed to load node \(nodeID): \(error)")
-                await completeLoading(nodeID: nodeID, success: false, memoryBytes: 0)
+                await self?.completeLoading(nodeID: nodeID, success: false, memoryBytes: 0)
             }
         }
     }
 
-    /// Loads splat data for a node
-    private func loadNodeData(nodeID: String) async throws -> Int {
+    /// Resolves the data source for a node without performing blocking IO on the actor.
+    private func makeLoadPlan(nodeID: String) throws -> LoadPlan {
         guard let node = octree.scene.nodes[nodeID] else {
             throw StreamingError.nodeNotFound(nodeID)
         }
@@ -145,38 +159,35 @@ public actor StreamingLODManager {
         }
 
         if let url = lod.resourceURL {
-            // Load from external file
-            return try await loadFromURL(url: url, splatCount: lod.splatCount)
+            return .external(resolveURL(url), lod.splatCount)
         } else if let range = lod.splatRange {
-            // Data is already inline - just mark as loaded
             let memoryEstimate = range.count * MemoryLayout<Float>.stride * 20  // ~20 floats per splat estimate
-            return memoryEstimate
+            return .inline(memoryEstimate)
         } else {
             throw StreamingError.noLODData(nodeID)
         }
     }
 
-    /// Loads splat data from a URL
-    private func loadFromURL(url: URL, splatCount: Int) async throws -> Int {
-        // Resolve relative URLs against base URL if needed
-        let resolvedURL: URL
+    private func resolveURL(_ url: URL) -> URL {
         if url.isFileURL || url.scheme != nil {
-            resolvedURL = url
+            return url
         } else if let base = baseURL {
-            resolvedURL = base.appendingPathComponent(url.path)
+            return base.appendingPathComponent(url.path)
         } else {
-            resolvedURL = url
+            return url
         }
+    }
 
-        // Load data
-        let data = try Data(contentsOf: resolvedURL)
-
-        // Estimate memory usage
-        let memoryUsed = data.count
-
-        Self.log.debug("Loaded \(splatCount) splats from \(resolvedURL.lastPathComponent), \(memoryUsed / 1024)KB")
-
-        return memoryUsed
+    private nonisolated static func executeLoadPlan(_ plan: LoadPlan) throws -> Int {
+        switch plan {
+        case .inline(let memoryEstimate):
+            return memoryEstimate
+        case .external(let resolvedURL, let splatCount):
+            let data = try Data(contentsOf: resolvedURL, options: [.mappedIfSafe])
+            let memoryUsed = data.count
+            Self.log.debug("Loaded \(splatCount) splats from \(resolvedURL.lastPathComponent), \(memoryUsed / 1024)KB")
+            return memoryUsed
+        }
     }
 
     /// Completes a loading operation
