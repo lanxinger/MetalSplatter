@@ -271,6 +271,22 @@ final class SplatEditorTests: XCTestCase {
         XCTAssertEqual(store.planeSelectionIndices(plane: plane, side: .positive), [2])
     }
 
+    func testEditableStorePlaneSelectionUsesConservativeCutMargin() {
+        let points = [
+            makePoint(position: SIMD3<Float>(0.0, -0.18, -2.0), color: SIMD3<Float>(1.0, 0.0, 0.0), scale: SIMD3<Float>(repeating: 0.05)),
+            makePoint(position: SIMD3<Float>(0.0, -0.35, -2.0), color: SIMD3<Float>(0.0, 1.0, 0.0), scale: SIMD3<Float>(repeating: 0.05)),
+            makePoint(position: SIMD3<Float>(0.0, 0.25, -2.0), color: SIMD3<Float>(0.0, 0.0, 1.0), scale: SIMD3<Float>(repeating: 0.02))
+        ]
+        let store = EditableSplatStore(points: points)
+        let plane = SplatCutPlane(
+            point: SIMD3<Float>(0.0, 0.0, -2.0),
+            normal: SIMD3<Float>(0.0, 1.0, 0.0)
+        )
+
+        XCTAssertEqual(store.planeSelectionIndices(plane: plane, side: .negative), [1])
+        XCTAssertEqual(store.planeSelectionIndices(plane: plane, side: .positive), [2])
+    }
+
     func testEditableStoreBoundsForSelectableIndicesExcludeLockedPoints() throws {
         var store = EditableSplatStore(points: makePoints())
         store.states[3].insert(.locked)

@@ -456,6 +456,15 @@ extension FastSHSplatRenderer {
         // Set buffers
         renderEncoder.setVertexBuffer(activeSplatSHBuffer.buffer, offset: 0, index: BufferIndex.splat.rawValue)
         renderEncoder.setVertexBuffer(dynamicUniformBuffers, offset: uniformBufferOffset, index: BufferIndex.uniforms.rawValue)
+        if let editStateBuffer {
+            renderEncoder.setVertexBuffer(editStateBuffer, offset: 0, index: BufferIndex.editState.rawValue)
+        }
+        if let editTransformIndexBuffer {
+            renderEncoder.setVertexBuffer(editTransformIndexBuffer, offset: 0, index: BufferIndex.transformIndex.rawValue)
+        }
+        if let editTransformPaletteBuffer {
+            renderEncoder.setVertexBuffer(editTransformPaletteBuffer, offset: 0, index: BufferIndex.transformPalette.rawValue)
+        }
 
         // GPU-only sorting: pass sorted indices buffer to shader
         if let sortedIndices = sortedIndicesBuffer {
@@ -467,11 +476,11 @@ extension FastSHSplatRenderer {
 
         // Set SH palette data with skip flag based on threshold
         if let paletteBuffer = shPaletteBuffer {
-            renderEncoder.setVertexBuffer(paletteBuffer, offset: 0, index: 3)
+            renderEncoder.setVertexBuffer(paletteBuffer, offset: 0, index: 7)
             var params = shaderParameters
             // Skip SH evaluation if disabled or camera hasn't moved enough
             params.skipSHEvaluation = (shRenderingEnabled && shouldUpdateSH) ? 0 : 1
-            renderEncoder.setVertexBytes(&params, length: MemoryLayout<FastSHShaderParameters>.stride, index: 4)
+            renderEncoder.setVertexBytes(&params, length: MemoryLayout<FastSHShaderParameters>.stride, index: 8)
 
             // Mark SH as updated if we evaluated this frame
             if shouldUpdateSH {

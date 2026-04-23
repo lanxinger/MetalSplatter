@@ -760,9 +760,10 @@ struct EditableSplatStore: Sendable {
     }
 
     private func selectionPlaneFootprintExtent(for point: SplatScenePoint) -> Float {
-        // Match the renderer's visible Gaussian support radius so plane cuts only
-        // affect splats that sit fully on the requested side.
-        maxRepresentativeScale(for: point) * 3
+        // Deleting an entire splat is more destructive than just tinting it in the preview,
+        // so keep a conservative margin beyond the nominal 3-sigma support to avoid
+        // exposing interior splats above the user's crop plane.
+        maxRepresentativeScale(for: point) * 3.75
     }
 
     private func voxelKey(for position: SIMD3<Float>, origin: SIMD3<Float>, voxelSize: Float) -> VoxelKey {

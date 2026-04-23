@@ -18,6 +18,9 @@ extern constant bool HAS_SH_BAND_1;
 extern constant bool HAS_SH_BAND_2;
 extern constant bool HAS_SH_BAND_3;
 
+constant constexpr int FastSHBufferIndexPalette = 7;
+constant constexpr int FastSHBufferIndexParams = 8;
+
 struct FastSHParams {
     uint coeffsPerEntry;
     uint paletteSize;
@@ -113,8 +116,11 @@ vertex FragmentIn fastSHSplatVertexShader(uint vertexID [[vertex_id]],
                                          constant SplatSH* splatArray [[ buffer(BufferIndexSplat) ]],
                                          constant UniformsArray & uniformsArray [[ buffer(BufferIndexUniforms) ]],
                                          constant int32_t* sortedIndices [[ buffer(BufferIndexSortedIndices) ]],
-                                         device const half3* shPalette [[ buffer(3) ]],
-                                         constant FastSHParams& params [[ buffer(4) ]]) {
+                                         const device uint *editStates [[ buffer(BufferIndexEditState) ]],
+                                         const device uint *transformIndices [[ buffer(BufferIndexTransformIndex) ]],
+                                         const device float4x4 *transformPalette [[ buffer(BufferIndexTransformPalette) ]],
+                                         device const half3* shPalette [[ buffer(FastSHBufferIndexPalette) ]],
+                                         constant FastSHParams& params [[ buffer(FastSHBufferIndexParams) ]]) {
     Uniforms uniforms = uniformsArray.uniforms[min(int(amplificationID), kMaxViewCount - 1)];
     
     uint logicalSplatID = instanceID * uniforms.indexedSplatCount + (vertexID / 4);
@@ -145,8 +151,15 @@ vertex FragmentIn fastSHSplatVertexShader(uint vertexID [[vertex_id]],
     SplatSH splatSH = splatArray[actualSplatID];
     // Evaluate in Gaussian local frame
     Splat splat = evaluateSplatWithSH(splatSH, uniforms, shPalette, params);
+    uint editState = editStates != nullptr ? editStates[actualSplatID] : 0u;
 
-    return splatVertex(splat, uniforms, vertexID % 4, actualSplatID);
+    return splatVertex(splat,
+                       uniforms,
+                       vertexID % 4,
+                       actualSplatID,
+                       editState,
+                       transformIndices,
+                       transformPalette);
 }
 
 // Fragment shader remains the same
@@ -162,8 +175,11 @@ vertex FragmentIn textureSHSplatVertexShader(uint vertexID [[vertex_id]],
                                             constant SplatSH* splatArray [[ buffer(BufferIndexSplat) ]],
                                             constant UniformsArray & uniformsArray [[ buffer(BufferIndexUniforms) ]],
                                             constant int32_t* sortedIndices [[ buffer(BufferIndexSortedIndices) ]],
-                                            device const half3* shPalette [[ buffer(3) ]],
-                                            constant FastSHParams& params [[ buffer(4) ]]) {
+                                            const device uint *editStates [[ buffer(BufferIndexEditState) ]],
+                                            const device uint *transformIndices [[ buffer(BufferIndexTransformIndex) ]],
+                                            const device float4x4 *transformPalette [[ buffer(BufferIndexTransformPalette) ]],
+                                            device const half3* shPalette [[ buffer(FastSHBufferIndexPalette) ]],
+                                            constant FastSHParams& params [[ buffer(FastSHBufferIndexParams) ]]) {
     Uniforms uniforms = uniformsArray.uniforms[min(int(amplificationID), kMaxViewCount - 1)];
     
     uint logicalSplatID = instanceID * uniforms.indexedSplatCount + (vertexID / 4);
@@ -193,5 +209,12 @@ vertex FragmentIn textureSHSplatVertexShader(uint vertexID [[vertex_id]],
     }
     SplatSH splatSH = splatArray[actualSplatID];
     Splat splat = evaluateSplatWithSH(splatSH, uniforms, shPalette, params);
-    return splatVertex(splat, uniforms, vertexID % 4, actualSplatID);
+    uint editState = editStates != nullptr ? editStates[actualSplatID] : 0u;
+    return splatVertex(splat,
+                       uniforms,
+                       vertexID % 4,
+                       actualSplatID,
+                       editState,
+                       transformIndices,
+                       transformPalette);
 }
