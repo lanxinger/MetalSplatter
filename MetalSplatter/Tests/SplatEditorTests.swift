@@ -265,6 +265,94 @@ final class SplatEditorTests: XCTestCase {
         XCTAssertEqual(bounds.max.y, 0.0, accuracy: 0.0001)
     }
 
+    func testEditableStoreOutlierIndicesSelectDetachedSparseVoxels() {
+        let store = EditableSplatStore(points: makeOutlierPoints())
+
+        let outliers = store.outlierIndices(
+            config: OutlierSelectionConfig(
+                scope: .visibleOnly,
+                voxelFractionOfBounds: 0.05,
+                minimumVoxelSize: 0.04,
+                maximumVoxelSize: 0.2,
+                scaleInfluence: 1.0,
+                coreDensityThreshold: 0.3,
+                annexDensityThreshold: 0.05
+            )
+        )
+
+        XCTAssertEqual(outliers.sorted(), [6, 7])
+    }
+
+    func testEditableStoreOutlierIndicesRespectSelectionScope() {
+        var store = EditableSplatStore(points: makeOutlierPoints())
+        _ = store.applySelection(indices: [0, 1, 2, 6], mode: .replace)
+
+        let outliers = store.outlierIndices(
+            config: OutlierSelectionConfig(
+                scope: .selectionOnly,
+                voxelFractionOfBounds: 0.05,
+                minimumVoxelSize: 0.04,
+                maximumVoxelSize: 0.2,
+                scaleInfluence: 1.0,
+                coreDensityThreshold: 0.3,
+                annexDensityThreshold: 0.05
+            )
+        )
+
+        XCTAssertEqual(outliers, [6])
+    }
+
+    func testEditableStoreOutlierIndicesSkipHiddenLockedAndDeletedSplats() {
+        var store = EditableSplatStore(points: makeOutlierPoints())
+        store.states[6].insert(.hidden)
+        store.states[7].insert(.locked)
+        store.states[5].insert(.deleted)
+
+        let outliers = store.outlierIndices(
+            config: OutlierSelectionConfig(
+                scope: .visibleOnly,
+                voxelFractionOfBounds: 0.05,
+                minimumVoxelSize: 0.04,
+                maximumVoxelSize: 0.2,
+                scaleInfluence: 1.0,
+                coreDensityThreshold: 0.3,
+                annexDensityThreshold: 0.05
+            )
+        )
+
+        XCTAssertEqual(outliers, [])
+    }
+
+    func testEditableStoreOutlierIndicesDownWeightOversizedLooseSplats() {
+        let points = [
+            makePoint(position: SIMD3<Float>(0.00, 0.00, -2.0), color: SIMD3<Float>(1.0, 0.2, 0.2), opacity: 0.25),
+            makePoint(position: SIMD3<Float>(0.06, 0.00, -2.0), color: SIMD3<Float>(0.9, 0.2, 0.2), opacity: 0.25),
+            makePoint(position: SIMD3<Float>(0.00, 0.06, -2.0), color: SIMD3<Float>(0.8, 0.2, 0.2), opacity: 0.25),
+            makePoint(
+                position: SIMD3<Float>(1.8, 1.8, -2.0),
+                color: SIMD3<Float>(0.2, 0.2, 1.0),
+                opacity: 1.0,
+                scale: SIMD3<Float>(repeating: 1.5)
+            )
+        ]
+        let store = EditableSplatStore(points: points)
+
+        let outliers = store.outlierIndices(
+            config: OutlierSelectionConfig(
+                scope: .visibleOnly,
+                voxelFractionOfBounds: 0.05,
+                minimumVoxelSize: 0.04,
+                maximumVoxelSize: 0.2,
+                scaleInfluence: 1.0,
+                coreDensityThreshold: 0.3,
+                annexDensityThreshold: 0.05,
+                largeSplatPenalty: 1.0
+            )
+        )
+
+        XCTAssertEqual(outliers, [3])
+    }
+
     func testRectSelectionHideDeleteUndoRedoAndExportRoundTrip() async throws {
         let renderer = try makeRenderer()
         let editor = try await SplatEditor(points: makePoints(), renderer: renderer)
@@ -502,12 +590,28 @@ final class SplatEditorTests: XCTestCase {
         ]
     }
 
-    private func makePoint(position: SIMD3<Float>, color: SIMD3<Float>, opacity: Float = 1.0) -> SplatScenePoint {
+    private func makeOutlierPoints() -> [SplatScenePoint] {
+        [
+            makePoint(position: SIMD3<Float>(0.00, 0.00, -2.0), color: SIMD3<Float>(0.9, 0.1, 0.1)),
+            makePoint(position: SIMD3<Float>(0.04, 0.00, -2.0), color: SIMD3<Float>(0.85, 0.1, 0.1)),
+            makePoint(position: SIMD3<Float>(0.00, 0.04, -2.0), color: SIMD3<Float>(0.8, 0.15, 0.1)),
+            makePoint(position: SIMD3<Float>(-0.04, 0.00, -2.0), color: SIMD3<Float>(0.75, 0.15, 0.1)),
+            makePoint(position: SIMD3<Float>(0.00, -0.04, -2.0), color: SIMD3<Float>(0.7, 0.2, 0.1)),
+            makePoint(position: SIMD3<Float>(0.08, 0.02, -2.0), color: SIMD3<Float>(0.65, 0.25, 0.1)),
+            makePoint(position: SIMD3<Float>(1.60, 1.55, -2.0), color: SIMD3<Float>(0.1, 0.7, 1.0), opacity: 0.5),
+            makePoint(position: SIMD3<Float>(1.85, 1.70, -2.0), color: SIMD3<Float>(0.1, 0.6, 1.0), opacity: 0.45)
+        ]
+    }
+
+    private func makePoint(position: SIMD3<Float>,
+                           color: SIMD3<Float>,
+                           opacity: Float = 1.0,
+                           scale: SIMD3<Float> = SIMD3<Float>(repeating: 0.05)) -> SplatScenePoint {
         SplatScenePoint(
             position: position,
             color: .linearFloat(color),
             opacity: .linearFloat(opacity),
-            scale: .linearFloat(SIMD3<Float>(repeating: 0.05)),
+            scale: .linearFloat(scale),
             rotation: simd_quatf(angle: 0, axis: SIMD3<Float>(0, 1, 0))
         )
     }

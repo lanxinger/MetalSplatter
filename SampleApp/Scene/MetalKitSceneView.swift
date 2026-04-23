@@ -62,7 +62,7 @@ struct MetalKitSceneView: View {
             .ignoresSafeArea()
 
             #if os(iOS)
-            if editingController.isOverlayInteractionEnabled {
+            if editingController.isOverlayVisible {
                 SplatEditingOverlay(controller: editingController)
                     .ignoresSafeArea()
             }
@@ -670,6 +670,15 @@ final class SceneEditingController: ObservableObject {
                 false
             }
         }
+
+        var showsSceneGuide: Bool {
+            switch self {
+            case .box, .planeCut:
+                true
+            default:
+                false
+            }
+        }
     }
 
     struct ShareSheetPayload: Identifiable {
@@ -817,6 +826,10 @@ final class SceneEditingController: ObservableObject {
 
     var isOverlayInteractionEnabled: Bool {
         isEditorAvailable && tool.usesOverlaySelection
+    }
+
+    var isOverlayVisible: Bool {
+        isEditorAvailable && (tool.usesOverlaySelection || tool.showsSceneGuide)
     }
 
     var hasSelection: Bool {
@@ -1388,6 +1401,108 @@ final class SceneEditingController: ObservableObject {
             normal: cutPlaneAxis.unitNormal
         )
     }
+
+    fileprivate func projectedPlaneGuide(in size: CGSize) -> [CGPoint]? {
+        guard tool == .planeCut,
+              let renderer,
+              let bounds = cutPlaneBounds else {
+            return nil
+        }
+
+        let coordinate = cutPlaneAxis.interpolatedCoordinate(in: bounds, offset: cutPlaneOffset)
+        let corners: [SIMD3<Float>]
+        switch cutPlaneAxis {
+        case .x:
+            corners = [
+                SIMD3<Float>(coordinate, bounds.min.y, bounds.min.z),
+                SIMD3<Float>(coordinate, bounds.min.y, bounds.max.z),
+                SIMD3<Float>(coordinate, bounds.max.y, bounds.max.z),
+                SIMD3<Float>(coordinate, bounds.max.y, bounds.min.z)
+            ]
+        case .y:
+            corners = [
+                SIMD3<Float>(bounds.min.x, coordinate, bounds.min.z),
+                SIMD3<Float>(bounds.max.x, coordinate, bounds.min.z),
+                SIMD3<Float>(bounds.max.x, coordinate, bounds.max.z),
+                SIMD3<Float>(bounds.min.x, coordinate, bounds.max.z)
+            ]
+        case .z:
+            corners = [
+                SIMD3<Float>(bounds.min.x, bounds.min.y, coordinate),
+                SIMD3<Float>(bounds.max.x, bounds.min.y, coordinate),
+                SIMD3<Float>(bounds.max.x, bounds.max.y, coordinate),
+                SIMD3<Float>(bounds.min.x, bounds.max.y, coordinate)
+            ]
+        }
+
+        let projected = corners.compactMap { renderer.projectEditableGuidePoint($0, renderSize: size) }
+        return projected.count == corners.count ? projected : nil
+    }
+
+    fileprivate func projectedPlaneNormalGuide(in size: CGSize) -> (start: CGPoint, end: CGPoint)? {
+        guard tool == .planeCut,
+              let renderer,
+              let bounds = cutPlaneBounds else {
+            return nil
+        }
+
+        let start3D = cutPlaneAxis.planePoint(in: bounds, offset: cutPlaneOffset)
+        let span = bounds.max - bounds.min
+        let axisSpan: Float
+        switch cutPlaneAxis {
+        case .x:
+            axisSpan = max(span.y, span.z)
+        case .y:
+            axisSpan = max(span.x, span.z)
+        case .z:
+            axisSpan = max(span.x, span.y)
+        }
+        let direction: Float = cutPlaneSide == .positive ? 1 : -1
+        let end3D = start3D + (cutPlaneAxis.unitNormal * max(axisSpan * 0.2, 0.1) * direction)
+
+        guard let start = renderer.projectEditableGuidePoint(start3D, renderSize: size),
+              let end = renderer.projectEditableGuidePoint(end3D, renderSize: size) else {
+            return nil
+        }
+
+        return (start, end)
+    }
+
+    fileprivate func projectedBoxGuideSegments(in size: CGSize) -> [(CGPoint, CGPoint)] {
+        guard tool == .box,
+              let renderer,
+              let bounds = referenceBounds else {
+            return []
+        }
+
+        let center = bounds.center
+        let extents = SIMD3<Float>(
+            max(boxExtentX, 0.05),
+            max(boxExtentY, 0.05),
+            max(boxExtentZ, 0.05)
+        )
+        let corners = [
+            SIMD3<Float>(center.x - extents.x, center.y - extents.y, center.z - extents.z),
+            SIMD3<Float>(center.x + extents.x, center.y - extents.y, center.z - extents.z),
+            SIMD3<Float>(center.x + extents.x, center.y + extents.y, center.z - extents.z),
+            SIMD3<Float>(center.x - extents.x, center.y + extents.y, center.z - extents.z),
+            SIMD3<Float>(center.x - extents.x, center.y - extents.y, center.z + extents.z),
+            SIMD3<Float>(center.x + extents.x, center.y - extents.y, center.z + extents.z),
+            SIMD3<Float>(center.x + extents.x, center.y + extents.y, center.z + extents.z),
+            SIMD3<Float>(center.x - extents.x, center.y + extents.y, center.z + extents.z)
+        ]
+        let projected = corners.map { renderer.projectEditableGuidePoint($0, renderSize: size) }
+        let edges = [
+            (0, 1), (1, 2), (2, 3), (3, 0),
+            (4, 5), (5, 6), (6, 7), (7, 4),
+            (0, 4), (1, 5), (2, 6), (3, 7)
+        ]
+
+        return edges.compactMap { startIndex, endIndex in
+            guard let start = projected[startIndex], let end = projected[endIndex] else { return nil }
+            return (start, end)
+        }
+    }
 }
 
 private struct SplatEditingToolbar: View {
@@ -1685,6 +1800,50 @@ private struct SplatEditingOverlay: View {
     var body: some View {
         GeometryReader { geometry in
             Canvas { context, _ in
+                if let planeGuide = controller.projectedPlaneGuide(in: geometry.size) {
+                    var planePath = Path()
+                    planePath.addLines(planeGuide)
+                    planePath.closeSubpath()
+                    context.fill(planePath, with: .color(.pink.opacity(0.10)))
+                    context.stroke(planePath, with: .color(.pink), style: StrokeStyle(lineWidth: 2, dash: [8, 4]))
+                }
+
+                if let normalGuide = controller.projectedPlaneNormalGuide(in: geometry.size) {
+                    var normalPath = Path()
+                    normalPath.move(to: normalGuide.start)
+                    normalPath.addLine(to: normalGuide.end)
+                    context.stroke(normalPath, with: .color(.pink), style: StrokeStyle(lineWidth: 2))
+
+                    let dx = normalGuide.end.x - normalGuide.start.x
+                    let dy = normalGuide.end.y - normalGuide.start.y
+                    let length = max(hypot(dx, dy), 0.001)
+                    let ux = dx / length
+                    let uy = dy / length
+                    let arrowLength: CGFloat = 12
+                    let arrowWidth: CGFloat = 6
+                    let arrowPointA = CGPoint(
+                        x: normalGuide.end.x - (ux * arrowLength) + (uy * arrowWidth),
+                        y: normalGuide.end.y - (uy * arrowLength) - (ux * arrowWidth)
+                    )
+                    let arrowPointB = CGPoint(
+                        x: normalGuide.end.x - (ux * arrowLength) - (uy * arrowWidth),
+                        y: normalGuide.end.y - (uy * arrowLength) + (ux * arrowWidth)
+                    )
+                    var arrowPath = Path()
+                    arrowPath.move(to: normalGuide.end)
+                    arrowPath.addLine(to: arrowPointA)
+                    arrowPath.addLine(to: arrowPointB)
+                    arrowPath.closeSubpath()
+                    context.fill(arrowPath, with: .color(.pink))
+                }
+
+                for (start, end) in controller.projectedBoxGuideSegments(in: geometry.size) {
+                    var edgePath = Path()
+                    edgePath.move(to: start)
+                    edgePath.addLine(to: end)
+                    context.stroke(edgePath, with: .color(.yellow), style: StrokeStyle(lineWidth: 2, dash: [6, 4]))
+                }
+
                 switch controller.overlayPreview {
                 case let .rect(rect):
                     context.stroke(Path(rect), with: .color(.cyan), style: StrokeStyle(lineWidth: 2, dash: [8, 4]))
@@ -1742,6 +1901,7 @@ private struct SplatEditingOverlay: View {
                 }
             }
             .contentShape(Rectangle())
+            .allowsHitTesting(controller.tool.usesOverlaySelection)
             .gesture(
                 DragGesture(minimumDistance: 0)
                     .onChanged { value in

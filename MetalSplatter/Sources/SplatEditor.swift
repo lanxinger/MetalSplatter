@@ -82,6 +82,54 @@ public struct SplatSelectionBounds: Sendable {
     }
 }
 
+public enum OutlierSelectionScope: Sendable {
+    case selectionIfAvailable
+    case selectionOnly
+    case visibleOnly
+}
+
+public enum OutlierVoxelConnectivity: Sendable {
+    case axisAligned
+    case allNeighbors
+}
+
+public struct OutlierSelectionConfig: Sendable {
+    public var scope: OutlierSelectionScope
+    public var voxelFractionOfBounds: Float
+    public var minimumVoxelSize: Float
+    public var maximumVoxelSize: Float
+    public var scaleInfluence: Float
+    public var coreDensityThreshold: Float
+    public var annexDensityThreshold: Float
+    public var largeSplatPenalty: Float
+    public var minimumOpacityWeight: Float
+    public var connectivity: OutlierVoxelConnectivity
+
+    public init(
+        scope: OutlierSelectionScope = .selectionIfAvailable,
+        voxelFractionOfBounds: Float = 0.035,
+        minimumVoxelSize: Float = 0.02,
+        maximumVoxelSize: Float = 0.25,
+        scaleInfluence: Float = 1.5,
+        coreDensityThreshold: Float = 0.35,
+        annexDensityThreshold: Float = 0.08,
+        largeSplatPenalty: Float = 1.0,
+        minimumOpacityWeight: Float = 0.05,
+        connectivity: OutlierVoxelConnectivity = .allNeighbors
+    ) {
+        self.scope = scope
+        self.voxelFractionOfBounds = voxelFractionOfBounds
+        self.minimumVoxelSize = minimumVoxelSize
+        self.maximumVoxelSize = maximumVoxelSize
+        self.scaleInfluence = scaleInfluence
+        self.coreDensityThreshold = coreDensityThreshold
+        self.annexDensityThreshold = annexDensityThreshold
+        self.largeSplatPenalty = largeSplatPenalty
+        self.minimumOpacityWeight = minimumOpacityWeight
+        self.connectivity = connectivity
+    }
+}
+
 public struct SplatEditorSnapshot: Sendable {
     public var totalCount: Int
     public var visibleCount: Int
@@ -138,6 +186,17 @@ enum SplatEditHistoryEntry: Sendable {
 }
 
 struct EditableSplatStore: Sendable {
+    private struct VoxelKey: Hashable, Sendable {
+        var x: Int32
+        var y: Int32
+        var z: Int32
+    }
+
+    private struct OutlierVoxel: Sendable {
+        var score: Float = 0
+        var indices: [Int] = []
+    }
+
     struct ProjectedCandidate: Sendable {
         var index: Int
         var normalized: SIMD2<Float>
@@ -529,6 +588,82 @@ struct EditableSplatStore: Sendable {
         return SplatSelectionBounds(min: minimum, max: maximum)
     }
 
+    func outlierIndices(config: OutlierSelectionConfig = OutlierSelectionConfig()) -> [Int] {
+        let candidateIndices = outlierCandidateIndices(scope: config.scope)
+        guard candidateIndices.count > 1,
+              let candidateBounds = bounds(for: candidateIndices) else {
+            return []
+        }
+
+        let clampedVoxelFraction = max(config.voxelFractionOfBounds, 0.001)
+        let clampedScaleInfluence = max(config.scaleInfluence, 0)
+        let averageScale = averageRepresentativeScale(for: candidateIndices)
+        let diagonal = simd_length(candidateBounds.max - candidateBounds.min)
+        let unclampedVoxelSize = max(diagonal * clampedVoxelFraction, averageScale * clampedScaleInfluence)
+        let voxelSize = min(
+            max(unclampedVoxelSize, max(config.minimumVoxelSize, 0.0001)),
+            max(config.maximumVoxelSize, config.minimumVoxelSize)
+        )
+
+        var voxels: [VoxelKey: OutlierVoxel] = [:]
+        voxels.reserveCapacity(candidateIndices.count)
+
+        let minimumOpacityWeight = max(config.minimumOpacityWeight, 0)
+        let scaleReference = max(averageScale, 0.0001)
+
+        for index in candidateIndices {
+            let key = voxelKey(for: points[index].position, origin: candidateBounds.min, voxelSize: voxelSize)
+            let representativeScale = maxRepresentativeScale(for: points[index])
+            let oversizeRatio = max(representativeScale / scaleReference - 1, 0)
+            let scaleWeight = 1 / (1 + max(config.largeSplatPenalty, 0) * oversizeRatio)
+            let opacityWeight = max(points[index].opacity.asLinearFloat, minimumOpacityWeight)
+            let pointWeight = opacityWeight * scaleWeight
+
+            voxels[key, default: OutlierVoxel()].score += pointWeight
+            voxels[key, default: OutlierVoxel()].indices.append(index)
+        }
+
+        guard let peakEntry = voxels.max(by: { lhs, rhs in
+            if lhs.value.score == rhs.value.score {
+                return lhs.value.indices.count < rhs.value.indices.count
+            }
+            return lhs.value.score < rhs.value.score
+        }) else {
+            return []
+        }
+
+        let peakKey = peakEntry.key
+        let peakScore = max(peakEntry.value.score, 0.0001)
+        let coreThreshold = peakScore * max(min(config.coreDensityThreshold, 1), 0)
+        let annexThreshold = peakScore * max(min(config.annexDensityThreshold, 1), 0)
+
+        let coreVoxels = Set(voxels.compactMap { key, voxel in
+            voxel.score >= coreThreshold ? key : nil
+        })
+        guard coreVoxels.contains(peakKey) else {
+            return []
+        }
+
+        let denseCore = connectedVoxelComponent(
+            startingAt: peakKey,
+            eligible: coreVoxels,
+            connectivity: config.connectivity
+        )
+
+        let subjectVoxels = connectedVoxelComponent(
+            startingFrom: denseCore,
+            eligible: Set(voxels.compactMap { key, voxel in
+                voxel.score >= annexThreshold ? key : nil
+            }),
+            connectivity: config.connectivity
+        )
+
+        let subjectIndices = Set(subjectVoxels.flatMap { voxels[$0]?.indices ?? [] })
+        guard !subjectIndices.isEmpty else { return [] }
+
+        return candidateIndices.filter { !subjectIndices.contains($0) }
+    }
+
     private func isSelectable(_ index: Int) -> Bool {
         let state = states[index]
         return !state.contains(.hidden) && !state.contains(.deleted) && !state.contains(.locked)
@@ -595,6 +730,101 @@ struct EditableSplatStore: Sendable {
             Int32(floor(normalized.x / cellSize)),
             Int32(floor(normalized.y / cellSize))
         )
+    }
+
+    private func outlierCandidateIndices(scope: OutlierSelectionScope) -> [Int] {
+        switch scope {
+        case .selectionIfAvailable:
+            let selected = selectedIndices.filter(isSelectable)
+            return selected.isEmpty ? selectableIndices : selected
+        case .selectionOnly:
+            return selectedIndices.filter(isSelectable)
+        case .visibleOnly:
+            return selectableIndices
+        }
+    }
+
+    private func averageRepresentativeScale(for indices: [Int]) -> Float {
+        guard !indices.isEmpty else { return 0.05 }
+
+        let total = indices.reduce(Float.zero) { partialResult, index in
+            partialResult + maxRepresentativeScale(for: points[index])
+        }
+        return max(total / Float(indices.count), 0.0001)
+    }
+
+    private func maxRepresentativeScale(for point: SplatScenePoint) -> Float {
+        let scale = point.scale.asLinearFloat
+        return max(scale.x, max(scale.y, scale.z))
+    }
+
+    private func voxelKey(for position: SIMD3<Float>, origin: SIMD3<Float>, voxelSize: Float) -> VoxelKey {
+        VoxelKey(
+            x: Int32(floor((position.x - origin.x) / voxelSize)),
+            y: Int32(floor((position.y - origin.y) / voxelSize)),
+            z: Int32(floor((position.z - origin.z) / voxelSize))
+        )
+    }
+
+    private func connectedVoxelComponent(startingAt start: VoxelKey,
+                                         eligible: Set<VoxelKey>,
+                                         connectivity: OutlierVoxelConnectivity) -> Set<VoxelKey> {
+        connectedVoxelComponent(startingFrom: [start], eligible: eligible, connectivity: connectivity)
+    }
+
+    private func connectedVoxelComponent(startingFrom starts: Set<VoxelKey>,
+                                         eligible: Set<VoxelKey>,
+                                         connectivity: OutlierVoxelConnectivity) -> Set<VoxelKey> {
+        var visited: Set<VoxelKey> = []
+        var queue = Array(starts.filter { eligible.contains($0) })
+        var queueIndex = 0
+
+        while queueIndex < queue.count {
+            let current = queue[queueIndex]
+            queueIndex += 1
+
+            guard visited.insert(current).inserted else { continue }
+
+            for neighbor in voxelNeighbors(for: current, connectivity: connectivity) where eligible.contains(neighbor) {
+                if !visited.contains(neighbor) {
+                    queue.append(neighbor)
+                }
+            }
+        }
+
+        return visited
+    }
+
+    private func voxelNeighbors(for key: VoxelKey,
+                                connectivity: OutlierVoxelConnectivity) -> [VoxelKey] {
+        switch connectivity {
+        case .axisAligned:
+            return [
+                VoxelKey(x: key.x - 1, y: key.y, z: key.z),
+                VoxelKey(x: key.x + 1, y: key.y, z: key.z),
+                VoxelKey(x: key.x, y: key.y - 1, z: key.z),
+                VoxelKey(x: key.x, y: key.y + 1, z: key.z),
+                VoxelKey(x: key.x, y: key.y, z: key.z - 1),
+                VoxelKey(x: key.x, y: key.y, z: key.z + 1)
+            ]
+        case .allNeighbors:
+            var neighbors: [VoxelKey] = []
+            neighbors.reserveCapacity(26)
+            for dz in -1...1 {
+                for dy in -1...1 {
+                    for dx in -1...1 where !(dx == 0 && dy == 0 && dz == 0) {
+                        neighbors.append(
+                            VoxelKey(
+                                x: key.x + Int32(dx),
+                                y: key.y + Int32(dy),
+                                z: key.z + Int32(dz)
+                            )
+                        )
+                    }
+                }
+            }
+            return neighbors
+        }
     }
 }
 

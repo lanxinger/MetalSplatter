@@ -751,6 +751,25 @@ class MetalKitSceneRenderer: NSObject, MTKViewDelegate {
         )
     }
 
+    func projectEditableGuidePoint(_ worldPoint: SIMD3<Float>,
+                                   renderSize: CGSize) -> CGPoint? {
+        let viewport = makeSplatViewport(for: renderSize)
+        let viewSpace = viewport.viewMatrix * SIMD4<Float>(worldPoint.x, worldPoint.y, worldPoint.z, 1)
+        guard viewSpace.z < -0.05 else { return nil }
+
+        let clip = viewport.projectionMatrix * viewSpace
+        guard abs(clip.w) > .ulpOfOne else { return nil }
+
+        let ndc = clip / clip.w
+        let safeWidth = max(renderSize.width, 1)
+        let safeHeight = max(renderSize.height, 1)
+
+        return CGPoint(
+            x: CGFloat((ndc.x + 1) * 0.5) * safeWidth,
+            y: CGFloat(1 - ((ndc.y + 1) * 0.5)) * safeHeight
+        )
+    }
+
     private func currentSelectionPivot() async -> SIMD3<Float>? {
         guard let snapshot = await currentEditorSnapshot(),
               let bounds = snapshot.selectionBounds else {
