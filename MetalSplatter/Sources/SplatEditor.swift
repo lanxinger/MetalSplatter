@@ -569,7 +569,8 @@ struct EditableSplatStore: Sendable {
         points.indices.filter { index in
             guard isSelectable(index) else { return false }
             let signedDistance = simd_dot(points[index].position - plane.point, plane.normal)
-            return side.contains(signedDistance: signedDistance)
+            let extent = selectionPlaneFootprintExtent(for: points[index])
+            return side.contains(signedDistance: signedDistance, extent: extent)
         }
     }
 
@@ -756,6 +757,12 @@ struct EditableSplatStore: Sendable {
     private func maxRepresentativeScale(for point: SplatScenePoint) -> Float {
         let scale = point.scale.asLinearFloat
         return max(scale.x, max(scale.y, scale.z))
+    }
+
+    private func selectionPlaneFootprintExtent(for point: SplatScenePoint) -> Float {
+        // Match the renderer's visible Gaussian support radius so plane cuts only
+        // affect splats that sit fully on the requested side.
+        maxRepresentativeScale(for: point) * 3
     }
 
     private func voxelKey(for position: SIMD3<Float>, origin: SIMD3<Float>, voxelSize: Float) -> VoxelKey {
@@ -1200,12 +1207,12 @@ private extension SplatScenePoint.Color {
 }
 
 private extension SplatCutPlaneSide {
-    func contains(signedDistance: Float) -> Bool {
+    func contains(signedDistance: Float, extent: Float = 0) -> Bool {
         switch self {
         case .negative:
-            return signedDistance <= 0
+            return signedDistance <= -extent
         case .positive:
-            return signedDistance >= 0
+            return signedDistance >= extent
         }
     }
 }

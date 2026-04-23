@@ -255,6 +255,22 @@ final class SplatEditorTests: XCTestCase {
         XCTAssertEqual(store.planeSelectionIndices(plane: plane, side: .positive), [2])
     }
 
+    func testEditableStorePlaneSelectionSkipsSplatsThatStraddleVisiblePlaneFootprint() {
+        let points = [
+            makePoint(position: SIMD3<Float>(0.0, -0.25, -2.0), color: SIMD3<Float>(1.0, 0.0, 0.0), scale: SIMD3<Float>(repeating: 0.02)),
+            makePoint(position: SIMD3<Float>(0.0, -0.02, -2.0), color: SIMD3<Float>(0.0, 1.0, 0.0), scale: SIMD3<Float>(repeating: 0.05)),
+            makePoint(position: SIMD3<Float>(0.0, 0.25, -2.0), color: SIMD3<Float>(0.0, 0.0, 1.0), scale: SIMD3<Float>(repeating: 0.02))
+        ]
+        let store = EditableSplatStore(points: points)
+        let plane = SplatCutPlane(
+            point: SIMD3<Float>(0.0, 0.0, -2.0),
+            normal: SIMD3<Float>(0.0, 1.0, 0.0)
+        )
+
+        XCTAssertEqual(store.planeSelectionIndices(plane: plane, side: .negative), [0])
+        XCTAssertEqual(store.planeSelectionIndices(plane: plane, side: .positive), [2])
+    }
+
     func testEditableStoreBoundsForSelectableIndicesExcludeLockedPoints() throws {
         var store = EditableSplatStore(points: makePoints())
         store.states[3].insert(.locked)
@@ -476,6 +492,27 @@ final class SplatEditorTests: XCTestCase {
         let selectionBounds = try XCTUnwrap(snapshot.selectionBounds)
         XCTAssertEqual(selectionBounds.min.x, 0.0, accuracy: 0.0001)
         XCTAssertEqual(selectionBounds.max.x, 0.55, accuracy: 0.0001)
+    }
+
+    func testPointSelectionUsesProjectedFootprintInsteadOfCenterOnly() async throws {
+        let renderer = try makeRenderer()
+        let points = [
+            makePoint(
+                position: SIMD3<Float>(0.14, 0.0, -2.0),
+                color: SIMD3<Float>(0.8, 0.7, 0.2),
+                scale: SIMD3<Float>(repeating: 0.18)
+            )
+        ]
+        let editor = try await SplatEditor(points: points, renderer: renderer)
+
+        try await editor.select(
+            .point(normalized: SIMD2<Float>(0.5, 0.5), radius: 0.01),
+            mode: .replace,
+            viewport: makeViewport()
+        )
+
+        let snapshot = await editor.snapshot()
+        XCTAssertEqual(snapshot.selectedCount, 1)
     }
 
     func testOutlierSelectionReplaceModeParticipatesInUndoRedoHistory() async throws {

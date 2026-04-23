@@ -32,6 +32,14 @@ final class SplatSelectionEngine: @unchecked Sendable {
         var padding1: Float
         var maskSize: SIMD2<UInt32>
         var padding2: SIMD2<UInt32>
+        var screenSize: SIMD2<UInt32>
+        var focalX: Float
+        var focalY: Float
+        var tanHalfFovX: Float
+        var tanHalfFovY: Float
+        var covarianceBlur: Float
+        var renderMode: UInt32
+        var padding3: SIMD2<UInt32>
     }
 
     private let device: MTLDevice
@@ -96,8 +104,11 @@ final class SplatSelectionEngine: @unchecked Sendable {
         }
 
         var maskTexture = dummyMaskTexture
+        let projectionMatrix = viewport.projectionMatrix
+        let projectionX = max(abs(projectionMatrix[0][0]), .ulpOfOne)
+        let projectionY = max(abs(projectionMatrix[1][1]), .ulpOfOne)
         var parameters = QueryParameters(
-            projectionMatrix: viewport.projectionMatrix,
+            projectionMatrix: projectionMatrix,
             viewMatrix: viewport.viewMatrix,
             point: SIMD2<Float>(0, 0),
             pointRadius: 0,
@@ -111,7 +122,15 @@ final class SplatSelectionEngine: @unchecked Sendable {
             boxExtents: .zero,
             padding1: 0,
             maskSize: .zero,
-            padding2: .zero
+            padding2: .zero,
+            screenSize: SIMD2<UInt32>(UInt32(max(viewport.screenSize.x, 1)), UInt32(max(viewport.screenSize.y, 1))),
+            focalX: Float(max(viewport.screenSize.x, 1)) * projectionX * 0.5,
+            focalY: Float(max(viewport.screenSize.y, 1)) * projectionY * 0.5,
+            tanHalfFovX: 1 / projectionX,
+            tanHalfFovY: 1 / projectionY,
+            covarianceBlur: renderer.covarianceBlur,
+            renderMode: renderer.renderMode.rawValue,
+            padding3: .zero
         )
 
         switch query {
@@ -212,8 +231,11 @@ final class SplatSelectionEngine: @unchecked Sendable {
             throw SplatEditorError.selectionEngineUnavailable
         }
 
+        let projectionMatrix = viewport.projectionMatrix
+        let projectionX = max(abs(projectionMatrix[0][0]), .ulpOfOne)
+        let projectionY = max(abs(projectionMatrix[1][1]), .ulpOfOne)
         var parameters = QueryParameters(
-            projectionMatrix: viewport.projectionMatrix,
+            projectionMatrix: projectionMatrix,
             viewMatrix: viewport.viewMatrix,
             point: normalized,
             pointRadius: radius,
@@ -227,7 +249,15 @@ final class SplatSelectionEngine: @unchecked Sendable {
             boxExtents: .zero,
             padding1: 0,
             maskSize: .zero,
-            padding2: .zero
+            padding2: .zero,
+            screenSize: SIMD2<UInt32>(UInt32(max(viewport.screenSize.x, 1)), UInt32(max(viewport.screenSize.y, 1))),
+            focalX: Float(max(viewport.screenSize.x, 1)) * projectionX * 0.5,
+            focalY: Float(max(viewport.screenSize.y, 1)) * projectionY * 0.5,
+            tanHalfFovX: 1 / projectionX,
+            tanHalfFovY: 1 / projectionY,
+            covarianceBlur: renderer.covarianceBlur,
+            renderMode: renderer.renderMode.rawValue,
+            padding3: .zero
         )
         memcpy(queryBuffer.contents(), &parameters, MemoryLayout<QueryParameters>.stride)
 
