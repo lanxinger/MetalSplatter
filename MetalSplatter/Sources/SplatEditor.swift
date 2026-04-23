@@ -886,6 +886,13 @@ public actor SplatEditor {
         try applyStateHistory(changes)
     }
 
+    public func selectOutliers(config: OutlierSelectionConfig = OutlierSelectionConfig(),
+                               mode: SelectionCombineMode) async throws {
+        let selected = store.outlierIndices(config: config)
+        let changes = store.applySelection(indices: selected, mode: mode)
+        try applyStateHistory(changes)
+    }
+
     public func beginPreviewTransform(pivot: SIMD3<Float>) async {
         previewTransform = PreviewTransformState(pivot: pivot, transform: .identity)
         previewTransformTouchedIndices = store.selectedIndices

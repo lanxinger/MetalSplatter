@@ -174,6 +174,7 @@ let editedPoints = try await editor.exportVisiblePoints()
 
 `SplatEditor` supports:
 - Point, rect, mask, sphere, and box selection queries
+- Density-based outlier selection via `selectOutliers(config:mode:)`
 - Move, rotate, and scale preview transforms with commit/cancel
 - Direct committed transforms for alignment or scripted edits
 - Half-space plane selection and cuts via `SplatCutPlane` / `SplatCutPlaneSide`

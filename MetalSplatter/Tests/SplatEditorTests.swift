@@ -478,6 +478,57 @@ final class SplatEditorTests: XCTestCase {
         XCTAssertEqual(selectionBounds.max.x, 0.55, accuracy: 0.0001)
     }
 
+    func testOutlierSelectionReplaceModeParticipatesInUndoRedoHistory() async throws {
+        let renderer = try makeRenderer()
+        let editor = try await SplatEditor(points: makeOutlierPoints(), renderer: renderer)
+
+        try await editor.selectOutliers(
+            config: makeOutlierSelectionConfig(),
+            mode: .replace
+        )
+
+        var snapshot = await editor.snapshot()
+        XCTAssertEqual(snapshot.selectedCount, 2)
+
+        try await editor.undo()
+        snapshot = await editor.snapshot()
+        XCTAssertEqual(snapshot.selectedCount, 0)
+
+        try await editor.redo()
+        snapshot = await editor.snapshot()
+        XCTAssertEqual(snapshot.selectedCount, 2)
+    }
+
+    func testOutlierSelectionRespectsAddAndSubtractModes() async throws {
+        let renderer = try makeRenderer()
+        let editor = try await SplatEditor(points: makeOutlierPoints(), renderer: renderer)
+
+        try await editor.select(
+            .sphere(center: SIMD3<Float>(0.0, 0.0, -2.0), radius: 0.15),
+            mode: .replace,
+            viewport: makeViewport()
+        )
+
+        var snapshot = await editor.snapshot()
+        XCTAssertEqual(snapshot.selectedCount, 6)
+
+        try await editor.selectOutliers(
+            config: makeOutlierSelectionConfig(),
+            mode: .add
+        )
+
+        snapshot = await editor.snapshot()
+        XCTAssertEqual(snapshot.selectedCount, 8)
+
+        try await editor.selectOutliers(
+            config: makeOutlierSelectionConfig(),
+            mode: .subtract
+        )
+
+        snapshot = await editor.snapshot()
+        XCTAssertEqual(snapshot.selectedCount, 6)
+    }
+
     func testPointPickingReturnsNearestVisibleSplatWithoutChangingSelection() async throws {
         let renderer = try makeRenderer()
         let editor = try await SplatEditor(points: makePoints(), renderer: renderer)
@@ -601,6 +652,18 @@ final class SplatEditorTests: XCTestCase {
             makePoint(position: SIMD3<Float>(1.60, 1.55, -2.0), color: SIMD3<Float>(0.1, 0.7, 1.0), opacity: 0.5),
             makePoint(position: SIMD3<Float>(1.85, 1.70, -2.0), color: SIMD3<Float>(0.1, 0.6, 1.0), opacity: 0.45)
         ]
+    }
+
+    private func makeOutlierSelectionConfig() -> OutlierSelectionConfig {
+        OutlierSelectionConfig(
+            scope: .visibleOnly,
+            voxelFractionOfBounds: 0.05,
+            minimumVoxelSize: 0.04,
+            maximumVoxelSize: 0.2,
+            scaleInfluence: 1.0,
+            coreDensityThreshold: 0.3,
+            annexDensityThreshold: 0.05
+        )
     }
 
     private func makePoint(position: SIMD3<Float>,
