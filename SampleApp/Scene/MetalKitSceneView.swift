@@ -1990,6 +1990,7 @@ struct MetalKitRendererView: ViewRepresentable {
         func updateSettings() {
             // Update renderer settings silently
             renderer?.fastSHSettings.enabled = parent.fastSHEnabled
+            renderer?.syncFastSHSettings()
             renderer?.setMetal4Bindless(parent.metal4BindlessEnabled)
             renderer?.setDebugAABB(parent.showDebugAABB)
             renderer?.setFrustumCulling(parent.frustumCullingEnabled)

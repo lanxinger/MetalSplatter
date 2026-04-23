@@ -535,6 +535,24 @@ extension FastSHSplatRenderer {
             baseInstance: 0
         )
 
+        if selectionOutlineEnabled,
+           editingEnabled,
+           let selectionOutlinePipelineState,
+           let selectionOutlineDepthState {
+            renderEncoder.setRenderPipelineState(selectionOutlinePipelineState)
+            renderEncoder.setDepthStencilState(selectionOutlineDepthState)
+            renderEncoder.drawIndexedPrimitives(
+                type: .triangle,
+                indexCount: requiredIndexCount,
+                indexType: UInt32.asMTLIndexType,
+                indexBuffer: indexBuffer.buffer,
+                indexBufferOffset: 0,
+                instanceCount: instanceCount,
+                baseVertex: 0,
+                baseInstance: 0
+            )
+        }
+
         renderEncoder.endEncoding()
     }
 

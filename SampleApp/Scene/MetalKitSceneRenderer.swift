@@ -230,7 +230,10 @@ class MetalKitSceneRenderer: NSObject, MTKViewDelegate {
         sampleCount: Int,
         points: [SplatScenePoint],
         maxSimultaneousRenders: Int,
-        useFastSH: Bool
+        useFastSH: Bool,
+        fastSHEnabled: Bool,
+        fastSHMaxPaletteSize: Int,
+        fastSHDirectionEpsilon: Float
     ) async throws -> SplatRenderer {
         try await Task.detached(priority: .userInitiated) {
             let renderer: SplatRenderer
@@ -243,6 +246,9 @@ class MetalKitSceneRenderer: NSObject, MTKViewDelegate {
                     maxViewCount: 1,
                     maxSimultaneousRenders: maxSimultaneousRenders
                 )
+                fastRenderer.fastSHConfig.enabled = fastSHEnabled
+                fastRenderer.fastSHConfig.maxPaletteSize = fastSHMaxPaletteSize
+                fastRenderer.shDirectionEpsilon = fastSHDirectionEpsilon
                 try await fastRenderer.loadSplatsWithSH(points)
                 renderer = fastRenderer
             } else {
@@ -328,7 +334,10 @@ class MetalKitSceneRenderer: NSObject, MTKViewDelegate {
                 sampleCount: sampleCount,
                 points: points,
                 maxSimultaneousRenders: maxSimultaneousRenders,
-                useFastSH: useFastSH
+                useFastSH: useFastSH,
+                fastSHEnabled: fastSHSettings.enabled,
+                fastSHMaxPaletteSize: fastSHSettings.maxPaletteSize,
+                fastSHDirectionEpsilon: fastSHSettings.shDirectionEpsilon
             )
 
             if cachedModel.renderMode == .mip {
@@ -368,11 +377,6 @@ class MetalKitSceneRenderer: NSObject, MTKViewDelegate {
 
             // Configure Fast SH if using FastSHSplatRenderer
             if let fastRenderer = splat as? FastSHSplatRenderer {
-                // Apply settings from FastSHSettings object
-                fastRenderer.fastSHConfig.enabled = fastSHSettings.enabled
-                fastRenderer.fastSHConfig.maxPaletteSize = fastSHSettings.maxPaletteSize
-                // Note: updateFrequency is deprecated; use shDirectionEpsilon for threshold-based updates
-
                 // Analyze model and update settings
                 let splatCount = fastRenderer.splatCount
                 let uniqueShSets = fastRenderer.shCoefficients.count
@@ -386,9 +390,7 @@ class MetalKitSceneRenderer: NSObject, MTKViewDelegate {
                     )
                 }
 
-                // Apply any updated settings back to renderer
-                fastRenderer.fastSHConfig.enabled = fastSHSettings.enabled
-                fastRenderer.fastSHConfig.maxPaletteSize = fastSHSettings.maxPaletteSize
+                applyFastSHSettings(to: fastRenderer)
 
                 print("Fast SH configured for \(url.lastPathComponent): enabled=\(fastSHSettings.enabled), palette=\(uniqueShSets), degree=\(shDegree)")
             }
@@ -815,6 +817,18 @@ class MetalKitSceneRenderer: NSObject, MTKViewDelegate {
         #else
         metalKitView.setNeedsDisplay()
         #endif
+    }
+
+    private func applyFastSHSettings(to fastRenderer: FastSHSplatRenderer) {
+        fastRenderer.fastSHConfig.enabled = fastSHSettings.enabled
+        fastRenderer.fastSHConfig.maxPaletteSize = fastSHSettings.maxPaletteSize
+        fastRenderer.shDirectionEpsilon = fastSHSettings.shDirectionEpsilon
+    }
+
+    func syncFastSHSettings() {
+        guard let fastRenderer = modelRenderer as? FastSHSplatRenderer else { return }
+        applyFastSHSettings(to: fastRenderer)
+        requestRedraw()
     }
 
     private func updateRotation() {

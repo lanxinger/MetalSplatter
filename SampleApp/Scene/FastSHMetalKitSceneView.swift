@@ -84,13 +84,17 @@ struct FastSHSettingsView: View {
             Form {
                 Section(header: Text("Fast Spherical Harmonics")) {
                     Toggle("Enable Fast SH", isOn: $settings.enabled)
-                        .help("Pre-compute spherical harmonics once per frame instead of per-splat")
+                        .help("Use the optimized Fast SH render path while preserving editor previews and transforms")
                     
                     if settings.enabled {
-                        Stepper("Update Frequency: \(settings.updateFrequency)", 
-                               value: $settings.updateFrequency, 
-                               in: 1...10)
-                            .help("Update SH evaluation every N frames (higher = better performance)")
+                        VStack(alignment: .leading) {
+                            Text(String(format: "Camera Direction Threshold: %.4f", settings.shDirectionEpsilon))
+                            Slider(value: Binding(
+                                get: { Double(settings.shDirectionEpsilon) },
+                                set: { settings.shDirectionEpsilon = Float($0) }
+                            ), in: 0.0001...0.01, step: 0.0001)
+                        }
+                        .help("Only recompute SH lighting when the camera direction changes by at least this amount")
                         
                         VStack(alignment: .leading) {
                             Text("Max Palette Size: \(settings.maxPaletteSize)")
@@ -138,7 +142,7 @@ struct FastSHSettingsView: View {
                 }
                 
                 Section(header: Text("About Fast SH")) {
-                    Text("Fast SH pre-computes spherical harmonics lighting once per frame using the camera direction, instead of evaluating it for each gaussian splat. This provides significant performance improvements with minimal visual quality loss.")
+                    Text("Fast SH keeps spherical harmonics on the optimized render path, including selection tint, preview transforms, and other editor-driven state. Lighting is refreshed only when the camera direction changes enough to justify recomputation.")
                         .font(.caption)
                         .foregroundColor(.secondary)
                 }
@@ -218,8 +222,9 @@ private struct MetalKitSceneViewWithSettings: ViewRepresentable {
     
     private func syncSettings(renderer: MetalKitSceneRenderer, settings: FastSHSettings) {
         renderer.fastSHSettings.enabled = settings.enabled
-        renderer.fastSHSettings.updateFrequency = settings.updateFrequency
         renderer.fastSHSettings.maxPaletteSize = settings.maxPaletteSize
+        renderer.fastSHSettings.shDirectionEpsilon = settings.shDirectionEpsilon
+        renderer.syncFastSHSettings()
     }
     
     #if os(iOS)

@@ -25,6 +25,7 @@ Renderer feedback in the demo includes:
 - selection tint
 - outline pass for selected splats
 - locked-splat tinting
+- the same edit-state and preview-transform rendering on both standard and Fast SH scenes
 
 ## Architecture
 
@@ -44,6 +45,8 @@ Renderer feedback in the demo includes:
 3. Route touch gestures or overlay shapes into editor selection queries.
 4. Use preview transforms for move/rotate/scale, then commit or cancel.
 5. Export the visible edited points through `SplatIO`.
+
+Fast SH scenes do not use a separate editor path. The sample app applies edit-state buffers, preview transforms, and animation overlays through the same optimized renderer that draws the base scene.
 
 ## File Format Support In The Demo
 

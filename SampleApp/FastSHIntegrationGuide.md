@@ -1,10 +1,12 @@
 # Fast SH Integration Guide
 
-This guide explains how to use the Fast Spherical Harmonics (SH) implementation in the MetalSplatter SampleApp.
+This guide explains how the MetalSplatter SampleApp uses the Fast Spherical Harmonics (SH) renderer path.
 
 ## What is Fast SH?
 
 Fast SH evaluates spherical harmonics in the vertex shader using the compressed palette provided by SOGS files. Rather than keeping raw SH coefficients per splat, we reuse palette entries and rotate the viewing direction into each Gaussian's local frame. The result matches the PlayCanvas renderer while avoiding per-fragment SH work.
+
+The sample app uses the same renderer instance for editing and playback, so selection tint, preview transforms, hide/delete operations, and animation overlays stay on the optimized Fast SH path.
 
 ## Key Benefits
 
@@ -36,7 +38,7 @@ When viewing a 3D scene, you'll see:
 In the settings sheet, you can control:
 
 - **Enable Fast SH**: Toggle the optimization on/off
-- **Update Frequency**: Reserved for future use (kept for UI compatibility)
+- **Camera Direction Threshold**: Minimum camera direction delta before SH lighting is recomputed
 - **Max Palette Size**: Maximum unique SH coefficient sets (1K-128K)
 
 ### 4. Performance Information
@@ -57,11 +59,11 @@ The app automatically applies recommended settings based on your model:
 
 ### Medium Models (10K-500K splats)
 - Fast SH: Enabled
-- Update every frame
+- Threshold around `0.0015`
 
 ### Large Models (> 500K splats)
 - Fast SH: Enabled
-- Update every 2 frames for performance (optional)
+- Higher threshold such as `0.004` to reduce needless SH refreshes
 
 ### SOGS Files
 - Always recommended to enable Fast SH
@@ -94,9 +96,9 @@ The app automatically applies recommended settings based on your model:
 ### Performance Characteristics
 
 - **Memory Usage**: Dramatically reduced for large models
-- **GPU Compute**: Trades per-splat work for per-frame work
+- **GPU Compute**: Trades per-splat work for threshold-based camera refreshes
 - **Quality Trade-off**: Minimal at screen center, slight reduction at edges
-- **Update Cost**: Configurable frequency balances quality vs performance
+- **Update Cost**: `shDirectionEpsilon` balances lighting refresh fidelity vs performance
 
 ## Troubleshooting
 
@@ -106,12 +108,12 @@ The app automatically applies recommended settings based on your model:
 - Verify the model has sufficient splat count (>10K recommended)
 
 ### Performance Issues
-- Try increasing update frequency (update less often)
+- Try increasing the camera direction threshold so lighting refreshes less often
 - Reduce max palette size for memory-constrained devices
 
 ### Visual Artifacts
 - Disable Fast SH for highest quality
-- Increase update frequency to every frame
+- Lower the camera direction threshold so view-dependent lighting refreshes more aggressively
 
 ## Developer Integration
 
@@ -123,7 +125,8 @@ let renderer = try FastSHSplatRenderer(device: device, ...)
 
 // Configure settings (optional)
 renderer.fastSHConfig.enabled = true
-renderer.fastSHConfig.updateFrequency = 1
+renderer.fastSHConfig.maxPaletteSize = 65_536
+renderer.shDirectionEpsilon = 0.0015
 
 // Load with SH support (use AutodetectSceneReader for SOGS v2)
 try await renderer.loadSplatsWithSH(splats)
