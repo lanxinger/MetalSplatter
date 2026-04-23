@@ -8,12 +8,12 @@ A high-performance Swift/Metal library for loading, rendering, editing, and expo
 
 ![A greek-style bust of a woman made of metal, wearing aviator-style goggles while gazing toward colorful abstract metallic blobs floating in space](http://metalsplatter.com/hero.640.jpg)
 
-MetalSplatter implements GPU-accelerated rendering of scenes captured via [3D Gaussian Splatting for Real-Time Radiance Field Rendering](https://repo-sam.inria.fr/fungraph/3d-gaussian-splatting/). It supports PLY, SPLAT, SPZ, SPX, glTF/GLB, and SOGS I/O, plus an editable splat workflow built around `SplatEditor` for selection, transforms, visibility changes, undo/redo, and export.
+MetalSplatter implements GPU-accelerated rendering of scenes captured via [3D Gaussian Splatting for Real-Time Radiance Field Rendering](https://repo-sam.inria.fr/fungraph/3d-gaussian-splatting/). It supports PLY, SPLAT, SPZ, SPX, glTF/GLB, and SOGS I/O, plus an editable splat workflow built around `SplatEditor` for selection, transforms, cutting, alignment, visibility changes, undo/redo, and export.
 
 ## Features
 
 - **Multi-Platform Rendering**: iOS/iPadOS, macOS, and visionOS with platform-optimized rendering paths
-- **Editable Splat Workflows**: `SplatEditor` with GPU-backed selection, preview transforms, hide/show, lock/unlock, delete, duplicate, separate, undo/redo, and export
+- **Editable Splat Workflows**: `SplatEditor` with GPU-backed selection, preview transforms, committed transforms, half-space plane cuts, hide/show, lock/unlock, delete, duplicate, separate, undo/redo, and export
 - **Multiple File Formats**: PLY (ASCII/binary), SPLAT, SPZ/SPX, glTF/GLB, and SOGS v1/v2
 - **Advanced Rendering Pipeline**: Single-stage and multi-stage pipelines with tile memory for high-quality depth blending
 - **GPU-Accelerated Sorting**: O(n) counting sort with camera-relative binning for optimal visual quality
@@ -175,9 +175,17 @@ let editedPoints = try await editor.exportVisiblePoints()
 `SplatEditor` supports:
 - Point, rect, mask, sphere, and box selection queries
 - Move, rotate, and scale preview transforms with commit/cancel
+- Direct committed transforms for alignment or scripted edits
+- Half-space plane selection and cuts via `SplatCutPlane` / `SplatCutPlaneSide`
 - Hide, unhide, lock, unlock, delete, duplicate, and separate operations
 - Undo/redo and snapshot inspection via `SplatEditorSnapshot`
 - Export of the current visible edited scene back through `SplatIO`
+
+Common editing patterns include:
+- Selection-first edits with point, volume, mask, flood-fill, and color-match tools
+- Dedicated cut workflows that delete one side of an axis-aligned plane
+- Alignment workflows that center or floor a selected region, or rotate it by quarter turns around X/Y/Z
+- Non-destructive preview transforms for gesture-driven move/rotate/scale before commit
 
 ## Sample App
 
@@ -192,9 +200,17 @@ Try the included sample application to see MetalSplatter in action. The current 
 
 The iOS/iPadOS demo includes:
 - Selection tools: point, rect, brush, lasso, flood, eyedropper/color-match, sphere, box, polygon, and measure
+- Cut tools: axis-aligned plane cuts with selectable side and bounds-based plane positioning
+- Alignment tools: center, center+floor, floor, and `-90° / +90° / 180°` rotations around X/Y/Z
 - Edit tools: move, rotate, scale, hide/show, lock/unlock, delete, duplicate, separate, undo/redo, and export
 - Selection utilities: replace/add/subtract combine modes plus all/none/invert helpers
 - Renderer feedback: selection tint plus an outline pass for selected splats
+
+The alignment tool is intended to make common import-fixup tasks easy:
+- Recenter an off-origin model without manually dragging it into place
+- Drop a model onto the ground plane by moving its minimum Y to `0`
+- Correct upside-down or sideways imports with single-tap quarter turns
+- Apply the operation to the current selection, or to all visible editable splats when nothing is selected
 
 > **Tip**: For best framerate, run without the debugger attached (stop in Xcode, then launch from Home screen).
 

@@ -585,6 +585,8 @@ final class SceneEditingController: ObservableObject {
         case eyedropper
         case sphere
         case box
+        case planeCut
+        case align
         case polygon
         case measure
         case move
@@ -603,6 +605,8 @@ final class SceneEditingController: ObservableObject {
             case .eyedropper: "Color"
             case .sphere: "Sphere"
             case .box: "Box"
+            case .planeCut: "Cut"
+            case .align: "Align"
             case .polygon: "Polygon"
             case .measure: "Measure"
             case .move: "Move"
@@ -621,6 +625,8 @@ final class SceneEditingController: ObservableObject {
             case .eyedropper: "eyedropper"
             case .sphere: "circle.dashed"
             case .box: "cube.transparent"
+            case .planeCut: "scissors"
+            case .align: "angle"
             case .polygon: "point.3.connected.trianglepath.dotted"
             case .measure: "ruler"
             case .move: "arrow.up.left.and.arrow.down.right"
@@ -677,6 +683,90 @@ final class SceneEditingController: ObservableObject {
         let worldPoint: SIMD3<Float>
     }
 
+    enum PlaneAxis: String, CaseIterable, Identifiable {
+        case x
+        case y
+        case z
+
+        var id: String { rawValue }
+
+        var label: String {
+            switch self {
+            case .x: "X"
+            case .y: "Y"
+            case .z: "Z"
+            }
+        }
+
+        var negativeLabel: String {
+            switch self {
+            case .x: "Left"
+            case .y: "Below"
+            case .z: "Front"
+            }
+        }
+
+        var positiveLabel: String {
+            switch self {
+            case .x: "Right"
+            case .y: "Above"
+            case .z: "Back"
+            }
+        }
+
+        var unitNormal: SIMD3<Float> {
+            switch self {
+            case .x: SIMD3<Float>(1, 0, 0)
+            case .y: SIMD3<Float>(0, 1, 0)
+            case .z: SIMD3<Float>(0, 0, 1)
+            }
+        }
+
+        func interpolatedCoordinate(in bounds: SplatSelectionBounds, offset: Float) -> Float {
+            let clampedOffset = max(0, min(offset, 1))
+            switch self {
+            case .x:
+                return bounds.min.x + ((bounds.max.x - bounds.min.x) * clampedOffset)
+            case .y:
+                return bounds.min.y + ((bounds.max.y - bounds.min.y) * clampedOffset)
+            case .z:
+                return bounds.min.z + ((bounds.max.z - bounds.min.z) * clampedOffset)
+            }
+        }
+
+        func planePoint(in bounds: SplatSelectionBounds, offset: Float) -> SIMD3<Float> {
+            var point = bounds.center
+            let coordinate = interpolatedCoordinate(in: bounds, offset: offset)
+            switch self {
+            case .x:
+                point.x = coordinate
+            case .y:
+                point.y = coordinate
+            case .z:
+                point.z = coordinate
+            }
+            return point
+        }
+    }
+
+    enum AlignmentAxis: String, CaseIterable, Identifiable {
+        case x
+        case y
+        case z
+
+        var id: String { rawValue }
+
+        var label: String { rawValue.uppercased() }
+
+        var unitNormal: SIMD3<Float> {
+            switch self {
+            case .x: SIMD3<Float>(1, 0, 0)
+            case .y: SIMD3<Float>(0, 1, 0)
+            case .z: SIMD3<Float>(0, 0, 1)
+            }
+        }
+    }
+
     enum OverlayPreview {
         case rect(CGRect)
         case brush([CGPoint])
@@ -697,6 +787,9 @@ final class SceneEditingController: ObservableObject {
             if tool == .sphere || tool == .box {
                 resetVolumeSelectionParameters()
             }
+            if tool == .planeCut {
+                resetCutPlaneParameters()
+            }
             statusMessage = nil
         }
     }
@@ -712,6 +805,10 @@ final class SceneEditingController: ObservableObject {
     @Published var boxExtentX: Float = 0.25
     @Published var boxExtentY: Float = 0.25
     @Published var boxExtentZ: Float = 0.25
+    @Published var cutPlaneAxis: PlaneAxis = .y
+    @Published var cutPlaneSide: SplatCutPlaneSide = .negative
+    @Published var cutPlaneOffset: Float = 0.5
+    @Published var alignmentAxis: AlignmentAxis = .y
     @Published private(set) var polygonPoints: [CGPoint] = []
     @Published private(set) var measurePoints: [MeasuredPoint] = []
 
@@ -753,8 +850,40 @@ final class SceneEditingController: ObservableObject {
         return "No visible splats"
     }
 
+    var cutPlaneReferenceLabel: String {
+        if snapshot?.visibleBounds != nil {
+            return "Plane uses visible scene bounds"
+        }
+        return "No visible splats"
+    }
+
+    var cutPlaneSideLabel: String {
+        switch cutPlaneSide {
+        case .negative:
+            return cutPlaneAxis.negativeLabel
+        case .positive:
+            return cutPlaneAxis.positiveLabel
+        }
+    }
+
+    var cutPlaneCoordinateLabel: String {
+        guard let bounds = cutPlaneBounds else { return "--" }
+        let coordinate = cutPlaneAxis.interpolatedCoordinate(in: bounds, offset: cutPlaneOffset)
+        return String(format: "%.3f", coordinate)
+    }
+
+    var alignmentReferenceLabel: String {
+        hasSelection
+            ? "Uses the current selection"
+            : "Uses all visible editable splats when nothing is selected"
+    }
+
     private var referenceBounds: SplatSelectionBounds? {
         snapshot?.selectionBounds ?? snapshot?.visibleBounds
+    }
+
+    private var cutPlaneBounds: SplatSelectionBounds? {
+        snapshot?.visibleBounds
     }
 
     private static func defaultHalfExtents(for bounds: SplatSelectionBounds) -> SIMD3<Float> {
@@ -831,6 +960,79 @@ final class SceneEditingController: ObservableObject {
         boxExtentX = halfExtents.x
         boxExtentY = halfExtents.y
         boxExtentZ = halfExtents.z
+    }
+
+    func resetCutPlaneParameters() {
+        cutPlaneOffset = 0.5
+    }
+
+    func selectCutPlaneSide() {
+        guard let plane = currentCutPlane() else {
+            statusMessage = "No visible splats"
+            return
+        }
+
+        runEditorAction { renderer in
+            try await renderer.selectEditableSplats(plane: plane, side: self.cutPlaneSide, mode: self.combineMode)
+        }
+    }
+
+    func applyCutPlaneDeletion() {
+        guard let plane = currentCutPlane() else {
+            statusMessage = "No visible splats"
+            return
+        }
+
+        runEditorAction { renderer in
+            try await renderer.cutEditableSplats(plane: plane, side: self.cutPlaneSide)
+        }
+    }
+
+    func centerSelectionXYZ() {
+        runAlignmentAction { bounds in
+            (
+                transform: SplatEditTransform(translation: -bounds.center),
+                pivot: bounds.center
+            )
+        }
+    }
+
+    func centerSelectionXZAndFloor() {
+        runAlignmentAction { bounds in
+            let translation = SIMD3<Float>(-bounds.center.x, -bounds.min.y, -bounds.center.z)
+            return (
+                transform: SplatEditTransform(translation: translation),
+                pivot: bounds.center
+            )
+        }
+    }
+
+    func floorSelection() {
+        runAlignmentAction { bounds in
+            (
+                transform: SplatEditTransform(translation: SIMD3<Float>(0, -bounds.min.y, 0)),
+                pivot: bounds.center
+            )
+        }
+    }
+
+    func rotateSelectionQuarterTurn(clockwise: Bool) {
+        runAlignmentAction { bounds in
+            let angle: Float = clockwise ? (.pi / 2) : (-.pi / 2)
+            return (
+                transform: SplatEditTransform(rotation: simd_quatf(angle: angle, axis: self.alignmentAxis.unitNormal)),
+                pivot: bounds.center
+            )
+        }
+    }
+
+    func rotateSelectionHalfTurn() {
+        runAlignmentAction { bounds in
+            (
+                transform: SplatEditTransform(rotation: simd_quatf(angle: .pi, axis: self.alignmentAxis.unitNormal)),
+                pivot: bounds.center
+            )
+        }
     }
 
     func clearPolygon() {
@@ -1092,6 +1294,24 @@ final class SceneEditingController: ObservableObject {
         }
     }
 
+    private func runAlignmentAction(_ build: @escaping (SplatSelectionBounds) -> (transform: SplatEditTransform, pivot: SIMD3<Float>)) {
+        guard let renderer else { return }
+        Task {
+            do {
+                guard let bounds = await renderer.currentEditableAlignmentBounds() else {
+                    statusMessage = "No editable splats"
+                    return
+                }
+
+                let plan = build(bounds)
+                let snapshot = try await renderer.applyEditableAlignmentTransform(plan.transform, pivot: plan.pivot)
+                applySelectionSnapshot(snapshot)
+            } catch {
+                setError(error)
+            }
+        }
+    }
+
     private func normalizedPoint(_ point: CGPoint, in size: CGSize) -> SIMD2<Float> {
         let safeWidth = max(size.width, 1)
         let safeHeight = max(size.height, 1)
@@ -1159,6 +1379,14 @@ final class SceneEditingController: ObservableObject {
 
     private func distance(_ lhs: CGPoint, _ rhs: CGPoint) -> CGFloat {
         hypot(lhs.x - rhs.x, lhs.y - rhs.y)
+    }
+
+    private func currentCutPlane() -> SplatCutPlane? {
+        guard let bounds = cutPlaneBounds else { return nil }
+        return SplatCutPlane(
+            point: cutPlaneAxis.planePoint(in: bounds, offset: cutPlaneOffset),
+            normal: cutPlaneAxis.unitNormal
+        )
     }
 }
 
@@ -1286,6 +1514,74 @@ private struct SplatEditingToolbar: View {
                 HStack(spacing: 10) {
                     actionButton("Reset", systemImage: "arrow.counterclockwise", disabled: !controller.isEditorAvailable, action: controller.resetVolumeSelectionParameters)
                     actionButton("Apply", systemImage: "checkmark.circle", disabled: !controller.isEditorAvailable, action: controller.applyBoxSelection)
+                }
+            }
+        case .planeCut:
+            VStack(alignment: .leading, spacing: 8) {
+                Text(controller.cutPlaneReferenceLabel)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Picker("Axis", selection: $controller.cutPlaneAxis) {
+                    ForEach(SceneEditingController.PlaneAxis.allCases) { axis in
+                        Text(axis.label).tag(axis)
+                    }
+                }
+                .pickerStyle(.segmented)
+                Picker("Side", selection: $controller.cutPlaneSide) {
+                    Text(controller.cutPlaneAxis.negativeLabel).tag(SplatCutPlaneSide.negative)
+                    Text(controller.cutPlaneAxis.positiveLabel).tag(SplatCutPlaneSide.positive)
+                }
+                .pickerStyle(.segmented)
+                HStack {
+                    Text("Plane")
+                        .font(.subheadline)
+                        .frame(width: 42, alignment: .leading)
+                    Slider(value: Binding(
+                        get: { Double(controller.cutPlaneOffset) },
+                        set: { controller.cutPlaneOffset = Float($0) }
+                    ), in: 0...1)
+                    Text(controller.cutPlaneCoordinateLabel)
+                        .font(.caption.monospacedDigit())
+                        .frame(width: 54)
+                }
+                Text("Targets the \(controller.cutPlaneSideLabel.lowercased()) side of the plane.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                HStack(spacing: 10) {
+                    actionButton("Reset", systemImage: "arrow.counterclockwise", disabled: !controller.isEditorAvailable, action: controller.resetCutPlaneParameters)
+                    actionButton("Select", systemImage: "line.3.horizontal.decrease.circle", disabled: !controller.isEditorAvailable, action: controller.selectCutPlaneSide)
+                    actionButton("Cut", systemImage: "scissors", disabled: !controller.isEditorAvailable, action: controller.applyCutPlaneDeletion)
+                }
+            }
+        case .align:
+            VStack(alignment: .leading, spacing: 10) {
+                Text(controller.alignmentReferenceLabel)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                HStack(spacing: 10) {
+                    actionButton("Center", systemImage: "scope", disabled: !controller.isEditorAvailable, action: controller.centerSelectionXYZ)
+                    actionButton("Center+Floor", systemImage: "move.3d", disabled: !controller.isEditorAvailable, action: controller.centerSelectionXZAndFloor)
+                    actionButton("Floor", systemImage: "arrow.down.to.line", disabled: !controller.isEditorAvailable, action: controller.floorSelection)
+                }
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Rotation Axis")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Picker("Rotation Axis", selection: $controller.alignmentAxis) {
+                        ForEach(SceneEditingController.AlignmentAxis.allCases) { axis in
+                            Text(axis.label).tag(axis)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+                }
+                HStack(spacing: 10) {
+                    actionButton("-90°", systemImage: "rotate.left", disabled: !controller.isEditorAvailable, action: {
+                        controller.rotateSelectionQuarterTurn(clockwise: false)
+                    })
+                    actionButton("+90°", systemImage: "rotate.right", disabled: !controller.isEditorAvailable, action: {
+                        controller.rotateSelectionQuarterTurn(clockwise: true)
+                    })
+                    actionButton("180°", systemImage: "rotate.3d", disabled: !controller.isEditorAvailable, action: controller.rotateSelectionHalfTurn)
                 }
             }
         case .polygon:

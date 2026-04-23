@@ -21,6 +21,27 @@ public enum SelectionCombineMode: UInt32, Sendable {
     case subtract = 2
 }
 
+public enum SplatCutPlaneSide: String, Sendable {
+    case negative
+    case positive
+}
+
+public struct SplatCutPlane: Sendable {
+    public var point: SIMD3<Float>
+    public var normal: SIMD3<Float>
+
+    public init(point: SIMD3<Float>, normal: SIMD3<Float>) {
+        self.point = point
+
+        let length = simd_length(normal)
+        if length > .ulpOfOne {
+            self.normal = normal / length
+        } else {
+            self.normal = SIMD3<Float>(0, 1, 0)
+        }
+    }
+}
+
 public enum SplatSelectionQuery: Sendable {
     case point(normalized: SIMD2<Float>, radius: Float = 0.04)
     case rect(normalizedMin: SIMD2<Float>, normalizedMax: SIMD2<Float>)
@@ -150,6 +171,10 @@ struct EditableSplatStore: Sendable {
 
     var selectedIndices: [Int] {
         states.indices.filter { states[$0].contains(.selected) }
+    }
+
+    var selectableIndices: [Int] {
+        states.indices.filter(isSelectable)
     }
 
     var visiblePoints: [SplatScenePoint] {
@@ -323,8 +348,13 @@ struct EditableSplatStore: Sendable {
     }
 
     mutating func deleteSelection() -> [EditableSplatStateChange] {
+        delete(indices: selectedIndices)
+    }
+
+    mutating func delete(indices: [Int]) -> [EditableSplatStateChange] {
         var changes: [EditableSplatStateChange] = []
-        for index in selectedIndices {
+        for index in indices {
+            guard states.indices.contains(index) else { continue }
             recordStateChange(at: index, into: &changes) { state in
                 state.insert(.deleted)
                 state.remove(.selected)
@@ -335,11 +365,16 @@ struct EditableSplatStore: Sendable {
 
     mutating func applyCommittedTransform(_ transform: SplatEditTransform,
                                           pivot: SIMD3<Float>) -> [EditableSplatPointChange] {
-        let selected = selectedIndices
-        guard !selected.isEmpty else { return [] }
+        applyCommittedTransform(transform, pivot: pivot, indices: selectedIndices)
+    }
+
+    mutating func applyCommittedTransform(_ transform: SplatEditTransform,
+                                          pivot: SIMD3<Float>,
+                                          indices: [Int]) -> [EditableSplatPointChange] {
+        guard !indices.isEmpty else { return [] }
 
         var changes: [EditableSplatPointChange] = []
-        for index in selected {
+        for index in indices {
             let oldPoint = points[index]
             let newPoint = oldPoint.applying(transform: transform, around: pivot)
             points[index] = newPoint
@@ -471,6 +506,29 @@ struct EditableSplatStore: Sendable {
         return result
     }
 
+    func planeSelectionIndices(plane: SplatCutPlane, side: SplatCutPlaneSide) -> [Int] {
+        points.indices.filter { index in
+            guard isSelectable(index) else { return false }
+            let signedDistance = simd_dot(points[index].position - plane.point, plane.normal)
+            return side.contains(signedDistance: signedDistance)
+        }
+    }
+
+    func bounds(for indices: [Int]) -> SplatSelectionBounds? {
+        var minimum = SIMD3<Float>(repeating: .greatestFiniteMagnitude)
+        var maximum = SIMD3<Float>(repeating: -.greatestFiniteMagnitude)
+        var hasBounds = false
+
+        for index in indices where points.indices.contains(index) {
+            minimum = simd_min(minimum, points[index].position)
+            maximum = simd_max(maximum, points[index].position)
+            hasBounds = true
+        }
+
+        guard hasBounds else { return nil }
+        return SplatSelectionBounds(min: minimum, max: maximum)
+    }
+
     private func isSelectable(_ index: Int) -> Bool {
         let state = states[index]
         return !state.contains(.hidden) && !state.contains(.deleted) && !state.contains(.locked)
@@ -590,6 +648,14 @@ public actor SplatEditor {
         try applyStateHistory(changes)
     }
 
+    public func select(plane: SplatCutPlane,
+                       side: SplatCutPlaneSide,
+                       mode: SelectionCombineMode) async throws {
+        let selected = store.planeSelectionIndices(plane: plane, side: side)
+        let changes = store.applySelection(indices: selected, mode: mode)
+        try applyStateHistory(changes)
+    }
+
     public func beginPreviewTransform(pivot: SIMD3<Float>) async {
         previewTransform = PreviewTransformState(pivot: pivot, transform: .identity)
         previewTransformTouchedIndices = store.selectedIndices
@@ -622,6 +688,26 @@ public actor SplatEditor {
 
         let changes = store.applyCommittedTransform(current.transform, pivot: current.pivot)
         try clearPreviewTransformState()
+        try applyPointHistory(changes)
+    }
+
+    public func applyTransform(_ transform: SplatEditTransform,
+                               pivot: SIMD3<Float>) async throws {
+        try clearPreviewTransformState()
+        let changes = store.applyCommittedTransform(transform, pivot: pivot)
+        try applyPointHistory(changes)
+    }
+
+    public func alignmentBounds() async -> SplatSelectionBounds? {
+        let indices = store.selectedIndices.isEmpty ? store.selectableIndices : store.selectedIndices
+        return store.bounds(for: indices)
+    }
+
+    public func applyAlignmentTransform(_ transform: SplatEditTransform,
+                                        pivot: SIMD3<Float>) async throws {
+        try clearPreviewTransformState()
+        let indices = store.selectedIndices.isEmpty ? store.selectableIndices : store.selectedIndices
+        let changes = store.applyCommittedTransform(transform, pivot: pivot, indices: indices)
         try applyPointHistory(changes)
     }
 
@@ -659,6 +745,12 @@ public actor SplatEditor {
 
     public func deleteSelection() async throws {
         try applyStateHistory(store.deleteSelection())
+    }
+
+    public func cut(plane: SplatCutPlane,
+                    side: SplatCutPlaneSide) async throws {
+        let changes = store.delete(indices: store.planeSelectionIndices(plane: plane, side: side))
+        try applyStateHistory(changes)
     }
 
     public func duplicateSelection() async throws {
@@ -867,6 +959,17 @@ private extension SplatScenePoint.Color {
             }
         }
         return .sphericalHarmonic(rotated)
+    }
+}
+
+private extension SplatCutPlaneSide {
+    func contains(signedDistance: Float) -> Bool {
+        switch self {
+        case .negative:
+            return signedDistance <= 0
+        case .positive:
+            return signedDistance >= 0
+        }
     }
 }
 

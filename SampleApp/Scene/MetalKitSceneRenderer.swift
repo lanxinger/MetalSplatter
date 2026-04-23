@@ -429,6 +429,15 @@ class MetalKitSceneRenderer: NSObject, MTKViewDelegate {
         return await splatEditor.snapshot()
     }
 
+    func selectEditableSplats(plane: SplatCutPlane,
+                              side: SplatCutPlaneSide,
+                              mode: SelectionCombineMode) async throws -> SplatEditorSnapshot? {
+        guard let splatEditor else { return nil }
+        try await splatEditor.select(plane: plane, side: side, mode: mode)
+        requestRedraw()
+        return await splatEditor.snapshot()
+    }
+
     func selectEditableSplats(query: SplatSelectionQuery,
                               mode: SelectionCombineMode) async throws -> SplatEditorSnapshot? {
         try await selectEditableSplats(query: query, mode: mode, renderSize: metalKitView.bounds.size)
@@ -545,6 +554,14 @@ class MetalKitSceneRenderer: NSObject, MTKViewDelegate {
         return await splatEditor.snapshot()
     }
 
+    func cutEditableSplats(plane: SplatCutPlane,
+                           side: SplatCutPlaneSide) async throws -> SplatEditorSnapshot? {
+        guard let splatEditor else { return nil }
+        try await splatEditor.cut(plane: plane, side: side)
+        requestRedraw()
+        return await splatEditor.snapshot()
+    }
+
     func duplicateSelectedEditableSplats() async throws -> SplatEditorSnapshot? {
         guard let splatEditor else { return nil }
         try await splatEditor.duplicateSelection()
@@ -612,6 +629,27 @@ class MetalKitSceneRenderer: NSObject, MTKViewDelegate {
     func commitEditableTransform() async throws -> SplatEditorSnapshot? {
         guard let splatEditor else { return nil }
         try await splatEditor.commitPreviewTransform()
+        requestRedraw()
+        return await splatEditor.snapshot()
+    }
+
+    func currentEditableAlignmentBounds() async -> SplatSelectionBounds? {
+        guard let splatEditor else { return nil }
+        return await splatEditor.alignmentBounds()
+    }
+
+    func applyEditableTransform(_ transform: SplatEditTransform,
+                                pivot: SIMD3<Float>) async throws -> SplatEditorSnapshot? {
+        guard let splatEditor else { return nil }
+        try await splatEditor.applyTransform(transform, pivot: pivot)
+        requestRedraw()
+        return await splatEditor.snapshot()
+    }
+
+    func applyEditableAlignmentTransform(_ transform: SplatEditTransform,
+                                         pivot: SIMD3<Float>) async throws -> SplatEditorSnapshot? {
+        guard let splatEditor else { return nil }
+        try await splatEditor.applyAlignmentTransform(transform, pivot: pivot)
         requestRedraw()
         return await splatEditor.snapshot()
     }

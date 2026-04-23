@@ -242,6 +242,29 @@ final class SplatEditorTests: XCTestCase {
         XCTAssertEqual(store.selectedIndices, [0, 1, 2, 3])
     }
 
+    func testEditableStorePlaneSelectionRespectsAxisSideAndVisibility() {
+        var store = EditableSplatStore(points: makePoints())
+        store.states[3].insert(.locked)
+
+        let plane = SplatCutPlane(
+            point: SIMD3<Float>(0.2, 0.0, -2.0),
+            normal: SIMD3<Float>(1.0, 0.0, 0.0)
+        )
+
+        XCTAssertEqual(store.planeSelectionIndices(plane: plane, side: .negative), [0, 1])
+        XCTAssertEqual(store.planeSelectionIndices(plane: plane, side: .positive), [2])
+    }
+
+    func testEditableStoreBoundsForSelectableIndicesExcludeLockedPoints() throws {
+        var store = EditableSplatStore(points: makePoints())
+        store.states[3].insert(.locked)
+
+        let bounds = try XCTUnwrap(store.bounds(for: store.selectableIndices))
+        XCTAssertEqual(bounds.min.x, -0.75, accuracy: 0.0001)
+        XCTAssertEqual(bounds.max.x, 0.55, accuracy: 0.0001)
+        XCTAssertEqual(bounds.max.y, 0.0, accuracy: 0.0001)
+    }
+
     func testRectSelectionHideDeleteUndoRedoAndExportRoundTrip() async throws {
         let renderer = try makeRenderer()
         let editor = try await SplatEditor(points: makePoints(), renderer: renderer)
@@ -384,6 +407,62 @@ final class SplatEditorTests: XCTestCase {
 
         let snapshot = await editor.snapshot()
         XCTAssertEqual(snapshot.selectedCount, 0)
+    }
+
+    func testPlaneSelectionCutAndUndoRoundTrip() async throws {
+        let renderer = try makeRenderer()
+        let editor = try await SplatEditor(points: makePoints(), renderer: renderer)
+        let plane = SplatCutPlane(
+            point: SIMD3<Float>(0.2, 0.0, -2.0),
+            normal: SIMD3<Float>(1.0, 0.0, 0.0)
+        )
+
+        try await editor.select(plane: plane, side: .positive, mode: .replace)
+
+        var snapshot = await editor.snapshot()
+        XCTAssertEqual(snapshot.selectedCount, 2)
+
+        try await editor.cut(plane: plane, side: .positive)
+        snapshot = await editor.snapshot()
+        XCTAssertEqual(snapshot.deletedCount, 2)
+        XCTAssertEqual(snapshot.visibleCount, 2)
+        XCTAssertEqual(snapshot.selectedCount, 0)
+
+        try await editor.undo()
+        snapshot = await editor.snapshot()
+        XCTAssertEqual(snapshot.deletedCount, 0)
+        XCTAssertEqual(snapshot.visibleCount, 4)
+        XCTAssertEqual(snapshot.selectedCount, 2)
+    }
+
+    func testAlignmentTransformWithoutSelectionUsesVisibleEditableSplatsAndKeepsSelectionEmpty() async throws {
+        let renderer = try makeRenderer()
+        let editor = try await SplatEditor(points: makePoints(), renderer: renderer)
+
+        let maybeBounds = await editor.alignmentBounds()
+        let bounds = try XCTUnwrap(maybeBounds)
+        XCTAssertEqual(bounds.min.x, -0.75, accuracy: 0.0001)
+        XCTAssertEqual(bounds.max.x, 0.75, accuracy: 0.0001)
+
+        try await editor.applyAlignmentTransform(
+            SplatEditTransform(translation: SIMD3<Float>(1, 0, 0)),
+            pivot: bounds.center
+        )
+
+        var snapshot = await editor.snapshot()
+        XCTAssertEqual(snapshot.selectedCount, 0)
+
+        var exported = try await editor.exportVisiblePoints()
+        XCTAssertEqual(exported[0].position.x, 0.25, accuracy: 0.0001)
+        XCTAssertEqual(exported[3].position.x, 1.75, accuracy: 0.0001)
+
+        try await editor.undo()
+        snapshot = await editor.snapshot()
+        XCTAssertEqual(snapshot.selectedCount, 0)
+
+        exported = try await editor.exportVisiblePoints()
+        XCTAssertEqual(exported[0].position.x, -0.75, accuracy: 0.0001)
+        XCTAssertEqual(exported[3].position.x, 0.75, accuracy: 0.0001)
     }
 
     private func makeRenderer() throws -> SplatRenderer {
