@@ -535,8 +535,7 @@ extension FastSHSplatRenderer {
             baseInstance: 0
         )
 
-        if selectionOutlineEnabled,
-           editingEnabled,
+        if shouldDrawSelectionOutline,
            let selectionOutlinePipelineState,
            let selectionOutlineDepthState {
             renderEncoder.setRenderPipelineState(selectionOutlinePipelineState)

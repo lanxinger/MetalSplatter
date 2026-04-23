@@ -207,10 +207,12 @@ struct EditableSplatStore: Sendable {
     var points: [SplatScenePoint]
     var states: [EditableSplatState]
     var sceneIndices: [UInt32]
+    private var selectedIndexSet: Set<Int>
 
     init(points: [SplatScenePoint], sceneIndices: [UInt32]? = nil) {
         self.points = points
         self.states = Array(repeating: [], count: points.count)
+        self.selectedIndexSet = []
         if let sceneIndices, sceneIndices.count == points.count {
             self.sceneIndices = sceneIndices
         } else {
@@ -226,10 +228,11 @@ struct EditableSplatStore: Sendable {
         points = snapshot.points
         states = snapshot.states
         sceneIndices = snapshot.sceneIndices
+        rebuildSelectionIndexSet()
     }
 
     var selectedIndices: [Int] {
-        states.indices.filter { states[$0].contains(.selected) }
+        selectedIndexSet.sorted()
     }
 
     var selectableIndices: [Int] {
@@ -304,13 +307,15 @@ struct EditableSplatStore: Sendable {
         var changes: [EditableSplatStateChange] = []
         switch mode {
         case .replace:
-            for index in states.indices {
+            let previousSelection = selectedIndexSet
+            for index in previousSelection.subtracting(selectable) {
                 recordStateChange(at: index, into: &changes) { state in
-                    if selectable.contains(index) {
-                        state.insert(.selected)
-                    } else {
-                        state.remove(.selected)
-                    }
+                    state.remove(.selected)
+                }
+            }
+            for index in selectable.subtracting(previousSelection) {
+                recordStateChange(at: index, into: &changes) { state in
+                    state.insert(.selected)
                 }
             }
         case .add:
@@ -332,7 +337,7 @@ struct EditableSplatStore: Sendable {
 
     mutating func hideSelection() -> [EditableSplatStateChange] {
         var changes: [EditableSplatStateChange] = []
-        for index in selectedIndices {
+        for index in Array(selectedIndexSet) {
             recordStateChange(at: index, into: &changes) { state in
                 state.insert(.hidden)
                 state.remove(.selected)
@@ -343,7 +348,7 @@ struct EditableSplatStore: Sendable {
 
     mutating func lockSelection() -> [EditableSplatStateChange] {
         var changes: [EditableSplatStateChange] = []
-        for index in selectedIndices {
+        for index in Array(selectedIndexSet) {
             recordStateChange(at: index, into: &changes) { state in
                 state.insert(.locked)
                 state.remove(.selected)
@@ -364,7 +369,7 @@ struct EditableSplatStore: Sendable {
 
     mutating func clearSelection() -> [EditableSplatStateChange] {
         var changes: [EditableSplatStateChange] = []
-        for index in states.indices {
+        for index in Array(selectedIndexSet) {
             recordStateChange(at: index, into: &changes) { state in
                 state.remove(.selected)
             }
@@ -407,7 +412,7 @@ struct EditableSplatStore: Sendable {
     }
 
     mutating func deleteSelection() -> [EditableSplatStateChange] {
-        delete(indices: selectedIndices)
+        delete(indices: Array(selectedIndexSet))
     }
 
     mutating func delete(indices: [Int]) -> [EditableSplatStateChange] {
@@ -463,6 +468,7 @@ struct EditableSplatStore: Sendable {
             return state
         }
         states.append(contentsOf: duplicateStates)
+        rebuildSelectionIndexSet()
 
         return Array(insertionStart..<(insertionStart + duplicateStates.count))
     }
@@ -479,6 +485,7 @@ struct EditableSplatStore: Sendable {
             state.insert(.selected)
             return state
         }
+        rebuildSelectionIndexSet()
         return true
     }
 
@@ -486,6 +493,7 @@ struct EditableSplatStore: Sendable {
         for change in changes {
             states[change.index] = useNewValues ? change.newState : change.oldState
         }
+        rebuildSelectionIndexSet()
     }
 
     mutating func applyPointChanges(_ changes: [EditableSplatPointChange], useNewValues: Bool) {
@@ -678,7 +686,21 @@ struct EditableSplatStore: Sendable {
         update(&newState)
         guard newState != oldState else { return }
         states[index] = newState
+        let oldSelected = oldState.contains(.selected)
+        let newSelected = newState.contains(.selected)
+        if !oldSelected, newSelected {
+            selectedIndexSet.insert(index)
+        } else if oldSelected, !newSelected {
+            selectedIndexSet.remove(index)
+        }
         changes.append(EditableSplatStateChange(index: index, oldState: oldState, newState: newState))
+    }
+
+    private mutating func rebuildSelectionIndexSet() {
+        selectedIndexSet.removeAll(keepingCapacity: true)
+        for index in states.indices where states[index].contains(.selected) {
+            selectedIndexSet.insert(index)
+        }
     }
 
     private func projectedCandidates(viewport: SplatRenderer.ViewportDescriptor) -> [ProjectedCandidate] {

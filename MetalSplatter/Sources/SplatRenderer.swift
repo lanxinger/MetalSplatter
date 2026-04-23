@@ -742,6 +742,7 @@ public class SplatRenderer: @unchecked Sendable {
     internal var selectionOutlineEnabled = true
     internal var editingEnabled = false
     private var nonZeroEditStateCount = 0
+    private var selectedEditStateCount = 0
     private var hiddenOrDeletedEditStateCount = 0
     private var activeTransformIndexCount = 0
     private var previewTransformActive = false
@@ -750,6 +751,9 @@ public class SplatRenderer: @unchecked Sendable {
     public var splatCount: Int { splatBuffer.count }
     internal var renderableSplatCountForCurrentEditState: Int {
         max(0, splatCount - hiddenOrDeletedEditStateCount)
+    }
+    internal var shouldDrawSelectionOutline: Bool {
+        selectionOutlineEnabled && selectedEditStateCount > 0 && !isInteracting
     }
 
     var sorting = false
@@ -1830,6 +1834,7 @@ public class SplatRenderer: @unchecked Sendable {
         let statePointer = editStateBuffer.contents().bindMemory(to: UInt32.self, capacity: bufferCount)
         memset(statePointer, 0, stateLength(for: bufferCount))
         nonZeroEditStateCount = 0
+        selectedEditStateCount = 0
         hiddenOrDeletedEditStateCount = 0
         for (index, value) in rawStates.enumerated() {
             statePointer[index] = value
@@ -1860,6 +1865,7 @@ public class SplatRenderer: @unchecked Sendable {
         try ensureEditingResources(pointCount: splatCount)
         guard let editStateBuffer else { return }
 
+        let previousRenderableCount = renderableSplatCountForCurrentEditState
         let pointer = editStateBuffer.contents().bindMemory(to: UInt32.self, capacity: max(splatCount, 1))
         var visibilityChanged = false
         for (index, value) in zip(indices, values) where index >= 0 && index < splatCount {
@@ -1871,7 +1877,13 @@ public class SplatRenderer: @unchecked Sendable {
         }
         refreshEditingEnabled()
         if visibilityChanged {
-            markRenderableSetDirty()
+            let currentRenderableCount = renderableSplatCountForCurrentEditState
+            if currentRenderableCount < previousRenderableCount,
+               compactCurrentSortedIndicesForReducedRenderableSet() {
+                markRenderableSetReducedWithoutResort()
+            } else {
+                markRenderableSetDirty()
+            }
         }
     }
 
@@ -1969,6 +1981,15 @@ public class SplatRenderer: @unchecked Sendable {
             nonZeroEditStateCount -= 1
         }
 
+        let selectedMask = EditableSplatState.selected.rawValue
+        let oldSelected = (oldValue & selectedMask) != 0
+        let newSelected = (newValue & selectedMask) != 0
+        if !oldSelected, newSelected {
+            selectedEditStateCount += 1
+        } else if oldSelected, !newSelected {
+            selectedEditStateCount -= 1
+        }
+
         if !isHiddenOrDeleted(oldValue), isHiddenOrDeleted(newValue) {
             hiddenOrDeletedEditStateCount += 1
         } else if isHiddenOrDeleted(oldValue), !isHiddenOrDeleted(newValue) {
@@ -2007,9 +2028,53 @@ public class SplatRenderer: @unchecked Sendable {
         sortDataRevision &+= 1
     }
 
+    private func markRenderableSetReducedWithoutResort() {
+        frustumCullDirtyDueToData = true
+    }
+
+    @discardableResult
+    private func compactCurrentSortedIndicesForReducedRenderableSet() -> Bool {
+        guard let editStateBuffer,
+              let sortedIndicesBuffer = getCurrentSortedIndicesBuffer() else {
+            return false
+        }
+
+        let statePointer = editStateBuffer.contents().bindMemory(to: UInt32.self, capacity: max(splatCount, 1))
+        var didCompact = false
+        var compactedCount: Int?
+
+        sortedIndicesBuffer.withLockedValues { values, count in
+            guard count > 0 else { return }
+
+            var writeIndex = 0
+            for readIndex in 0..<count {
+                let splatIndex = Int(values[readIndex])
+                guard splatIndex >= 0 && splatIndex < splatCount else { continue }
+                guard !isHiddenOrDeleted(statePointer[splatIndex]) else {
+                    didCompact = true
+                    continue
+                }
+                values[writeIndex] = values[readIndex]
+                writeIndex += 1
+            }
+
+            if writeIndex != count {
+                compactedCount = writeIndex
+                didCompact = true
+            }
+        }
+
+        if let compactedCount {
+            sortedIndicesBuffer.count = compactedCount
+        }
+
+        return didCompact
+    }
+
     private func resetEditingTracking() {
         editingEnabled = false
         nonZeroEditStateCount = 0
+        selectedEditStateCount = 0
         hiddenOrDeletedEditStateCount = 0
         activeTransformIndexCount = 0
         previewTransformActive = false
@@ -3287,8 +3352,7 @@ public class SplatRenderer: @unchecked Sendable {
         }
 
         if !multiStage,
-           selectionOutlineEnabled,
-           editingEnabled,
+           shouldDrawSelectionOutline,
            let selectionOutlinePipelineState,
            let selectionOutlineDepthState {
             renderEncoder.pushDebugGroup("Draw Selection Outline")
