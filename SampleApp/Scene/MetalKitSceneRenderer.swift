@@ -1447,15 +1447,14 @@ class MetalKitSceneRenderer: NSObject, MTKViewDelegate {
         #endif
     }
 
-    /// Enable or disable Metal 4 GPU radix sorting
-    /// Uses advanced atomics for GPU-accelerated stable radix sort
-    /// Best for very large scenes (>100K splats) where GPU parallelism outweighs multi-pass overhead
+    /// Enable or disable the experimental Metal 4 GPU radix sorter.
+    /// Counting sort remains the default because it is faster for typical splat scenes.
     func setMetal4Sorting(_ enabled: Bool) {
         if let splat = modelRenderer as? SplatRenderer {
             guard splat.useMetal4Sorting != enabled else { return }
             splat.useMetal4Sorting = enabled
             if enabled {
-                Self.log.info("Metal 4 GPU radix sorting enabled (>100K splat threshold)")
+                Self.log.info("Experimental Metal 4 GPU radix sorting enabled")
             } else {
                 Self.log.info("Metal 4 GPU radix sorting disabled - using counting sort/MPS")
             }

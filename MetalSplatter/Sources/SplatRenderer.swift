@@ -78,6 +78,82 @@ public class SplatRenderer: @unchecked Sendable {
         case auto     // Auto-select based on camera motion
     }
 
+    internal enum SortPath: String, Sendable {
+        case metal4
+        case counting
+        case mps
+        case cpu
+    }
+
+    internal struct SortPerformanceSample: Sendable {
+        let path: SortPath
+        let splatCount: Int
+        let renderableCount: Int
+        let wallTime: TimeInterval
+        let callbackWallTime: TimeInterval?
+        let gpuTime: TimeInterval?
+        let mainQueueDelay: TimeInterval?
+        let inFlightSortsAtStart: Int
+        let inFlightSortsAtCompletion: Int
+        let interactionMode: Bool
+        let sortByDistance: Bool
+        let status: String
+
+        var overheadTime: TimeInterval? {
+            gpuTime.map { max(0, wallTime - $0) }
+        }
+
+        var logMessage: String {
+            let callbackWallMs = callbackWallTime.map { Self.formatMilliseconds($0) } ?? "n/a"
+            let gpuMs = gpuTime.map { Self.formatMilliseconds($0) } ?? "n/a"
+            let overheadMs = overheadTime.map { Self.formatMilliseconds($0) } ?? "n/a"
+            let mainQueueMs = mainQueueDelay.map { Self.formatMilliseconds($0) } ?? "n/a"
+            return "Sort performance path=\(path.rawValue) " +
+                "splats=\(splatCount) renderable=\(renderableCount) " +
+                "wallMs=\(Self.formatMilliseconds(wallTime)) callbackWallMs=\(callbackWallMs) " +
+                "gpuMs=\(gpuMs) overheadMs=\(overheadMs) mainQueueMs=\(mainQueueMs) " +
+                "inFlightStart=\(inFlightSortsAtStart) inFlightEnd=\(inFlightSortsAtCompletion) " +
+                "interaction=\(interactionMode) sortByDistance=\(sortByDistance) status=\(status)"
+        }
+
+        private static func formatMilliseconds(_ duration: TimeInterval) -> String {
+            String(format: "%.2f", duration * 1000)
+        }
+    }
+
+    private struct SortPerformanceContext: Sendable {
+        let path: SortPath
+        let splatCount: Int
+        let renderableCount: Int
+        let inFlightSortsAtStart: Int
+        let interactionMode: Bool
+        let sortByDistance: Bool
+
+        func makeSample(
+            wallTime: TimeInterval,
+            callbackWallTime: TimeInterval?,
+            gpuTime: TimeInterval?,
+            mainQueueDelay: TimeInterval?,
+            inFlightSortsAtCompletion: Int,
+            status: String
+        ) -> SortPerformanceSample {
+            SortPerformanceSample(
+                path: path,
+                splatCount: splatCount,
+                renderableCount: renderableCount,
+                wallTime: wallTime,
+                callbackWallTime: callbackWallTime,
+                gpuTime: gpuTime,
+                mainQueueDelay: mainQueueDelay,
+                inFlightSortsAtStart: inFlightSortsAtStart,
+                inFlightSortsAtCompletion: inFlightSortsAtCompletion,
+                interactionMode: interactionMode,
+                sortByDistance: sortByDistance,
+                status: status
+            )
+        }
+    }
+
     enum Constants {
         // Keep in sync with Shaders.metal : maxViewCount
         static let maxViewCount = 2
@@ -761,7 +837,7 @@ public class SplatRenderer: @unchecked Sendable {
     var sorting = false
     private var sortJobsInFlight: Int = 0  // Track concurrent sort operations
     private let maxConcurrentSorts: Int = 2  // Allow overlap: one sorting while one renders
-    private var sortStateLock = os_unfair_lock()  // Protects sortJobsInFlight and buffer swap
+    private var sortStateLock = os_unfair_lock()  // Protects sort scheduling state and buffer swap
     var orderAndDepthTempSort: [SplatIndexAndDepth] = []
 
     // Metal 4 command buffer pool for improved performance
@@ -818,9 +894,8 @@ public class SplatRenderer: @unchecked Sendable {
         set { _metal4Sorter = newValue }
     }
 
-    /// When true and Metal 4 is available, uses atomic radix sort for scenes >100K splats.
-    /// This is opt-in because it requires Metal 4 and is only beneficial for very large scenes.
-    /// For smaller scenes, counting sort remains more efficient.
+    /// When true and Metal 4 is available, uses the experimental atomic radix sorter.
+    /// This stays opt-in because counting sort is faster for typical splat scenes.
     public var useMetal4Sorting: Bool = false
 
     /// Minimum splat count to use Metal 4 sorting (below this, counting sort is faster)
@@ -845,6 +920,12 @@ public class SplatRenderer: @unchecked Sendable {
         os_unfair_lock_lock(&sortStateLock)
         defer { os_unfair_lock_unlock(&sortStateLock) }
         return sortJobsInFlight
+    }
+
+    private func getSortFrameState() -> (ready: Bool, duration: TimeInterval?, jobsInFlight: Int) {
+        os_unfair_lock_lock(&sortStateLock)
+        defer { os_unfair_lock_unlock(&sortStateLock) }
+        return (!sorting, lastSortDuration, sortJobsInFlight)
     }
 
     private func canStartNewSort() -> Bool {
@@ -876,6 +957,50 @@ public class SplatRenderer: @unchecked Sendable {
         sorting = false
         sortJobsInFlight -= 1
         os_unfair_lock_unlock(&sortStateLock)
+    }
+
+    /// Atomically publish scheduling metadata and clear the in-flight sort gate.
+    private func finishSortState(
+        duration: TimeInterval,
+        bufferReadyTime: CFAbsoluteTime,
+        cameraWorldPosition: SIMD3<Float>,
+        cameraWorldForward: SIMD3<Float>,
+        sortViewMatrix: simd_float4x4?,
+        dataDirtySnapshot: UInt64
+    ) -> Int {
+        os_unfair_lock_lock(&sortStateLock)
+        lastSortDuration = duration
+        lastSortedCameraPosition = cameraWorldPosition
+        lastSortedCameraForward = cameraWorldForward
+        lastSortedViewMatrix = sortViewMatrix
+        lastSortTime = bufferReadyTime
+        if sortDataRevision == dataDirtySnapshot {
+            sortDirtyDueToData = false
+        }
+        sorting = false
+        sortJobsInFlight -= 1
+        let inFlightSortsAtCompletion = sortJobsInFlight
+        os_unfair_lock_unlock(&sortStateLock)
+        return inFlightSortsAtCompletion
+    }
+
+    private func markSortDataDirty() {
+        os_unfair_lock_lock(&sortStateLock)
+        sortDirtyDueToData = true
+        sortDataRevision &+= 1
+        os_unfair_lock_unlock(&sortStateLock)
+    }
+
+    private func markSortDirtyWithoutRevisionChange() {
+        os_unfair_lock_lock(&sortStateLock)
+        sortDirtyDueToData = true
+        os_unfair_lock_unlock(&sortStateLock)
+    }
+
+    private func getSortDataRevision() -> UInt64 {
+        os_unfair_lock_lock(&sortStateLock)
+        defer { os_unfair_lock_unlock(&sortStateLock) }
+        return sortDataRevision
     }
 
     /// Thread-safe access to the current sorted indices buffer for rendering
@@ -2021,9 +2146,8 @@ public class SplatRenderer: @unchecked Sendable {
     }
 
     private func markRenderableSetDirty() {
-        sortDirtyDueToData = true
         frustumCullDirtyDueToData = true
-        sortDataRevision &+= 1
+        markSortDataDirty()
     }
 
     private func markRenderableSetReducedWithoutResort() {
@@ -2222,18 +2346,16 @@ public class SplatRenderer: @unchecked Sendable {
     /// Called internally when positions or covariance values are modified.
     private func markGeometryDirty() {
         geometryDirty = true
-        sortDirtyDueToData = true
         frustumCullDirtyDueToData = true
-        sortDataRevision &+= 1
+        markSortDataDirty()
         boundsDirty = true
         animationDirty = true
         invalidatePrecomputedData()
     }
 
     internal func markAnimationDependentDataDirty() {
-        sortDirtyDueToData = true
         frustumCullDirtyDueToData = true
-        sortDataRevision &+= 1
+        markSortDataDirty()
         boundsDirty = true
         invalidatePrecomputedData()
     }
@@ -2795,7 +2917,8 @@ public class SplatRenderer: @unchecked Sendable {
         guard isInteracting else { return }
         
         isInteracting = false
-        interactionEndTime = CFAbsoluteTimeGetCurrent()
+        let endTime = CFAbsoluteTimeGetCurrent()
+        interactionEndTime = endTime
         
         // Restore quality settings
         sortPositionEpsilon = qualitySortPositionEpsilon
@@ -2806,18 +2929,23 @@ public class SplatRenderer: @unchecked Sendable {
         minimumFrustumCullInterval = qualityMinimumFrustumCullInterval
         highQualityDepth = qualityHighQualityDepth
         
-        // Schedule a final high-quality sort after a brief delay
-        // This allows the last frame to render before the sort overhead kicks in
-        // Skip if using dithered transparency (order-independent, no sort needed)
+        // Schedule a final quality-threshold check after a brief delay. If an
+        // interaction sort already matches the settled camera, avoid forcing work.
         if !useDitheredTransparency {
             DispatchQueue.main.asyncAfter(deadline: .now() + postInteractionSortDelay) { [weak self] in
                 guard let self = self else { return }
-                // Only trigger if we haven't started interacting again
-                if !self.isInteracting {
+                // Only the latest interaction end owns the delayed quality check.
+                guard !self.isInteracting,
+                      self.interactionEndTime == endTime else {
+                    return
+                }
+
+                self.interactionEndTime = nil
+                if self.shouldResortForCurrentCamera() {
                     Self.log.debug("Interaction mode ended - triggering final sort")
-                    self.sortDirtyDueToData = true  // Force a re-sort
-                    self.frustumCullDirtyDueToData = true
                     self.resort(useGPU: true)
+                } else {
+                    Self.log.debug("Interaction mode ended - final sort skipped; current order is fresh")
                 }
             }
         }
@@ -2860,21 +2988,34 @@ public class SplatRenderer: @unchecked Sendable {
             return false
         }
         let now = CFAbsoluteTimeGetCurrent()
-        if sortDirtyDueToData {
+        if let interactionEndTime,
+           !isInteracting,
+           now - interactionEndTime < postInteractionSortDelay {
+            return false
+        }
+
+        os_unfair_lock_lock(&sortStateLock)
+        let sortDirty = sortDirtyDueToData
+        let previousSortTime = lastSortTime
+        let previousSortPosition = lastSortedCameraPosition
+        let previousSortForward = lastSortedCameraForward
+        os_unfair_lock_unlock(&sortStateLock)
+
+        if sortDirty {
             return true
         }
-        if effectiveMinimumSortInterval > 0 && (now - lastSortTime) < effectiveMinimumSortInterval {
+        if effectiveMinimumSortInterval > 0 && (now - previousSortTime) < effectiveMinimumSortInterval {
             return false
         }
         return Self.shouldRunCameraDrivenUpdate(
             dirty: false,
             now: now,
-            lastUpdateTime: lastSortTime,
+            lastUpdateTime: previousSortTime,
             minimumInterval: effectiveMinimumSortInterval,
             currentPosition: sortCameraPosition,
             currentForward: sortCameraForward,
-            lastPosition: lastSortedCameraPosition,
-            lastForward: lastSortedCameraForward,
+            lastPosition: previousSortPosition,
+            lastForward: previousSortForward,
             positionEpsilon: sortPositionEpsilon,
             directionEpsilon: sortDirectionEpsilon
         )
@@ -3440,16 +3581,17 @@ public class SplatRenderer: @unchecked Sendable {
                 leasedBuffers: distancePoolStats.leasedBuffers + indexPoolStats.leasedBuffers,
                 totalMemoryMB: distancePoolStats.totalMemoryMB + indexPoolStats.totalMemoryMB
             )
+            let sortFrameState = getSortFrameState()
 
             let stats = FrameStatistics(
-                ready: !sorting,
-                loadingCount: sorting ? 1 : 0,
-                sortDuration: lastSortDuration,
+                ready: sortFrameState.ready,
+                loadingCount: sortFrameState.ready ? 0 : 1,
+                sortDuration: sortFrameState.duration,
                 bufferUploadCount: frameBufferUploads,
                 splatCount: splatCount,
                 frameTime: lastFrameTime,
                 sortBufferPoolStats: sortBufferStats,
-                sortJobsInFlight: getSortJobsInFlight()
+                sortJobsInFlight: sortFrameState.jobsInFlight
             )
             frameReadyCallback(stats)
         }
@@ -3505,9 +3647,8 @@ public class SplatRenderer: @unchecked Sendable {
         }
     }
 
-    /// Completes a GPU sort by swapping buffers and updating state.
-    /// Called from command buffer completion handlers to avoid blocking.
-    /// Dispatches to main thread to avoid race conditions with render/update calls.
+    /// Completes a sort by publishing the sorted-index buffer and scheduling state
+    /// immediately, then dispatching external callbacks/logging to main.
     private func finishSort(
         indexOutputBuffer: MetalBuffer<Int32>,
         sortStartTime: CFAbsoluteTime,
@@ -3515,38 +3656,83 @@ public class SplatRenderer: @unchecked Sendable {
         cameraWorldForward: SIMD3<Float>,
         sortViewMatrix: simd_float4x4?,
         dataDirtySnapshot: UInt64,
-        useGPU: Bool
+        performanceContext: SortPerformanceContext,
+        completionHandlerTime: CFAbsoluteTime?,
+        gpuTime: TimeInterval?,
+        commandBufferStatus: String
     ) {
-        // Dispatch to main thread to serialize with render/update calls
+        let bufferReadyTime = completionHandlerTime ?? CFAbsoluteTimeGetCurrent()
+        let elapsed = bufferReadyTime - sortStartTime
+        let callbackWallTime = completionHandlerTime.map { max(0, $0 - sortStartTime) }
+
+        // GPU-only sorting uses double buffering. Publish the newly sorted indices
+        // under the same lock used by render reads, so the next frame can consume
+        // them without waiting for a main-queue turn.
+        if let oldBuffer = swapSortedIndicesBuffer(newBuffer: indexOutputBuffer) {
+            // IMPORTANT: Defer release until a later render command buffer completes.
+            // The old buffer may still be referenced by in-flight GPU work.
+            deferredBufferRelease(oldBuffer)
+        }
+
+        let inFlightSortsAtCompletion = finishSortState(
+            duration: elapsed,
+            bufferReadyTime: bufferReadyTime,
+            cameraWorldPosition: cameraWorldPosition,
+            cameraWorldForward: cameraWorldForward,
+            sortViewMatrix: sortViewMatrix,
+            dataDirtySnapshot: dataDirtySnapshot
+        )
+
+        // Keep external observers and logging on main. Scheduling metadata above is
+        // already published so frame-aligned main-queue delays do not keep sorting gated.
         DispatchQueue.main.async { [weak self] in
             guard let self = self else {
-                // If self is deallocated, the pool is also gone. The indexOutputBuffer
-                // will be freed when this closure completes (Metal buffers are refcounted).
                 return
             }
 
-            // GPU-ONLY SORTING with double-buffering for async overlap
-            // Swap buffers atomically - rendering continues with old buffer
-            // until this completes, then switches to new buffer
-            if let oldBuffer = self.swapSortedIndicesBuffer(newBuffer: indexOutputBuffer) {
-                // IMPORTANT: Defer release until a later render command buffer completes.
-                // The old buffer may still be referenced by in-flight GPU work.
-                self.deferredBufferRelease(oldBuffer)
-            }
-
-            let elapsed = CFAbsoluteTimeGetCurrent() - sortStartTime
-            self.lastSortDuration = elapsed
+            let mainApplyTime = CFAbsoluteTimeGetCurrent()
+            let mainQueueDelay = max(0, mainApplyTime - bufferReadyTime)
             self.onSortComplete?(elapsed)
-            self.lastSortedCameraPosition = cameraWorldPosition
-            self.lastSortedCameraForward = cameraWorldForward
-            self.lastSortedViewMatrix = sortViewMatrix
-            self.lastSortTime = CFAbsoluteTimeGetCurrent()
-            if self.sortDataRevision == dataDirtySnapshot {
-                self.sortDirtyDueToData = false
-            }
-            self.finishSort()
+            let sample = performanceContext.makeSample(
+                wallTime: elapsed,
+                callbackWallTime: callbackWallTime,
+                gpuTime: gpuTime,
+                mainQueueDelay: mainQueueDelay,
+                inFlightSortsAtCompletion: inFlightSortsAtCompletion,
+                status: commandBufferStatus
+            )
 
-            Self.log.debug("Async sort completed in \(String(format: "%.1f", elapsed * 1000))ms")
+            Self.log.debug("\(sample.logMessage, privacy: .public)")
+        }
+    }
+
+    private static func gpuDuration(for commandBuffer: MTLCommandBuffer) -> TimeInterval? {
+        let duration = commandBuffer.gpuEndTime - commandBuffer.gpuStartTime
+        return duration > 0 ? duration : nil
+    }
+
+    private static func combinedGPUTime(_ times: TimeInterval?...) -> TimeInterval? {
+        let validTimes = times.compactMap { $0 }
+        guard !validTimes.isEmpty else { return nil }
+        return validTimes.reduce(0, +)
+    }
+
+    private static func statusDescription(for commandBuffer: MTLCommandBuffer) -> String {
+        switch commandBuffer.status {
+        case .notEnqueued:
+            return "notEnqueued"
+        case .enqueued:
+            return "enqueued"
+        case .committed:
+            return "committed"
+        case .scheduled:
+            return "scheduled"
+        case .completed:
+            return "completed"
+        case .error:
+            return "error"
+        @unknown default:
+            return "unknown"
         }
     }
 
@@ -3562,7 +3748,7 @@ public class SplatRenderer: @unchecked Sendable {
 
         let splatCount = splatBuffer.count
         let renderableCount = renderableSplatCountForCurrentEditState
-        let dataDirtySnapshot = sortDataRevision
+        let dataDirtySnapshot = getSortDataRevision()
 
         guard renderableCount > 0 else {
             finishSort()
@@ -3579,6 +3765,8 @@ public class SplatRenderer: @unchecked Sendable {
             cameraPosition: cameraWorldPosition,
             cameraForward: cameraWorldForward
         )
+        let sortJobsInFlightAtStart = getSortJobsInFlight()
+        let interactionModeAtStart = isInteracting
         
 //        // For benchmark.
 //        guard splatCount > 0 else {
@@ -3610,6 +3798,14 @@ public class SplatRenderer: @unchecked Sendable {
                        self.hiddenOrDeletedEditStateCount == 0,
                        splatCount > self.metal4SortingThreshold,
                        let sorter = self.metal4Sorter {
+                        let performanceContext = SortPerformanceContext(
+                            path: .metal4,
+                            splatCount: splatCount,
+                            renderableCount: renderableCount,
+                            inFlightSortsAtStart: sortJobsInFlightAtStart,
+                            interactionMode: interactionModeAtStart,
+                            sortByDistance: effectiveSortByDistance
+                        )
                         let sortCommandBufferManager = self.computeCommandBufferManager ?? commandBufferManager
                         guard let commandBuffer = sortCommandBufferManager.makeCommandBuffer() else {
                             Self.log.error("Failed to create compute command buffer for Metal 4 sort.")
@@ -3636,7 +3832,7 @@ public class SplatRenderer: @unchecked Sendable {
                         }
 
                         // Capture pool before weak self check to ensure buffer release even if self is deallocated
-                        commandBuffer.addCompletedHandler { [weak self, sortIndexBufferPool] _ in
+                        commandBuffer.addCompletedHandler { [weak self, sortIndexBufferPool] buffer in
                             guard let self = self else {
                                 // Self deallocated during async sort - release buffer via captured pool
                                 sortIndexBufferPool.release(indexOutputBuffer)
@@ -3649,7 +3845,10 @@ public class SplatRenderer: @unchecked Sendable {
                                 cameraWorldForward: cameraWorldForward,
                                 sortViewMatrix: sortViewMatrix,
                                 dataDirtySnapshot: dataDirtySnapshot,
-                                useGPU: true
+                                performanceContext: performanceContext,
+                                completionHandlerTime: CFAbsoluteTimeGetCurrent(),
+                                gpuTime: Self.gpuDuration(for: buffer),
+                                commandBufferStatus: Self.statusDescription(for: buffer)
                             )
                         }
                         commandBuffer.commit()
@@ -3660,6 +3859,14 @@ public class SplatRenderer: @unchecked Sendable {
                 // === O(n) COUNTING SORT PATH ===
                 // Uses histogram-based sorting which is faster than O(n log n) radix sort
                 if self.useCountingSort, let sorter = self.countingSorter {
+                    let performanceContext = SortPerformanceContext(
+                        path: .counting,
+                        splatCount: splatCount,
+                        renderableCount: renderableCount,
+                        inFlightSortsAtStart: sortJobsInFlightAtStart,
+                        interactionMode: interactionModeAtStart,
+                        sortByDistance: effectiveSortByDistance
+                    )
                     // Use compute queue for sorting to allow overlap with rendering
                     let sortCommandBufferManager = self.computeCommandBufferManager ?? commandBufferManager
                     guard let commandBuffer = sortCommandBufferManager.makeCommandBuffer() else {
@@ -3703,7 +3910,7 @@ public class SplatRenderer: @unchecked Sendable {
                     // Use completion handler instead of blocking waitUntilCompleted
                     // This allows the Task to return while GPU continues sorting
                     // Capture pool before weak self check to ensure buffer release even if self is deallocated
-                    commandBuffer.addCompletedHandler { [weak self, sortIndexBufferPool] _ in
+                    commandBuffer.addCompletedHandler { [weak self, sortIndexBufferPool] buffer in
                         guard let self = self else {
                             // Self deallocated during async sort - release buffer via captured pool
                             sortIndexBufferPool.release(indexOutputBuffer)
@@ -3716,7 +3923,10 @@ public class SplatRenderer: @unchecked Sendable {
                             cameraWorldForward: cameraWorldForward,
                             sortViewMatrix: sortViewMatrix,
                             dataDirtySnapshot: dataDirtySnapshot,
-                            useGPU: useGPU
+                            performanceContext: performanceContext,
+                            completionHandlerTime: CFAbsoluteTimeGetCurrent(),
+                            gpuTime: Self.gpuDuration(for: buffer),
+                            commandBufferStatus: Self.statusDescription(for: buffer)
                         )
                     }
                     commandBuffer.commit()
@@ -3725,6 +3935,14 @@ public class SplatRenderer: @unchecked Sendable {
                 } else {
                     // === LEGACY MPS ARGSORT PATH ===
                     // Falls back to O(n log n) MPS-based radix sort
+                    let performanceContext = SortPerformanceContext(
+                        path: .mps,
+                        splatCount: splatCount,
+                        renderableCount: renderableCount,
+                        inFlightSortsAtStart: sortJobsInFlightAtStart,
+                        interactionMode: interactionModeAtStart,
+                        sortByDistance: effectiveSortByDistance
+                    )
 
                     let distanceBuffer: MetalBuffer<Float>
                     do {
@@ -3784,10 +4002,12 @@ public class SplatRenderer: @unchecked Sendable {
                     let sortQueue = self.computeCommandBufferManager?.queue ?? commandBufferManager.queue
 
                     // Use completion handler to chain distance computation -> argsort -> finish
-                    commandBuffer.addCompletedHandler { [weak self] _ in
+                    commandBuffer.addCompletedHandler { [weak self] distanceCommandBuffer in
                         guard let self = self else {
                             return
                         }
+                        let distanceGPUTime = Self.gpuDuration(for: distanceCommandBuffer)
+                        let distanceStatus = Self.statusDescription(for: distanceCommandBuffer)
 
                         guard let argSortCommandBuffer = sortQueue.makeCommandBuffer() else {
                             Self.log.error("Failed to create MPS arg sort command buffer.")
@@ -3815,7 +4035,10 @@ public class SplatRenderer: @unchecked Sendable {
                                 cameraWorldForward: cameraWorldForward,
                                 sortViewMatrix: sortViewMatrix,
                                 dataDirtySnapshot: dataDirtySnapshot,
-                                useGPU: useGPU
+                                performanceContext: performanceContext,
+                                completionHandlerTime: CFAbsoluteTimeGetCurrent(),
+                                gpuTime: Self.combinedGPUTime(distanceGPUTime, Self.gpuDuration(for: buffer)),
+                                commandBufferStatus: "distance:\(distanceStatus),argsort:\(Self.statusDescription(for: buffer))"
                             )
                         }
                         self.cachedMPSArgSort.encode(
@@ -3832,6 +4055,14 @@ public class SplatRenderer: @unchecked Sendable {
             }
         } else {
             Task(priority: .high) {
+                let performanceContext = SortPerformanceContext(
+                    path: .cpu,
+                    splatCount: splatCount,
+                    renderableCount: renderableCount,
+                    inFlightSortsAtStart: sortJobsInFlightAtStart,
+                    interactionMode: interactionModeAtStart,
+                    sortByDistance: effectiveSortByDistance
+                )
                 var actualCount = 0
 
                 // Copy positions under lock to ensure pointer validity during sort
@@ -3872,10 +4103,8 @@ public class SplatRenderer: @unchecked Sendable {
                         cpuSortedIndices.values[newIndex] = Int32(orderAndDepthTempSort[newIndex].index)
                     }
 
-                    // Dispatch state updates to main thread, consistent with GPU sort path.
-                    // Without this, properties like lastSortDuration, lastSortedCameraPosition,
-                    // etc. would be written from the cooperative thread pool while render()
-                    // reads them from the main thread - a data race.
+                    // finishSort publishes scheduling state under sortStateLock, matching
+                    // the GPU completion path while keeping external callbacks on main.
                     self.finishSort(
                         indexOutputBuffer: cpuSortedIndices,
                         sortStartTime: sortStartTime,
@@ -3883,7 +4112,10 @@ public class SplatRenderer: @unchecked Sendable {
                         cameraWorldForward: cameraWorldForward,
                         sortViewMatrix: sortViewMatrix,
                         dataDirtySnapshot: dataDirtySnapshot,
-                        useGPU: useGPU
+                        performanceContext: performanceContext,
+                        completionHandlerTime: nil,
+                        gpuTime: nil,
+                        commandBufferStatus: "completed"
                     )
                 } catch {
                     Self.log.error("Failed to create sorted indices buffer: \(error)")

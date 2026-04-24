@@ -25,7 +25,7 @@ struct MetalKitSceneView: View {
     @State private var frustumCullingEnabled = true // GPU frustum culling - enabled by default for AR performance
     @State private var meshShaderEnabled = true // Metal 3+ mesh shader rendering - enabled by default
     @State private var ditheredTransparencyEnabled = false // Stochastic transparency - disabled by default
-    @State private var metal4SortingEnabled = true // Metal 4 GPU radix sort - enabled by default
+    @State private var metal4SortingEnabled = false // Opt-in: counting sort is faster for typical scenes
     @State private var use2DGSMode = false // 2DGS planar rendering - disabled by default
     @State private var splatAnimationEnabled = false
     @State private var splatAnimationEffectRawValue = SplatAnimationEffect.spread.rawValue
@@ -387,7 +387,7 @@ private struct SplatSettingsPanel: View {
                 )
                 settingsToggle(
                     title: "Metal 4 GPU Sorting",
-                    subtitle: "Stable radix sort for very large splat counts",
+                    subtitle: "Experimental stable radix sort; counting sort is usually faster",
                     isOn: $metal4SortingEnabled,
                     badge: "iOS 26+",
                     badgeTint: .purple
