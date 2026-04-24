@@ -630,20 +630,23 @@ public final class GltfGaussianSplatSceneReader: SplatSceneReader {
 
         private func readUInt16(_ buffer: Data, offset: Int) throws -> UInt16 {
             guard offset + 2 <= buffer.count else { throw Error.bufferOutOfBounds }
-            let value = buffer.withUnsafeBytes { $0.load(fromByteOffset: offset, as: UInt16.self) }
-            return UInt16(littleEndian: value)
+            let start = buffer.startIndex + offset
+            return UInt16(buffer[start])
+                | (UInt16(buffer[start + 1]) << 8)
         }
 
         private func readInt16(_ buffer: Data, offset: Int) throws -> Int16 {
-            guard offset + 2 <= buffer.count else { throw Error.bufferOutOfBounds }
-            let value = buffer.withUnsafeBytes { $0.load(fromByteOffset: offset, as: Int16.self) }
-            return Int16(littleEndian: value)
+            let value = try readUInt16(buffer, offset: offset)
+            return Int16(bitPattern: value)
         }
 
         private func readUInt32(_ buffer: Data, offset: Int) throws -> UInt32 {
             guard offset + 4 <= buffer.count else { throw Error.bufferOutOfBounds }
-            let value = buffer.withUnsafeBytes { $0.load(fromByteOffset: offset, as: UInt32.self) }
-            return UInt32(littleEndian: value)
+            let start = buffer.startIndex + offset
+            return UInt32(buffer[start])
+                | (UInt32(buffer[start + 1]) << 8)
+                | (UInt32(buffer[start + 2]) << 16)
+                | (UInt32(buffer[start + 3]) << 24)
         }
 
         private func readFloat32(_ buffer: Data, offset: Int) throws -> Float {

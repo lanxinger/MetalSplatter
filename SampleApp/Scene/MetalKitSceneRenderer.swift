@@ -845,11 +845,15 @@ class MetalKitSceneRenderer: NSObject, MTKViewDelegate {
 
     func draw(in view: MTKView) {
         guard let modelRenderer else { return }
-        guard let drawable = view.currentDrawable else { return }
 
         syncSplatAnimation()
 
         _ = inFlightSemaphore.wait(timeout: DispatchTime.distantFuture)
+
+        guard let drawable = view.currentDrawable else {
+            inFlightSemaphore.signal()
+            return
+        }
 
         guard let commandBuffer = commandBufferManager.makeCommandBuffer() else {
             inFlightSemaphore.signal()

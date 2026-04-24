@@ -316,6 +316,108 @@ final class SplatIOTests: XCTestCase {
         XCTAssertTrue((actual.rotation.normalized.vector - expected.rotation.normalized.vector).isWithin(tolerance: SplatScenePoint.Tolerance.rotation))
     }
 
+    func testGLBReaderAcceptsUnalignedAccessorOffsets() throws {
+        var bin = Data([0xEE])
+        let positionOffset = bin.count
+        bin.appendFloat32(1)
+        bin.appendFloat32(2)
+        bin.appendFloat32(3)
+
+        let rotationOffset = bin.count
+        bin.appendInt16(0)
+        bin.appendInt16(0)
+        bin.appendInt16(0)
+        bin.appendInt16(Int16.max)
+
+        let scaleOffset = bin.count
+        bin.appendFloat32(0.1)
+        bin.appendFloat32(0.2)
+        bin.appendFloat32(0.3)
+
+        let opacityOffset = bin.count
+        bin.appendUInt16(UInt16.max / 2)
+
+        let colorOffset = bin.count
+        bin.appendUInt16(UInt16.max / 4)
+        bin.appendUInt16(UInt16.max / 2)
+        bin.appendUInt16((UInt16.max / 4) * 3)
+        bin.appendUInt16(UInt16.max)
+
+        XCTAssertEqual(positionOffset % 2, 1)
+        XCTAssertEqual(rotationOffset % 2, 1)
+        XCTAssertEqual(scaleOffset % 2, 1)
+        XCTAssertEqual(opacityOffset % 2, 1)
+        XCTAssertEqual(colorOffset % 2, 1)
+
+        let json = """
+        {
+          "asset": { "version": "2.0" },
+          "buffers": [
+            { "byteLength": \(bin.count) }
+          ],
+          "bufferViews": [
+            { "buffer": 0, "byteOffset": \(positionOffset), "byteLength": 12 },
+            { "buffer": 0, "byteOffset": \(rotationOffset), "byteLength": 8 },
+            { "buffer": 0, "byteOffset": \(scaleOffset), "byteLength": 12 },
+            { "buffer": 0, "byteOffset": \(opacityOffset), "byteLength": 2 },
+            { "buffer": 0, "byteOffset": \(colorOffset), "byteLength": 8 }
+          ],
+          "accessors": [
+            { "bufferView": 0, "componentType": 5126, "count": 1, "type": "VEC3" },
+            { "bufferView": 1, "componentType": 5122, "normalized": true, "count": 1, "type": "VEC4" },
+            { "bufferView": 2, "componentType": 5126, "count": 1, "type": "VEC3" },
+            { "bufferView": 3, "componentType": 5123, "normalized": true, "count": 1, "type": "SCALAR" },
+            { "bufferView": 4, "componentType": 5123, "normalized": true, "count": 1, "type": "VEC4" }
+          ],
+          "meshes": [
+            {
+              "primitives": [
+                {
+                  "mode": 0,
+                  "attributes": {
+                    "POSITION": 0,
+                    "KHR_gaussian_splatting:ROTATION": 1,
+                    "KHR_gaussian_splatting:SCALE": 2,
+                    "KHR_gaussian_splatting:OPACITY": 3,
+                    "COLOR_0": 4
+                  },
+                  "extensions": {
+                    "KHR_gaussian_splatting": {
+                      "kernel": "ellipse"
+                    }
+                  }
+                }
+              ]
+            }
+          ]
+        }
+        """
+
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+            .appendingPathExtension("glb")
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        try makeGLB(json: json, bin: bin).write(to: url)
+
+        let reader = try GltfGaussianSplatSceneReader(url)
+        let points = try reader.readScene()
+
+        XCTAssertEqual(points.count, 1)
+        let point = try XCTUnwrap(points.first)
+        XCTAssertTrue((point.position - SIMD3<Float>(1, 2, 3)).isWithin(tolerance: 1e-6))
+        XCTAssertTrue((point.scale.asLinearFloat - exp(SIMD3<Float>(0.1, 0.2, 0.3))).isWithin(tolerance: 1e-6))
+        XCTAssertEqual(point.opacity.asLinearFloat, Float(UInt16.max / 2) / Float(UInt16.max), accuracy: 1e-6)
+        let expectedColor = SIMD3<Float>(
+            Float(UInt16.max / 4) / Float(UInt16.max),
+            Float(UInt16.max / 2) / Float(UInt16.max),
+            Float((UInt16.max / 4) * 3) / Float(UInt16.max)
+        )
+        XCTAssertTrue((point.color.asLinearFloat - expectedColor).isWithin(tolerance: 1e-6))
+        let expectedRotation = simd_quatf(ix: 0, iy: 0, iz: 0, r: 1)
+        XCTAssertTrue((point.rotation.normalized.vector - expectedRotation.vector).isWithin(tolerance: SplatScenePoint.Tolerance.rotation))
+    }
+
     func testGLTFWriterRoundTripsSphericalHarmonics() throws {
         let points = [
             SplatScenePoint(
@@ -1432,6 +1534,53 @@ final class SOGSTextureCacheTests: XCTestCase {
 
         // Clear should work without deadlock
         cache.clearCache()
+    }
+}
+
+private func makeGLB(json: String, bin: Data) -> Data {
+    var jsonData = Data(json.utf8)
+    while jsonData.count % 4 != 0 {
+        jsonData.append(0x20)
+    }
+
+    var binData = bin
+    while binData.count % 4 != 0 {
+        binData.append(0)
+    }
+
+    var data = Data()
+    let totalLength = 12 + 8 + jsonData.count + 8 + binData.count
+    data.appendUInt32(0x46546c67)
+    data.appendUInt32(2)
+    data.appendUInt32(UInt32(totalLength))
+    data.appendUInt32(UInt32(jsonData.count))
+    data.appendUInt32(0x4e4f534a)
+    data.append(jsonData)
+    data.appendUInt32(UInt32(binData.count))
+    data.appendUInt32(0x004e4942)
+    data.append(binData)
+    return data
+}
+
+private extension Data {
+    mutating func appendUInt16(_ value: UInt16) {
+        append(UInt8(value & 0xFF))
+        append(UInt8((value >> 8) & 0xFF))
+    }
+
+    mutating func appendInt16(_ value: Int16) {
+        appendUInt16(UInt16(bitPattern: value))
+    }
+
+    mutating func appendUInt32(_ value: UInt32) {
+        append(UInt8(value & 0xFF))
+        append(UInt8((value >> 8) & 0xFF))
+        append(UInt8((value >> 16) & 0xFF))
+        append(UInt8((value >> 24) & 0xFF))
+    }
+
+    mutating func appendFloat32(_ value: Float) {
+        appendUInt32(value.bitPattern)
     }
 }
 
