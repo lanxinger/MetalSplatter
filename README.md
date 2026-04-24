@@ -13,7 +13,7 @@ MetalSplatter implements GPU-accelerated rendering of scenes captured via [3D Ga
 ## Features
 
 - **Multi-Platform Rendering**: iOS/iPadOS, macOS, and visionOS with platform-optimized rendering paths
-- **Editable Splat Workflows**: `SplatEditor` with GPU-backed selection, preview transforms, committed transforms, half-space plane cuts, hide/show, lock/unlock, delete, duplicate, separate, undo/redo, and export
+- **Editable Splat Workflows**: `SplatEditor` with GPU-backed selection, preview transforms, committed transforms, half-space plane cuts, hide/show, lock/unlock, delete/restore, duplicate, separate, undo/redo, and export
 - **Multiple File Formats**: PLY (ASCII/binary), SPLAT, SPZ/SPX, glTF/GLB, and SOGS v1/v2
 - **Advanced Rendering Pipeline**: Single-stage and multi-stage pipelines with tile memory for high-quality depth blending
 - **GPU-Accelerated Sorting**: O(n) counting sort with camera-relative binning for optimal visual quality
@@ -178,7 +178,7 @@ let editedPoints = try await editor.exportVisiblePoints()
 - Move, rotate, and scale preview transforms with commit/cancel
 - Direct committed transforms for alignment or scripted edits
 - Half-space plane selection and cuts via `SplatCutPlane` / `SplatCutPlaneSide`
-- Hide, unhide, lock, unlock, delete, duplicate, and separate operations
+- Hide, unhide, lock, unlock, delete, restore deleted, duplicate, and separate operations
 - Undo/redo and snapshot inspection via `SplatEditorSnapshot`
 - Export of the current visible edited scene back through `SplatIO`
 
@@ -203,7 +203,7 @@ The iOS/iPadOS demo includes:
 - Selection tools: point, rect, brush, lasso, flood, eyedropper/color-match, sphere, box, polygon, and measure
 - Cut tools: axis-aligned plane cuts with selectable side and bounds-based plane positioning
 - Alignment tools: center, center+floor, floor, and `-90° / +90° / 180°` rotations around X/Y/Z
-- Edit tools: move, rotate, scale, hide/show, lock/unlock, delete, duplicate, separate, undo/redo, and export
+- Edit tools: move, rotate, scale, hide/show, lock/unlock, delete/restore, duplicate, separate, undo/redo, and export
 - Selection utilities: replace/add/subtract combine modes plus all/none/invert helpers
 - Renderer feedback: selection tint plus an outline pass for selected splats
 

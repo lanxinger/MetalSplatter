@@ -749,7 +749,19 @@ internal extension SplatRenderer {
             }
             animationSceneMetrics = Self.makeSceneMetrics(points: points, sceneCounts: animationSceneCounts)
         }
+        animationMetricsDirty = false
         animationDirty = true
+    }
+
+    func refreshAnimationSceneMetricsIfNeeded() {
+        guard animationMetricsDirty else { return }
+        let sceneCounts = animationSceneCounts.isEmpty ? [sourceScenePoints.count] : animationSceneCounts
+        animationSceneMetrics = Self.makeSceneMetrics(
+            points: sourceScenePoints,
+            sceneIndices: animationSceneIndices,
+            sceneCounts: sceneCounts
+        )
+        animationMetricsDirty = false
     }
 
     var activeSplatBufferForRendering: MetalBuffer<Splat> {
@@ -768,6 +780,8 @@ internal extension SplatRenderer {
             }
             return false
         }
+
+        refreshAnimationSceneMetricsIfNeeded()
 
         if !animationDirty, lastAppliedAnimationTime == configuration.time {
             return false

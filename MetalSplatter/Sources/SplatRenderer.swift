@@ -377,6 +377,7 @@ public class SplatRenderer: @unchecked Sendable {
     public var animationConfiguration: SplatAnimationConfiguration? {
         didSet {
             guard animationConfiguration != oldValue else { return }
+            refreshAnimationSceneMetricsIfNeeded()
             animationDirty = true
             markRenderableSetDirty()
         }
@@ -722,6 +723,7 @@ public class SplatRenderer: @unchecked Sendable {
     internal var animationSceneIndices: [UInt32] = []
     internal var animationSceneCounts: [Int] = []
     internal var animationSceneMetrics: [SplatAnimationSceneMetrics] = []
+    internal var animationMetricsDirty = false
     internal var animationDirty = true
     internal var lastAppliedAnimationTime: Float?
     
@@ -1244,6 +1246,7 @@ public class SplatRenderer: @unchecked Sendable {
         animationSceneIndices.removeAll(keepingCapacity: false)
         animationSceneCounts.removeAll(keepingCapacity: false)
         animationSceneMetrics.removeAll(keepingCapacity: false)
+        animationMetricsDirty = false
         animationDirty = true
         lastAppliedAnimationTime = nil
         
@@ -1933,14 +1936,9 @@ public class SplatRenderer: @unchecked Sendable {
         }
         for index in indices where index >= 0 && index < sourceScenePoints.count && index < points.count {
             sourceScenePoints[index] = points[index]
+            animationMetricsDirty = true
         }
-        if !sourceScenePoints.isEmpty {
-            let sceneCounts = animationSceneCounts.isEmpty ? [sourceScenePoints.count] : animationSceneCounts
-            animationSceneMetrics = Self.makeSceneMetrics(points: sourceScenePoints,
-                                                          sceneIndices: animationSceneIndices,
-                                                          sceneCounts: sceneCounts)
-            animationDirty = true
-        }
+        animationDirty = animationDirty || animationMetricsDirty
         markGeometryDirty()
     }
 

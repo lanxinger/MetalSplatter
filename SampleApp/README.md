@@ -17,7 +17,7 @@ The app still contains some shared rendering infrastructure for other Apple plat
 The iOS/iPadOS demo exposes these tools in the editing toolbar:
 
 - Selection: point, rect, brush, lasso, flood, eyedropper/color-match, sphere, box, polygon, and measure
-- Editing: move, rotate, scale, hide, unhide all, lock, unlock all, delete, duplicate, separate, undo, redo, and export
+- Editing: move, rotate, scale, hide, unhide all, lock, unlock all, delete, restore deleted, duplicate, separate, undo, redo, and export
 - Selection utilities: replace/add/subtract combine modes plus all/none/invert helpers
 
 Renderer feedback in the demo includes:

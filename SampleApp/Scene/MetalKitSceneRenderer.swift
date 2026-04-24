@@ -549,6 +549,13 @@ class MetalKitSceneRenderer: NSObject, MTKViewDelegate {
         return await splatEditor.snapshot()
     }
 
+    func restoreDeletedEditableSplats() async throws -> SplatEditorSnapshot? {
+        guard let splatEditor else { return nil }
+        try await splatEditor.restoreDeleted()
+        requestRedraw()
+        return await splatEditor.snapshot()
+    }
+
     func deleteSelectedEditableSplats() async throws -> SplatEditorSnapshot? {
         guard let splatEditor else { return nil }
         try await splatEditor.deleteSelection()

@@ -157,6 +157,26 @@ final class SplatEditorTests: XCTestCase {
         XCTAssertEqual(renderer.animationSceneMetrics.count, 2)
     }
 
+    func testRendererPointEditsDeferAnimationMetricsUntilAnimationIsUsed() throws {
+        let renderer = try makeRenderer()
+        let points = makePoints()
+        try renderer.replaceSceneLayers([SplatSceneLayer(points: points)])
+
+        let originalCenter = try XCTUnwrap(renderer.animationSceneMetrics.first?.center)
+        var editedPoints = points
+        editedPoints[0] = makePoint(position: SIMD3<Float>(10.0, 0.0, -2.0), color: SIMD3<Float>(1.0, 0.0, 0.0))
+
+        try renderer.updateSplats(editedPoints, at: [0])
+
+        XCTAssertTrue(renderer.animationMetricsDirty)
+        XCTAssertEqual(try XCTUnwrap(renderer.animationSceneMetrics.first?.center.x), originalCenter.x, accuracy: 0.0001)
+
+        renderer.animationConfiguration = SplatAnimationConfiguration(effect: .magic)
+
+        XCTAssertFalse(renderer.animationMetricsDirty)
+        XCTAssertEqual(try XCTUnwrap(renderer.animationSceneMetrics.first?.center.x), 5.0, accuracy: 0.0001)
+    }
+
     func testRendererUpdateEditingStateClampsTransformIndicesToPointCount() throws {
         let renderer = try makeRenderer()
 
@@ -240,6 +260,24 @@ final class SplatEditorTests: XCTestCase {
         _ = store.unlockAll()
         _ = store.applySelection(indices: [0, 1, 2, 3], mode: .replace)
         XCTAssertEqual(store.selectedIndices, [0, 1, 2, 3])
+    }
+
+    func testEditableStoreRestoreDeletedClearsDeletedStateWithoutSelectingSplats() {
+        var store = EditableSplatStore(points: makePoints())
+        _ = store.applySelection(indices: [1, 2], mode: .replace)
+        _ = store.deleteSelection()
+
+        var snapshot = store.snapshotSummary()
+        XCTAssertEqual(snapshot.deletedCount, 2)
+        XCTAssertEqual(snapshot.visibleCount, 2)
+        XCTAssertEqual(snapshot.selectedCount, 0)
+
+        _ = store.restoreDeleted()
+
+        snapshot = store.snapshotSummary()
+        XCTAssertEqual(snapshot.deletedCount, 0)
+        XCTAssertEqual(snapshot.visibleCount, 4)
+        XCTAssertEqual(snapshot.selectedCount, 0)
     }
 
     func testEditableStorePlaneSelectionRespectsAxisSideAndVisibility() {

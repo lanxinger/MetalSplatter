@@ -300,22 +300,45 @@ struct EditableSplatStore: Sendable {
     }
 
     mutating func applySelection(indices: [Int], mode: SelectionCombineMode) -> [EditableSplatStateChange] {
-        let selectable = Set(indices.filter { index in
-            isSelectable(index)
-        })
+        let selectable = normalizedSelectableIndices(indices)
 
         var changes: [EditableSplatStateChange] = []
         switch mode {
         case .replace:
-            let previousSelection = selectedIndexSet
-            for index in previousSelection.subtracting(selectable) {
-                recordStateChange(at: index, into: &changes) { state in
-                    state.remove(.selected)
-                }
-            }
-            for index in selectable.subtracting(previousSelection) {
-                recordStateChange(at: index, into: &changes) { state in
-                    state.insert(.selected)
+            let previousSelection = selectedIndices
+            var previousCursor = 0
+            var selectableCursor = 0
+
+            while previousCursor < previousSelection.count || selectableCursor < selectable.count {
+                if selectableCursor >= selectable.count {
+                    let index = previousSelection[previousCursor]
+                    previousCursor += 1
+                    recordStateChange(at: index, into: &changes) { state in
+                        state.remove(.selected)
+                    }
+                } else if previousCursor >= previousSelection.count {
+                    let index = selectable[selectableCursor]
+                    selectableCursor += 1
+                    recordStateChange(at: index, into: &changes) { state in
+                        state.insert(.selected)
+                    }
+                } else {
+                    let previous = previousSelection[previousCursor]
+                    let next = selectable[selectableCursor]
+                    if previous == next {
+                        previousCursor += 1
+                        selectableCursor += 1
+                    } else if previous < next {
+                        previousCursor += 1
+                        recordStateChange(at: previous, into: &changes) { state in
+                            state.remove(.selected)
+                        }
+                    } else {
+                        selectableCursor += 1
+                        recordStateChange(at: next, into: &changes) { state in
+                            state.insert(.selected)
+                        }
+                    }
                 }
             }
         case .add:
@@ -406,6 +429,16 @@ struct EditableSplatStore: Sendable {
         for index in states.indices {
             recordStateChange(at: index, into: &changes) { state in
                 state.remove(.locked)
+            }
+        }
+        return changes
+    }
+
+    mutating func restoreDeleted() -> [EditableSplatStateChange] {
+        var changes: [EditableSplatStateChange] = []
+        for index in states.indices {
+            recordStateChange(at: index, into: &changes) { state in
+                state.remove(.deleted)
             }
         }
         return changes
@@ -701,6 +734,27 @@ struct EditableSplatStore: Sendable {
         for index in states.indices where states[index].contains(.selected) {
             selectedIndexSet.insert(index)
         }
+    }
+
+    private func normalizedSelectableIndices(_ indices: [Int]) -> [Int] {
+        guard !indices.isEmpty else { return [] }
+
+        var normalized = indices.filter { index in
+            states.indices.contains(index) && isSelectable(index)
+        }
+        guard !normalized.isEmpty else { return [] }
+
+        normalized.sort()
+        var unique: [Int] = []
+        unique.reserveCapacity(normalized.count)
+
+        var previous: Int?
+        for index in normalized where index != previous {
+            unique.append(index)
+            previous = index
+        }
+
+        return unique
     }
 
     private func projectedCandidates(viewport: SplatRenderer.ViewportDescriptor) -> [ProjectedCandidate] {
@@ -1008,6 +1062,10 @@ public actor SplatEditor {
 
     public func unlockAll() async throws {
         try applyStateHistory(store.unlockAll())
+    }
+
+    public func restoreDeleted() async throws {
+        try applyStateHistory(store.restoreDeleted())
     }
 
     public func deleteSelection() async throws {

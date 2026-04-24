@@ -836,6 +836,10 @@ final class SceneEditingController: ObservableObject {
         (snapshot?.selectedCount ?? 0) > 0
     }
 
+    var hasDeletedSplats: Bool {
+        (snapshot?.deletedCount ?? 0) > 0
+    }
+
     var canCommitPolygonSelection: Bool {
         polygonPoints.count >= 3
     }
@@ -1116,6 +1120,12 @@ final class SceneEditingController: ObservableObject {
     func unlockAll() {
         runEditorAction { renderer in
             try await renderer.unlockAllEditableSplats()
+        }
+    }
+
+    func restoreDeleted() {
+        runEditorAction { renderer in
+            try await renderer.restoreDeletedEditableSplats()
         }
     }
 
@@ -1546,6 +1556,7 @@ private struct SplatEditingToolbar: View {
                     actionButton("Duplicate", systemImage: "plus.square.on.square", disabled: !controller.hasSelection, action: controller.duplicateSelection)
                     actionButton("Separate", systemImage: "square.split.2x1", disabled: !controller.hasSelection, action: controller.separateSelection)
                     actionButton("Delete", systemImage: "trash", disabled: !controller.hasSelection, action: controller.deleteSelection)
+                    actionButton("Restore", systemImage: "arrow.counterclockwise.circle", disabled: !controller.hasDeletedSplats, action: controller.restoreDeleted)
                     actionButton("Undo", systemImage: "arrow.uturn.backward", disabled: !controller.isEditorAvailable, action: controller.undo)
                     actionButton("Redo", systemImage: "arrow.uturn.forward", disabled: !controller.isEditorAvailable, action: controller.redo)
                     actionButton("Export", systemImage: "square.and.arrow.up", disabled: !controller.isEditorAvailable, action: controller.exportScene)
