@@ -1,7 +1,6 @@
 import Foundation
 import simd
 import os
-import libzstd
 #if canImport(Metal)
 import Metal
 #endif
@@ -871,7 +870,7 @@ func zstdDecompressed(_ data: Data, expectedSize: Int) throws -> [UInt8] {
     var output = [UInt8](repeating: 0, count: expectedSize)
     let result = output.withUnsafeMutableBytes { outputBuffer in
         data.withUnsafeBytes { inputBuffer in
-            ZSTD_decompress(
+            zstdDecompressRaw(
                 outputBuffer.baseAddress,
                 expectedSize,
                 inputBuffer.baseAddress,
@@ -880,7 +879,7 @@ func zstdDecompressed(_ data: Data, expectedSize: Int) throws -> [UInt8] {
         }
     }
 
-    guard ZSTD_isError(result) == 0, result == expectedSize else {
+    guard zstdIsErrorRaw(result) == 0, result == expectedSize else {
         throw SplatFileFormatError.decompressionError
     }
 
@@ -890,11 +889,11 @@ func zstdDecompressed(_ data: Data, expectedSize: Int) throws -> [UInt8] {
 func zstdCompressed(_ data: Data, compressionLevel: Int32) throws -> [UInt8] {
     guard !data.isEmpty else { return [] }
 
-    let bound = ZSTD_compressBound(data.count)
+    let bound = zstdCompressBoundRaw(data.count)
     var output = [UInt8](repeating: 0, count: bound)
     let result = output.withUnsafeMutableBytes { outputBuffer in
         data.withUnsafeBytes { inputBuffer in
-            ZSTD_compress(
+            zstdCompressRaw(
                 outputBuffer.baseAddress,
                 bound,
                 inputBuffer.baseAddress,
@@ -904,13 +903,36 @@ func zstdCompressed(_ data: Data, compressionLevel: Int32) throws -> [UInt8] {
         }
     }
 
-    guard ZSTD_isError(result) == 0 else {
+    guard zstdIsErrorRaw(result) == 0 else {
         throw SplatFileFormatError.compressionError
     }
 
     output.removeSubrange(result..<output.count)
     return output
 }
+
+@_silgen_name("ZSTD_decompress")
+private func zstdDecompressRaw(
+    _ dst: UnsafeMutableRawPointer?,
+    _ dstCapacity: Int,
+    _ src: UnsafeRawPointer?,
+    _ compressedSize: Int
+) -> Int
+
+@_silgen_name("ZSTD_compress")
+private func zstdCompressRaw(
+    _ dst: UnsafeMutableRawPointer?,
+    _ dstCapacity: Int,
+    _ src: UnsafeRawPointer?,
+    _ srcSize: Int,
+    _ compressionLevel: Int32
+) -> Int
+
+@_silgen_name("ZSTD_compressBound")
+private func zstdCompressBoundRaw(_ srcSize: Int) -> Int
+
+@_silgen_name("ZSTD_isError")
+private func zstdIsErrorRaw(_ code: Int) -> UInt32
 
 private extension Data {
     func readLittleEndianUInt32(at offset: Int) throws -> UInt32 {
