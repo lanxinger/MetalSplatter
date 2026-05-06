@@ -1198,22 +1198,15 @@ private func unpackQuaternionSmallestThreePacked(_ result: inout simd_quatf, _ p
         let sign: Float = (encoded & 0x200) == 0 ? 1 : -1
         let magnitude = Float(encoded & mask) * scale
         let value = sign * magnitude
-
-        switch index {
-        case 0:
-            components[0] = value * c.flipQ.x
-        case 1:
-            components[1] = value * c.flipQ.y
-        case 2:
-            components[2] = value * c.flipQ.z
-        default:
-            components[3] = value
-        }
+        components[index] = value
 
         sumSquares += value * value
     }
 
     components[largestIndex] = sqrt(max(0.0, 1.0 - sumSquares))
+    components[0] *= c.flipQ.x
+    components[1] *= c.flipQ.y
+    components[2] *= c.flipQ.z
     result = simd_quatf(ix: components[0], iy: components[1], iz: components[2], r: components[3])
 }
 

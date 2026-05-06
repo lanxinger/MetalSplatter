@@ -288,9 +288,9 @@ public class SPZSceneReader: SplatSceneReader {
         var chunkResults = [SplatScenePoint]()
         chunkResults.reserveCapacity(range.count)
 
-        // SPZ uses RUB coordinate system internally, convert to target system
-        // For now, assume we want RDF (PLY) coordinate system for compatibility
-        let coordinateConverter = CoordinateConverter.converter(from: .rub, to: .rdf)
+        // Match Niantic's default loadSpz behavior: preserve SPZ coordinates unless
+        // a caller explicitly requests conversion. SplatIO has no conversion option yet.
+        let coordinateConverter = CoordinateConverter.converter(from: .rub, to: .rub)
 
         // Color scale factor from original C++ implementation
         let colorScale: Float = 0.15
@@ -419,9 +419,8 @@ public class SPZSceneReader: SplatSceneReader {
                     // Extract additional SH coefficients if present and needed
                     // SH data is organized with color channel as inner axis, coefficient as outer axis
                     // For degree 1: sh1n1_r, sh1n1_g, sh1n1_b, sh10_r, sh10_g, sh10_b, sh1p1_r, sh1p1_g, sh1p1_b
-                    if shDim > 1 && shOffset + (shDim-1)*3 < packedGaussians.sh.count {
-                        // We already have the DC term (first coefficient), so start from the second
-                        for j in 1..<min(shDim, 24) { // Limit to 24 max coefficients per channel
+                    if shDim > 0 && shOffset + (shDim * 3) <= packedGaussians.sh.count {
+                        for j in 0..<min(shDim, 24) { // Limit to 24 non-DC coefficients
                             let idx = shOffset + j * 3
                             if idx + 2 < packedGaussians.sh.count {
                                 // Process all three SH components at once (R, G, B for coefficient j)

@@ -1,6 +1,6 @@
 import XCTest
 import Spatial
-import SplatIO
+@testable import SplatIO
 import simd
 
 final class SplatIOTests: XCTestCase {
@@ -313,7 +313,7 @@ final class SplatIOTests: XCTestCase {
         let points = try SPZSceneReader(contentsOf: url).readScene()
 
         XCTAssertEqual(points.count, 1)
-        XCTAssertEqual(points[0].color.asSphericalHarmonic.count, 24)
+        XCTAssertEqual(points[0].color.asSphericalHarmonic.count, 25)
     }
 
     func testSPZReaderDecodesVersion4SmallestThreeQuaternion() throws {
@@ -357,6 +357,45 @@ final class SplatIOTests: XCTestCase {
         XCTAssertEqual(points.count, 1)
         let similarity = abs(simd_dot(points[0].rotation.vector, point.rotation.normalized.vector))
         XCTAssertGreaterThan(similarity, 0.999)
+    }
+
+    func testSPZWriterReaderRoundTripsReferenceCoordinates() throws {
+        let point = SplatScenePoint(
+            position: SIMD3<Float>(1, 2, 3),
+            color: .linearFloat(SIMD3<Float>(0.5, 0.5, 0.5)),
+            opacity: .linearFloat(1.0),
+            scale: .linearFloat(SIMD3<Float>(1, 1, 1)),
+            rotation: simd_quatf(angle: .pi / 3, axis: normalize(SIMD3<Float>(0, 1, 1)))
+        )
+
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+            .appendingPathExtension("spz")
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        let writer = SPZSceneWriter(useFloat16: false, fractionalBits: 12, outputVersion: 4)
+        try writer.writeScene([point], to: url)
+
+        let points = try SPZSceneReader(contentsOf: url).readScene()
+
+        XCTAssertEqual(points.count, 1)
+        XCTAssertTrue((points[0].position - point.position).isWithin(tolerance: 2e-4))
+        let similarity = abs(simd_dot(points[0].rotation.vector, point.rotation.normalized.vector))
+        XCTAssertGreaterThan(similarity, 0.999)
+    }
+
+    func testSPZSmallestThreeCoordinateConversionFlipsLargestVectorComponent() {
+        let source = simd_quatf(angle: 2 * .pi / 3, axis: SIMD3<Float>(0, 1, 0))
+        let converter = CoordinateConverter.converter(from: .rub, to: .rdf)
+        var decoded = simd_quatf(ix: 0, iy: 0, iz: 0, r: 1)
+
+        unpackQuaternionSmallestThree(&decoded, encodeSPZQuaternionSmallestThree(source), converter)
+
+        XCTAssertLessThan(decoded.imag.y, 0)
+        XCTAssertEqual(decoded.imag.x, source.imag.x * converter.flipQ.x, accuracy: 0.002)
+        XCTAssertEqual(decoded.imag.y, source.imag.y * converter.flipQ.y, accuracy: 0.002)
+        XCTAssertEqual(decoded.imag.z, source.imag.z * converter.flipQ.z, accuracy: 0.002)
+        XCTAssertEqual(decoded.real, source.real, accuracy: 0.002)
     }
 
     func testSPZWriterEmitsOfficialVersion4ZSTDLayout() throws {

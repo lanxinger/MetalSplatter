@@ -192,6 +192,7 @@ class MetalKitSceneRenderer: NSObject, MTKViewDelegate {
     // Add translation for panning
     var translation: SIMD2<Float> = .zero
     private var modelScale: Float = 1.0
+    private var modelCenterOffset: SIMD3<Float> = .zero
     private var autoFitEnabled: Bool = true
 
     var drawableSize: CGSize = .zero
@@ -706,6 +707,7 @@ class MetalKitSceneRenderer: NSObject, MTKViewDelegate {
         // Add translation for panning
         let panMatrix = matrix4x4_translation(translation.x, translation.y, 0)
         let scaleMatrix = matrix4x4_scale(modelScale, modelScale, modelScale)
+        let modelCenterMatrix = matrix4x4_translation(modelCenterOffset.x, modelCenterOffset.y, modelCenterOffset.z)
         let translationMatrix = matrix4x4_translation(0.0, 0.0, Constants.modelCenterZ)
         // Coordinate system calibration based on file format
         // SOG coordinate system: x=right, y=up, z=back (−z is forward)
@@ -746,7 +748,7 @@ class MetalKitSceneRenderer: NSObject, MTKViewDelegate {
 
         return ModelRendererViewportDescriptor(viewport: viewport,
                                                projectionMatrix: projectionMatrix,
-                                               viewMatrix: translationMatrix * panMatrix * rotationMatrix * verticalMatrix * rollMatrix * scaleMatrix * commonUpCalibration,
+                                               viewMatrix: translationMatrix * panMatrix * rotationMatrix * verticalMatrix * rollMatrix * scaleMatrix * commonUpCalibration * modelCenterMatrix,
                                                screenSize: SIMD2(x: Int(renderSize.width), y: Int(renderSize.height)))
     }
 
@@ -1681,42 +1683,50 @@ class MetalKitSceneRenderer: NSObject, MTKViewDelegate {
     private func optimizeViewportForModel(_ renderer: any ModelRenderer) async {
         // Calculate model bounds
         guard let bounds = await calculateModelBounds(renderer) else {
+            modelScale = 1.0
+            modelCenterOffset = .zero
             return
         }
-        
-        // Calculate model dimensions
-        let size = bounds.max - bounds.min
-        let maxDimension = max(size.x, size.y, size.z)
-        
-        // Adaptive scaling strategy based on model size
-        let newScale: Float
-        
-        if maxDimension > 0 {
-            // Only scale up small models - never scale down anything
-            if maxDimension < 0.5 {
-                // Very tiny models - scale up significantly
-                let targetSize: Float = 3.0
-                newScale = targetSize / maxDimension
-                modelScale = max(1.0, min(newScale, 25.0))
-            } else if maxDimension < 2.0 {
-                // Small models - scale up moderately  
-                let targetSize: Float = 4.0
-                newScale = targetSize / maxDimension
-                modelScale = max(1.0, min(newScale, 8.0))
-            } else {
-                // Everything else (>= 2 units) - leave completely unchanged
-                modelScale = 1.0
-            }
-        } else {
-            modelScale = 1.0
-        }
-        
-        // Trigger redraw with new scale
+
+        let fit = Self.viewportFit(for: bounds)
+        modelScale = fit.scale
+        modelCenterOffset = fit.centerOffset
+
+        // Trigger redraw with new scale and center
         #if os(macOS)
         metalKitView.setNeedsDisplay(metalKitView.bounds)
         #else
         metalKitView.setNeedsDisplay()
         #endif
+    }
+
+    private nonisolated static func viewportFit(
+        for bounds: (min: SIMD3<Float>, max: SIMD3<Float>)
+    ) -> (scale: Float, centerOffset: SIMD3<Float>) {
+        let size = bounds.max - bounds.min
+        let maxDimension = max(size.x, size.y, size.z)
+
+        // Adaptive scaling strategy based on model size
+        let scale: Float
+        if maxDimension.isFinite && maxDimension > 0 {
+            // Only scale up small models - never scale down anything
+            if maxDimension < 0.5 {
+                // Very tiny models - scale up significantly
+                let targetSize: Float = 3.0
+                scale = max(1.0, min(targetSize / maxDimension, 25.0))
+            } else if maxDimension < 2.0 {
+                // Small models - scale up moderately
+                let targetSize: Float = 4.0
+                scale = max(1.0, min(targetSize / maxDimension, 8.0))
+            } else {
+                // Everything else (>= 2 units) - leave completely unchanged
+                scale = 1.0
+            }
+        } else {
+            scale = 1.0
+        }
+
+        return (scale, -(bounds.min + bounds.max) * 0.5)
     }
     
     private func calculateModelBounds(_ renderer: any ModelRenderer) async -> (min: SIMD3<Float>, max: SIMD3<Float>)? {
