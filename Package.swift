@@ -34,7 +34,8 @@ let package = Package(
     dependencies: [
         .package(url: "https://github.com/apple/swift-argument-parser", from: "1.7.0"),
         .package(url: "https://github.com/weichsel/ZIPFoundation", from: "0.9.20"),
-        .package(url: "https://github.com/the-swift-collective/libwebp.git", from: "1.4.1")
+        .package(url: "https://github.com/the-swift-collective/libwebp.git", from: "1.4.1"),
+        .package(url: "https://github.com/facebook/zstd.git", exact: "1.5.7")
     ],
     targets: [
         .target(
@@ -56,7 +57,8 @@ let package = Package(
             dependencies: [
                 "PLYIO",
                 .product(name: "ZIPFoundation", package: "ZIPFoundation"),
-                .product(name: "libwebp", package: "libwebp")
+                .product(name: "libwebp", package: "libwebp"),
+                .product(name: "libzstd", package: "zstd")
             ],
             path: "SplatIO",
             exclude: [ "Tests", "TestData" ],

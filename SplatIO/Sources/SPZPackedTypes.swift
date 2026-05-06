@@ -1,6 +1,7 @@
 import Foundation
 import simd
 import os
+import libzstd
 #if canImport(Metal)
 import Metal
 #endif
@@ -29,6 +30,7 @@ struct PackedGaussiansHeader {
     // Constants for flag bits (matching C++ implementation)
     static let FlagAntialiased: UInt8 = 0x01
     static let FlagUsesFloat16: UInt8 = 0x02
+    static let FlagHasExtensions: UInt8 = 0x02
     
     // Flags bit meanings (matching C++ implementation):
     // bit 0: antialiased (whether gaussians should be rendered with mip-splat antialiasing)
@@ -77,7 +79,7 @@ struct PackedGaussiansHeader {
         reserved = data[15]
         
         // Validate reasonable values
-        guard shDegree <= 3 else {
+        guard shDegree <= 4 else {
             throw SplatFileFormatError.invalidData
         }
         
@@ -96,6 +98,61 @@ struct PackedGaussiansHeader {
         data.append(flags)
         data.append(reserved)
         return data
+    }
+}
+
+private struct NgspV4Header {
+    static let size = 32
+
+    let version: UInt32
+    let numPoints: UInt32
+    let shDegree: UInt8
+    let fractionalBits: UInt8
+    let flags: UInt8
+    let numStreams: UInt8
+    let tocByteOffset: UInt32
+
+    init(data: Data) throws {
+        guard data.count >= Self.size else {
+            throw SplatFileFormatError.invalidHeader
+        }
+
+        let magic = try data.readLittleEndianUInt32(at: 0)
+        guard magic == PackedGaussiansHeader.magic else {
+            throw SplatFileFormatError.invalidHeader
+        }
+
+        version = try data.readLittleEndianUInt32(at: 4)
+        guard version == 4 else {
+            throw SplatFileFormatError.unsupportedVersion
+        }
+
+        numPoints = try data.readLittleEndianUInt32(at: 8)
+        shDegree = data[12]
+        fractionalBits = data[13]
+        flags = data[14]
+        numStreams = data[15]
+        tocByteOffset = try data.readLittleEndianUInt32(at: 16)
+
+        guard shDegree <= 4 else {
+            throw SplatFileFormatError.invalidData
+        }
+
+        guard fractionalBits <= 16 else {
+            throw SplatFileFormatError.invalidData
+        }
+
+        guard numStreams > 0 else {
+            throw SplatFileFormatError.invalidData
+        }
+
+        let tocStart = Int(tocByteOffset)
+        let tocSize = Int(numStreams) * 16
+        guard tocStart >= Self.size,
+              tocStart <= data.count,
+              tocStart + tocSize <= data.count else {
+            throw SplatFileFormatError.invalidData
+        }
     }
 }
 
@@ -118,9 +175,9 @@ struct UnpackedGaussian {
         scale = .zero
         color = .zero
         alpha = 0
-        shR = Array(repeating: 0, count: 15)
-        shG = Array(repeating: 0, count: 15)
-        shB = Array(repeating: 0, count: 15)
+        shR = Array(repeating: 0, count: 24)
+        shG = Array(repeating: 0, count: 24)
+        shB = Array(repeating: 0, count: 24)
     }
 }
 
@@ -143,9 +200,9 @@ struct PackedGaussian {
         scale = Array(repeating: 0, count: 3)
         color = Array(repeating: 0, count: 3)
         alpha = 0
-        shR = Array(repeating: 0, count: 15)
-        shG = Array(repeating: 0, count: 15)
-        shB = Array(repeating: 0, count: 15)
+        shR = Array(repeating: 0, count: 24)
+        shG = Array(repeating: 0, count: 24)
+        shB = Array(repeating: 0, count: 24)
     }
     
     func unpack(usesFloat16: Bool, usesQuaternionSmallestThree: Bool, fractionalBits: Int, converter: CoordinateConverter? = nil) -> UnpackedGaussian {
@@ -204,7 +261,7 @@ struct PackedGaussian {
         }
         
         // Copy SH coefficients
-        for i in 0..<min(shR.count, 15) {
+        for i in 0..<min(shR.count, 24) {
             result.shR[i] = unquantizeSH(shR[i])
             result.shG[i] = unquantizeSH(shG[i])
             result.shB[i] = unquantizeSH(shB[i])
@@ -347,7 +404,7 @@ struct PackedGaussians {
             }
             
             // Fill remaining with neutral values
-            for j in min(availableDims, shDim)..<15 {
+            for j in min(availableDims, shDim)..<24 {
                 result.shR[j] = 128
                 result.shG[j] = 128
                 result.shB[j] = 128
@@ -369,7 +426,7 @@ struct PackedGaussians {
         }
         
         // Fill remaining coefficients with neutral value (128 = 0 after unquantization)
-        for j in shDim..<15 {
+        for j in shDim..<24 {
             result.shR[j] = 128
             result.shG[j] = 128
             result.shB[j] = 128
@@ -404,6 +461,54 @@ struct PackedGaussians {
         
         return data
     }
+
+    func serializeNgspV4() throws -> Data {
+        let streams = [
+            positions,
+            alphas,
+            colors,
+            scales,
+            rotations,
+            sh,
+        ].filter { !$0.isEmpty }
+
+        let compressedStreams = try streams.map { stream in
+            try zstdCompressed(Data(stream), compressionLevel: 12)
+        }
+
+        var data = Data()
+
+        func appendUInt32(_ value: UInt32) {
+            var littleEndian = value.littleEndian
+            withUnsafeBytes(of: &littleEndian) { data.append(contentsOf: $0) }
+        }
+
+        func appendUInt64(_ value: UInt64) {
+            var littleEndian = value.littleEndian
+            withUnsafeBytes(of: &littleEndian) { data.append(contentsOf: $0) }
+        }
+
+        appendUInt32(PackedGaussiansHeader.magic)
+        appendUInt32(4)
+        appendUInt32(UInt32(numPoints))
+        data.append(UInt8(shDegree))
+        data.append(UInt8(fractionalBits))
+        data.append(antialiased ? PackedGaussiansHeader.FlagAntialiased : 0)
+        data.append(UInt8(compressedStreams.count))
+        appendUInt32(UInt32(NgspV4Header.size))
+        data.append(contentsOf: Array(repeating: UInt8(0), count: 12))
+
+        for (stream, compressed) in zip(streams, compressedStreams) {
+            appendUInt64(UInt64(compressed.count))
+            appendUInt64(UInt64(stream.count))
+        }
+
+        for compressed in compressedStreams {
+            data.append(contentsOf: compressed)
+        }
+
+        return data
+    }
     
     static func deserialize(_ data: Data) throws -> PackedGaussians {
         // Enable more detailed debug logging for troubleshooting
@@ -416,6 +521,13 @@ struct PackedGaussians {
         }
         
         debugPrint("Data size: \(data.count) bytes")
+        if let version = try? data.readLittleEndianUInt32(at: 4),
+           version == 4,
+           data.count >= NgspV4Header.size,
+           data[15] > 0 {
+            return try deserializeNgspV4(data)
+        }
+
         if data.count >= 32 {
             let hexString = data.prefix(32).map { String(format: "%02X", $0) }.joined(separator: " ")
             spzTypesLog.debug("deserialize: First bytes: \(hexString)")
@@ -497,8 +609,8 @@ struct PackedGaussians {
         
         let shDegree = Int(header.shDegree)
         spzTypesLog.debug("deserialize: SH degree: \(shDegree)")
-        if shDegree < 0 || shDegree > 3 { // SPZ spec: SH degree must be between 0 and 3 (inclusive)
-            spzTypesLog.debug("deserialize: Invalid SH degree: \(shDegree). SPZ spec requires degree 0-3.")
+        if shDegree < 0 || shDegree > 4 {
+            spzTypesLog.debug("deserialize: Invalid SH degree: \(shDegree). SPZ spec requires degree 0-4.")
             throw SplatFileFormatError.invalidData
         }
         
@@ -684,6 +796,143 @@ struct PackedGaussians {
         
         return result
     }
+
+    private static func deserializeNgspV4(_ data: Data) throws -> PackedGaussians {
+        let header = try NgspV4Header(data: data)
+        let numPoints = Int(header.numPoints)
+        guard numPoints > 0 else {
+            throw SplatFileFormatError.invalidData
+        }
+
+        let shDegree = Int(header.shDegree)
+        let shDim = shDimForDegree(shDegree)
+        let expectedSizes = [
+            numPoints * 9,
+            numPoints,
+            numPoints * 3,
+            numPoints * 3,
+            numPoints * 4,
+            numPoints * shDim * 3,
+        ].filter { $0 > 0 }
+
+        guard expectedSizes.count == Int(header.numStreams) else {
+            spzTypesLog.debug("deserializeNgspV4: Stream count mismatch. Header \(header.numStreams), expected \(expectedSizes.count)")
+            throw SplatFileFormatError.invalidData
+        }
+
+        let tocStart = Int(header.tocByteOffset)
+        let tocEnd = tocStart + Int(header.numStreams) * 16
+        var compressedOffset = tocEnd
+        var streams: [[UInt8]] = []
+        streams.reserveCapacity(expectedSizes.count)
+
+        for streamIndex in 0..<Int(header.numStreams) {
+            let tocEntryOffset = tocStart + streamIndex * 16
+            let compressedSize = Int(try data.readLittleEndianUInt64(at: tocEntryOffset))
+            let uncompressedSize = Int(try data.readLittleEndianUInt64(at: tocEntryOffset + 8))
+
+            guard uncompressedSize == expectedSizes[streamIndex],
+                  compressedSize > 0,
+                  compressedOffset + compressedSize <= data.count else {
+                throw SplatFileFormatError.invalidData
+            }
+
+            let compressed = data.subdata(in: compressedOffset..<(compressedOffset + compressedSize))
+            let decompressed = try zstdDecompressed(compressed, expectedSize: uncompressedSize)
+            streams.append(decompressed)
+            compressedOffset += compressedSize
+        }
+
+        guard compressedOffset == data.count else {
+            throw SplatFileFormatError.invalidData
+        }
+
+        var streamIterator = streams.makeIterator()
+        var result = PackedGaussians()
+        result.version = header.version
+        result.numPoints = numPoints
+        result.shDegree = shDegree
+        result.fractionalBits = Int(header.fractionalBits)
+        result.antialiased = (header.flags & PackedGaussiansHeader.FlagAntialiased) != 0
+        result.usesQuaternionSmallestThree = true
+        result.positions = streamIterator.next() ?? []
+        result.alphas = streamIterator.next() ?? []
+        result.colors = streamIterator.next() ?? []
+        result.scales = streamIterator.next() ?? []
+        result.rotations = streamIterator.next() ?? []
+        result.sh = streamIterator.next() ?? []
+        return result
+    }
+}
+
+func zstdDecompressed(_ data: Data, expectedSize: Int) throws -> [UInt8] {
+    guard expectedSize > 0 else { return [] }
+
+    var output = [UInt8](repeating: 0, count: expectedSize)
+    let result = output.withUnsafeMutableBytes { outputBuffer in
+        data.withUnsafeBytes { inputBuffer in
+            ZSTD_decompress(
+                outputBuffer.baseAddress,
+                expectedSize,
+                inputBuffer.baseAddress,
+                data.count
+            )
+        }
+    }
+
+    guard ZSTD_isError(result) == 0, result == expectedSize else {
+        throw SplatFileFormatError.decompressionError
+    }
+
+    return output
+}
+
+func zstdCompressed(_ data: Data, compressionLevel: Int32) throws -> [UInt8] {
+    guard !data.isEmpty else { return [] }
+
+    let bound = ZSTD_compressBound(data.count)
+    var output = [UInt8](repeating: 0, count: bound)
+    let result = output.withUnsafeMutableBytes { outputBuffer in
+        data.withUnsafeBytes { inputBuffer in
+            ZSTD_compress(
+                outputBuffer.baseAddress,
+                bound,
+                inputBuffer.baseAddress,
+                data.count,
+                compressionLevel
+            )
+        }
+    }
+
+    guard ZSTD_isError(result) == 0 else {
+        throw SplatFileFormatError.compressionError
+    }
+
+    output.removeSubrange(result..<output.count)
+    return output
+}
+
+private extension Data {
+    func readLittleEndianUInt32(at offset: Int) throws -> UInt32 {
+        guard offset >= 0, offset + 4 <= count else {
+            throw SplatFileFormatError.invalidData
+        }
+        return UInt32(self[offset])
+            | (UInt32(self[offset + 1]) << 8)
+            | (UInt32(self[offset + 2]) << 16)
+            | (UInt32(self[offset + 3]) << 24)
+    }
+
+    func readLittleEndianUInt64(at offset: Int) throws -> UInt64 {
+        guard offset >= 0, offset + 8 <= count else {
+            throw SplatFileFormatError.invalidData
+        }
+        var value: UInt64 = 0
+        for byteIndex in 0..<8 {
+            value |= UInt64(self[offset + byteIndex]) << UInt64(byteIndex * 8)
+        }
+        return value
+    }
 }
 
 /**
@@ -762,6 +1011,15 @@ public struct CoordinateConverter {
                 x,          // 12
                 z,          // 13
                 x,          // 14
+                x * y,      // 15
+                y * z,      // 16
+                x * y,      // 17
+                y * z,      // 18
+                1.0,        // 19
+                x * z,      // 20
+                1.0,        // 21
+                x * z,      // 22
+                y,          // 23
             ]
         )
     }
@@ -791,6 +1049,7 @@ func shDimForDegree(_ degree: Int) -> Int {
     case 1: return 3
     case 2: return 8
     case 3: return 15
+    case 4: return 24
     default:
         spzTypesLog.warning("Unsupported SH degree: \(degree)")
         return 0
@@ -802,7 +1061,8 @@ func shDegreeForDim(_ dim: Int) -> Int {
     if dim < 3 { return 0 }
     if dim < 8 { return 1 }
     if dim < 15 { return 2 }
-    return 3
+    if dim < 24 { return 3 }
+    return 4
 }
 
 // MARK: - Quaternion Unpacking Functions

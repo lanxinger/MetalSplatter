@@ -202,8 +202,8 @@ public class SPZSceneReader: SplatSceneReader {
         if packedGaussians.numPoints > maxPointsToRead {
             spzLog.debug(" Too many points: \(packedGaussians.numPoints), capping at \(maxPointsToRead)")
         }
-        if packedGaussians.shDegree > 3 {
-            spzLog.debug(" Unsupported SH degree: \(packedGaussians.shDegree), SPZ spec allows 0-3")
+        if packedGaussians.shDegree > 4 {
+            spzLog.debug(" Unsupported SH degree: \(packedGaussians.shDegree), SPZ spec allows 0-4")
         }
         let safeNumPoints = min(packedGaussians.numPoints, maxPointsToRead)
         spzLog.debug(" Unpacking \(safeNumPoints) points with SH degree \(packedGaussians.shDegree)")
@@ -421,7 +421,7 @@ public class SPZSceneReader: SplatSceneReader {
                     // For degree 1: sh1n1_r, sh1n1_g, sh1n1_b, sh10_r, sh10_g, sh10_b, sh1p1_r, sh1p1_g, sh1p1_b
                     if shDim > 1 && shOffset + (shDim-1)*3 < packedGaussians.sh.count {
                         // We already have the DC term (first coefficient), so start from the second
-                        for j in 1..<min(shDim, 15) { // Limit to 15 max coefficients per channel
+                        for j in 1..<min(shDim, 24) { // Limit to 24 max coefficients per channel
                             let idx = shOffset + j * 3
                             if idx + 2 < packedGaussians.sh.count {
                                 // Process all three SH components at once (R, G, B for coefficient j)

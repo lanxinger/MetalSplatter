@@ -154,6 +154,58 @@ final class SplatIOTests: XCTestCase {
         return url
     }
 
+    private func makeTemporaryOfficialV4SPZ(antialiased: Bool, shDegree: UInt8 = 0) throws -> URL {
+        var compressedStreams: [(bytes: [UInt8], uncompressedSize: UInt64)] = [
+            ([40, 181, 47, 253, 4, 72, 73, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 61, 47, 205, 13], 9),
+            ([40, 181, 47, 253, 4, 72, 9, 0, 0, 255, 68, 117, 11, 166], 1),
+            ([40, 181, 47, 253, 4, 72, 25, 0, 0, 128, 128, 128, 108, 76, 221, 124], 3),
+            ([40, 181, 47, 253, 4, 72, 25, 0, 0, 160, 160, 160, 45, 81, 165, 163], 3),
+            ([40, 181, 47, 253, 4, 72, 33, 0, 0, 0, 0, 0, 192, 45, 193, 30, 7], 4),
+        ]
+        if shDegree == 4 {
+            compressedStreams.append(
+                ([40, 181, 47, 253, 4, 72, 69, 0, 0, 16, 128, 128, 1, 0, 131, 2, 44, 124, 31, 194, 35], 72)
+            )
+        }
+
+        var data = Data()
+
+        func appendUInt32(_ value: UInt32) {
+            var littleEndian = value.littleEndian
+            withUnsafeBytes(of: &littleEndian) { data.append(contentsOf: $0) }
+        }
+
+        func appendUInt64(_ value: UInt64) {
+            var littleEndian = value.littleEndian
+            withUnsafeBytes(of: &littleEndian) { data.append(contentsOf: $0) }
+        }
+
+        appendUInt32(0x5053474e) // NGSP
+        appendUInt32(4)          // version
+        appendUInt32(1)          // numPoints
+        data.append(shDegree)
+        data.append(12)          // fractionalBits
+        data.append(antialiased ? 0x01 : 0x00)
+        data.append(UInt8(compressedStreams.count))
+        appendUInt32(32)         // tocByteOffset
+        data.append(contentsOf: Array(repeating: UInt8(0), count: 12))
+
+        for stream in compressedStreams {
+            appendUInt64(UInt64(stream.bytes.count))
+            appendUInt64(stream.uncompressedSize)
+        }
+
+        for stream in compressedStreams {
+            data.append(contentsOf: stream.bytes)
+        }
+
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+            .appendingPathExtension("spz")
+        try data.write(to: url)
+        return url
+    }
+
     private func encodeSPZQuaternionSmallestThree(_ rotation: simd_quatf) -> [UInt8] {
         let normalized = rotation.normalized
         var components = [normalized.imag.x, normalized.imag.y, normalized.imag.z, normalized.real]
@@ -242,6 +294,28 @@ final class SplatIOTests: XCTestCase {
         XCTAssertEqual(points.count, 1)
     }
 
+    func testSPZReaderAcceptsOfficialVersion4ZSTDStreams() throws {
+        let url = try makeTemporaryOfficialV4SPZ(antialiased: true)
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        let reader = try SPZSceneReader(contentsOf: url)
+        let points = try reader.readScene()
+
+        XCTAssertTrue(reader.isAntialiased)
+        XCTAssertEqual(points.count, 1)
+        XCTAssertEqual(points[0].position, SIMD3<Float>(0, 0, 0))
+    }
+
+    func testSPZReaderAcceptsOfficialVersion4SHDegree4() throws {
+        let url = try makeTemporaryOfficialV4SPZ(antialiased: false, shDegree: 4)
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        let points = try SPZSceneReader(contentsOf: url).readScene()
+
+        XCTAssertEqual(points.count, 1)
+        XCTAssertEqual(points[0].color.asSphericalHarmonic.count, 24)
+    }
+
     func testSPZReaderDecodesVersion4SmallestThreeQuaternion() throws {
         let expectedRotation = simd_quatf(angle: .pi / 3, axis: SIMD3<Float>(1, 0, 0))
         let url = try makeTemporarySPZ(
@@ -283,6 +357,33 @@ final class SplatIOTests: XCTestCase {
         XCTAssertEqual(points.count, 1)
         let similarity = abs(simd_dot(points[0].rotation.vector, point.rotation.normalized.vector))
         XCTAssertGreaterThan(similarity, 0.999)
+    }
+
+    func testSPZWriterEmitsOfficialVersion4ZSTDLayout() throws {
+        let point = SplatScenePoint(
+            position: SIMD3<Float>(0, 0, 0),
+            color: .linearFloat(SIMD3<Float>(0.5, 0.5, 0.5)),
+            opacity: .linearFloat(1.0),
+            scale: .linearFloat(SIMD3<Float>(1, 1, 1)),
+            rotation: simd_quatf(angle: 0, axis: SIMD3<Float>(1, 0, 0))
+        )
+
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+            .appendingPathExtension("spz")
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        let writer = SPZSceneWriter(useFloat16: false, fractionalBits: 12, outputVersion: 4)
+        try writer.writeScene([point], to: url)
+
+        let data = try Data(contentsOf: url)
+        XCTAssertEqual(data[0..<4], Data([0x4e, 0x47, 0x53, 0x50]))
+        XCTAssertEqual(data[15], 5)
+        XCTAssertEqual(data[16..<20], Data([32, 0, 0, 0]))
+
+        let reader = try SPZSceneReader(contentsOf: url)
+        let points = try reader.readScene()
+        XCTAssertEqual(points.count, 1)
     }
 
     func testGLBWriterRoundTripsLinearColor() throws {

@@ -61,12 +61,15 @@ public class SPZSceneWriter: SplatSceneWriter {
         try SplatDataValidator.validatePoints(points)
         
         let packed = packGaussians(points)
-        let serialized = packed.serialize()
-        
-        if compress {
+        if outputVersion >= 4 {
+            let serialized = try packed.serializeNgspV4()
+            try serialized.write(to: url)
+        } else if compress {
+            let serialized = packed.serialize()
             let compressedData = try compressToGzip(serialized)
             try compressedData.write(to: url)
         } else {
+            let serialized = packed.serialize()
             try serialized.write(to: url)
         }
     }
@@ -81,9 +84,10 @@ public class SPZSceneWriter: SplatSceneWriter {
         result.fractionalBits = fractionalBits
         result.antialiased = antialiased
         result.usesQuaternionSmallestThree = outputVersion >= 3
+        let writesFloat16 = useFloat16 && outputVersion == 1
         
         // Pre-allocate arrays
-        let positionComponents = useFloat16 ? 6 : 9 // 2 bytes per component for float16, 3 bytes for fixed-point
+        let positionComponents = writesFloat16 ? 6 : 9 // 2 bytes per component for float16, 3 bytes for fixed-point
         result.positions = [UInt8](repeating: 0, count: points.count * positionComponents)
         result.scales = [UInt8](repeating: 0, count: points.count * 3)
         let rotationComponents = result.usesQuaternionSmallestThree ? 4 : 3
@@ -93,18 +97,18 @@ public class SPZSceneWriter: SplatSceneWriter {
         
         // Pack each point
         for (i, point) in points.enumerated() {
-            packPoint(point, into: &result, at: i)
+            packPoint(point, into: &result, at: i, useFloat16Positions: writesFloat16)
         }
         
         return result
     }
     
-    private func packPoint(_ point: SplatScenePoint, into packed: inout PackedGaussians, at index: Int) {
+    private func packPoint(_ point: SplatScenePoint, into packed: inout PackedGaussians, at index: Int, useFloat16Positions: Bool) {
         let normalizedPoint = point.linearNormalized
         
         // Pack position
         let position = normalizedPoint.position
-        if useFloat16 {
+        if useFloat16Positions {
             let baseIdx = index * 6
             for j in 0..<3 {
                 let halfValue = float32ToFloat16(position[j])
