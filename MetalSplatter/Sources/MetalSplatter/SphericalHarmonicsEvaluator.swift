@@ -314,6 +314,7 @@ extension SphericalHarmonicsEvaluator {
         case 9: return 2   // DC + bands 1,2
         case 15: return 3  // SPZ format: DC + 14 additional coeffs
         case 16: return 3  // Standard format: DC + bands 1,2,3
+        case 25: return 3  // SPZ degree 4 data; render supported bands 0-3
         default: return 0
         }
     }

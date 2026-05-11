@@ -105,6 +105,19 @@ public class FastSHSplatRenderer: SplatRenderer, @unchecked Sendable {
 
     private var shaderParameters = FastSHShaderParameters()
 
+    static func rendererSupportedSHCoefficients(_ coefficients: [SIMD3<Float>], degree: Int) -> [SIMD3<Float>] {
+        guard degree == 3 else {
+            return coefficients
+        }
+
+        let supportedCount = SphericalHarmonicsEvaluator.coefficientCountForDegree(degree)
+        guard coefficients.count > supportedCount else {
+            return coefficients
+        }
+
+        return Array(coefficients.prefix(supportedCount))
+    }
+
     internal override func resetPipelineStates() {
         super.resetPipelineStates()
         fastSHPipelineState = nil
@@ -228,12 +241,13 @@ public class FastSHSplatRenderer: SplatRenderer, @unchecked Sendable {
         // Build palette of unique SH coefficient sets
         for (index, splat) in splats.enumerated() {
             if case let .sphericalHarmonic(coeffs) = splat.color, !coeffs.isEmpty {
-                if let paletteIndex = shSetToIndex[coeffs] {
+                let rendererCoeffs = Self.rendererSupportedSHCoefficients(coeffs, degree: shDegree)
+                if let paletteIndex = shSetToIndex[rendererCoeffs] {
                     shPaletteMap[index] = paletteIndex
                 } else if uniqueSHSets.count < fastSHConfig.maxPaletteSize {
                     let newIndex = UInt32(uniqueSHSets.count)
-                    uniqueSHSets.append(coeffs)
-                    shSetToIndex[coeffs] = newIndex
+                    uniqueSHSets.append(rendererCoeffs)
+                    shSetToIndex[rendererCoeffs] = newIndex
                     shPaletteMap[index] = newIndex
                 }
                 // If we exceed maxPaletteSize, splats will use index 0 (fallback)

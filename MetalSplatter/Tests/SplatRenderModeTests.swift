@@ -71,6 +71,16 @@ final class SplatRenderModeTests: XCTestCase {
         XCTAssertEqual(uniforms.covarianceBlur, 0.1, accuracy: 0.0001)
     }
 
+    func testSPZDegree4CoefficientsFallbackToRenderableDegree3() {
+        let coefficients = (0..<25).map { SIMD3<Float>(repeating: Float($0)) }
+
+        let supported = FastSHSplatRenderer.rendererSupportedSHCoefficients(coefficients, degree: 3)
+
+        XCTAssertEqual(SphericalHarmonicsEvaluator.degreeFromCoefficientCount(coefficients.count), 3)
+        XCTAssertEqual(supported.count, 16)
+        XCTAssertEqual(supported[15].x, 15)
+    }
+
     private func makeViewport() -> SplatRenderer.ViewportDescriptor {
         SplatRenderer.ViewportDescriptor(
             viewport: MTLViewport(originX: 0, originY: 0, width: 128, height: 128, znear: 0, zfar: 1),
