@@ -53,10 +53,12 @@ public extension BinaryInteger where Self: UnsafeRawPointerConvertible, Self: En
 
     static func array(_ data: UnsafeRawPointer, from offset: Int, count: Int, bigEndian: Bool) -> [Self] {
         let size = MemoryLayout<Self>.size
+        guard count > 0 else { return [] }
         var values: [Self] = Array(repeating: .zero, count: count)
         if bigEndian == UnsafeRawPointerConvertibleConstants.isBigEndian {
-            for i in 0..<count {
-                values[i] = (data + offset + size*i).loadUnaligned(as: Self.self)
+            values.withUnsafeMutableBytes { destination in
+                let source = UnsafeRawBufferPointer(start: data + offset, count: count * size)
+                destination.copyMemory(from: source)
             }
         } else {
             for i in 0..<count {
@@ -142,10 +144,12 @@ public extension BinaryFloatingPoint where Self: UnsafeRawPointerConvertible, Se
 
     static func array(_ data: UnsafeRawPointer, from offset: Int, count: Int, bigEndian: Bool) -> [Self] {
         let size = MemoryLayout<Self>.size
+        guard count > 0 else { return [] }
         var values: [Self] = Array(repeating: .zero, count: count)
         if bigEndian == UnsafeRawPointerConvertibleConstants.isBigEndian {
-            for i in 0..<count {
-                values[i] = (data + offset + size*i).loadUnaligned(as: Self.self)
+            values.withUnsafeMutableBytes { destination in
+                let source = UnsafeRawBufferPointer(start: data + offset, count: count * size)
+                destination.copyMemory(from: source)
             }
         } else {
             for i in 0..<count {

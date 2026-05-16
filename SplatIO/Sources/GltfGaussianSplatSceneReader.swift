@@ -543,12 +543,24 @@ public final class GltfGaussianSplatSceneReader: SplatSceneReader {
 
             let componentSize = componentSizeBytes(for: accessor.componentType)
             guard componentSize > 0 else { throw Error.unsupportedComponentType(accessor.componentType) }
+            guard accessor.count >= 0 else { throw Error.bufferOutOfBounds }
+            let elementSize = componentSize * componentCount
             let stride = bufferView.byteStride ?? (componentSize * componentCount)
-            if stride < componentSize * componentCount { throw Error.bufferOutOfBounds }
+            if stride < elementSize { throw Error.bufferOutOfBounds }
 
             let baseOffset = (bufferView.byteOffset ?? 0) + (accessor.byteOffset ?? 0)
-            let totalSize = baseOffset + stride * accessor.count
-            if totalSize > buffer.count { throw Error.bufferOutOfBounds }
+            guard baseOffset >= 0 else { throw Error.bufferOutOfBounds }
+            let requiredSize: Int
+            if accessor.count == 0 {
+                requiredSize = baseOffset
+            } else {
+                let (strideSpan, strideOverflow) = stride.multipliedReportingOverflow(by: accessor.count - 1)
+                let (lastElementOffset, offsetOverflow) = baseOffset.addingReportingOverflow(strideSpan)
+                let (lastElementEnd, endOverflow) = lastElementOffset.addingReportingOverflow(elementSize)
+                guard !strideOverflow, !offsetOverflow, !endOverflow else { throw Error.bufferOutOfBounds }
+                requiredSize = lastElementEnd
+            }
+            if requiredSize > buffer.count { throw Error.bufferOutOfBounds }
 
             var result: [[Float]] = []
             result.reserveCapacity(accessor.count)

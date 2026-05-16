@@ -558,6 +558,92 @@ final class SplatIOTests: XCTestCase {
         XCTAssertTrue((point.rotation.normalized.vector - expectedRotation.vector).isWithin(tolerance: SplatScenePoint.Tolerance.rotation))
     }
 
+    func testGLBReaderAcceptsStridedAccessorsWithoutTrailingStridePadding() throws {
+        var bin = Data()
+        let stride = 48
+
+        func appendRecord(position: SIMD3<Float>, scale: SIMD3<Float>) {
+            let start = bin.count
+            bin.appendFloat32(position.x)
+            bin.appendFloat32(position.y)
+            bin.appendFloat32(position.z)
+            bin.appendInt16(0)
+            bin.appendInt16(0)
+            bin.appendInt16(0)
+            bin.appendInt16(Int16.max)
+            bin.appendFloat32(scale.x)
+            bin.appendFloat32(scale.y)
+            bin.appendFloat32(scale.z)
+            bin.appendUInt16(UInt16.max)
+            bin.appendUInt16(UInt16.max)
+            bin.appendUInt16(UInt16.max)
+            bin.appendUInt16(UInt16.max)
+            bin.appendUInt16(UInt16.max)
+            let recordLength = bin.count - start
+            if bin.count < start + stride {
+                bin.append(contentsOf: repeatElement(UInt8(0), count: stride - recordLength))
+            }
+        }
+
+        appendRecord(position: SIMD3<Float>(1, 2, 3), scale: SIMD3<Float>(0.1, 0.2, 0.3))
+        appendRecord(position: SIMD3<Float>(4, 5, 6), scale: SIMD3<Float>(0.4, 0.5, 0.6))
+        bin.removeLast(stride - 42)
+
+        let json = """
+        {
+          "asset": { "version": "2.0" },
+          "buffers": [
+            { "byteLength": \(bin.count) }
+          ],
+          "bufferViews": [
+            { "buffer": 0, "byteOffset": 0, "byteLength": \(bin.count), "byteStride": \(stride) }
+          ],
+          "accessors": [
+            { "bufferView": 0, "byteOffset": 0, "componentType": 5126, "count": 2, "type": "VEC3" },
+            { "bufferView": 0, "byteOffset": 12, "componentType": 5122, "normalized": true, "count": 2, "type": "VEC4" },
+            { "bufferView": 0, "byteOffset": 20, "componentType": 5126, "count": 2, "type": "VEC3" },
+            { "bufferView": 0, "byteOffset": 32, "componentType": 5123, "normalized": true, "count": 2, "type": "SCALAR" },
+            { "bufferView": 0, "byteOffset": 34, "componentType": 5123, "normalized": true, "count": 2, "type": "VEC4" }
+          ],
+          "meshes": [
+            {
+              "primitives": [
+                {
+                  "mode": 0,
+                  "attributes": {
+                    "POSITION": 0,
+                    "KHR_gaussian_splatting:ROTATION": 1,
+                    "KHR_gaussian_splatting:SCALE": 2,
+                    "KHR_gaussian_splatting:OPACITY": 3,
+                    "COLOR_0": 4
+                  },
+                  "extensions": {
+                    "KHR_gaussian_splatting": {
+                      "kernel": "ellipse"
+                    }
+                  }
+                }
+              ]
+            }
+          ]
+        }
+        """
+
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+            .appendingPathExtension("glb")
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        try makeGLB(json: json, bin: bin).write(to: url)
+
+        let points = try GltfGaussianSplatSceneReader(url).readScene()
+
+        XCTAssertEqual(points.count, 2)
+        XCTAssertTrue((points[0].position - SIMD3<Float>(1, 2, 3)).isWithin(tolerance: 1e-6))
+        XCTAssertTrue((points[1].position - SIMD3<Float>(4, 5, 6)).isWithin(tolerance: 1e-6))
+        XCTAssertTrue((points[1].scale.asLinearFloat - exp(SIMD3<Float>(0.4, 0.5, 0.6))).isWithin(tolerance: 1e-6))
+    }
+
     func testGLTFWriterRoundTripsSphericalHarmonics() throws {
         let points = [
             SplatScenePoint(
