@@ -644,6 +644,75 @@ final class SplatIOTests: XCTestCase {
         XCTAssertTrue((points[1].scale.asLinearFloat - exp(SIMD3<Float>(0.4, 0.5, 0.6))).isWithin(tolerance: 1e-6))
     }
 
+    func testGLBReaderRejectsAccessorReadingPastBufferViewLength() throws {
+        var bin = Data()
+        bin.appendFloat32(1)
+        bin.appendFloat32(2)
+        bin.appendFloat32(3)
+        bin.appendInt16(0)
+        bin.appendInt16(0)
+        bin.appendInt16(0)
+        bin.appendInt16(Int16.max)
+        bin.appendFloat32(0.1)
+        bin.appendFloat32(0.2)
+        bin.appendFloat32(0.3)
+        bin.appendUInt16(UInt16.max)
+
+        let json = """
+        {
+          "asset": { "version": "2.0" },
+          "buffers": [
+            { "byteLength": \(bin.count) }
+          ],
+          "bufferViews": [
+            { "buffer": 0, "byteOffset": 0, "byteLength": 8 },
+            { "buffer": 0, "byteOffset": 12, "byteLength": 8 },
+            { "buffer": 0, "byteOffset": 20, "byteLength": 12 },
+            { "buffer": 0, "byteOffset": 32, "byteLength": 2 }
+          ],
+          "accessors": [
+            { "bufferView": 0, "componentType": 5126, "count": 1, "type": "VEC3" },
+            { "bufferView": 1, "componentType": 5122, "normalized": true, "count": 1, "type": "VEC4" },
+            { "bufferView": 2, "componentType": 5126, "count": 1, "type": "VEC3" },
+            { "bufferView": 3, "componentType": 5123, "normalized": true, "count": 1, "type": "SCALAR" }
+          ],
+          "meshes": [
+            {
+              "primitives": [
+                {
+                  "mode": 0,
+                  "attributes": {
+                    "POSITION": 0,
+                    "KHR_gaussian_splatting:ROTATION": 1,
+                    "KHR_gaussian_splatting:SCALE": 2,
+                    "KHR_gaussian_splatting:OPACITY": 3
+                  },
+                  "extensions": {
+                    "KHR_gaussian_splatting": {
+                      "kernel": "ellipse"
+                    }
+                  }
+                }
+              ]
+            }
+          ]
+        }
+        """
+
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+            .appendingPathExtension("glb")
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        try makeGLB(json: json, bin: bin).write(to: url)
+
+        XCTAssertThrowsError(try GltfGaussianSplatSceneReader(url).readScene()) { error in
+            guard case GltfGaussianSplatSceneReader.Error.bufferOutOfBounds = error else {
+                return XCTFail("Expected bufferOutOfBounds, got \(error)")
+            }
+        }
+    }
+
     func testGLTFWriterRoundTripsSphericalHarmonics() throws {
         let points = [
             SplatScenePoint(
