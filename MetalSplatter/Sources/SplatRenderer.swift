@@ -695,6 +695,10 @@ public class SplatRenderer: @unchecked Sendable {
     internal let library: MTLLibrary
     // Single-stage pipeline
     internal var singleStagePipelineState: MTLRenderPipelineState?
+    // Variant of the single-stage pipeline whose vertex shader reads cached
+    // projection data from the batch precompute pass instead of recomputing
+    // covariance per vertex. Built lazily when the precomputed path is active.
+    internal var singleStagePrecomputedPipelineState: MTLRenderPipelineState?
     internal var singleStageDepthState: MTLDepthStencilState?
     internal var selectionOutlinePipelineState: MTLRenderPipelineState?
     internal var selectionOutlineDepthState: MTLDepthStencilState?
@@ -1432,6 +1436,7 @@ public class SplatRenderer: @unchecked Sendable {
 
     internal func resetPipelineStates() {
         singleStagePipelineState = nil
+        singleStagePrecomputedPipelineState = nil
         singleStageDepthState = nil
         selectionOutlinePipelineState = nil
         selectionOutlineDepthState = nil
@@ -1561,6 +1566,38 @@ public class SplatRenderer: @unchecked Sendable {
         pipelineDescriptor.maxVertexAmplificationCount = maxViewCount
 
         return try device.makeRenderPipelineState(descriptor: pipelineDescriptor)
+    }
+
+    /// Builds the precomputed-path pipeline on demand. Failure is non-fatal:
+    /// rendering falls back to the standard per-vertex projection pipeline.
+    private func buildSingleStagePrecomputedPipelineStateIfNeeded() {
+        guard singleStagePrecomputedPipelineState == nil, !useMultiStagePipeline else { return }
+
+        let pipelineDescriptor = MTLRenderPipelineDescriptor()
+        pipelineDescriptor.label = "SingleStagePrecomputedPipeline"
+
+        do {
+            pipelineDescriptor.vertexFunction = try library.makeRequiredFunction(name: "singleStageSplatVertexShaderPrecomputed")
+            pipelineDescriptor.fragmentFunction = try library.makeRequiredFunction(name: "singleStageSplatFragmentShader")
+
+            pipelineDescriptor.rasterSampleCount = sampleCount
+
+            let colorAttachment = pipelineDescriptor.colorAttachments[0]
+            colorAttachment?.pixelFormat = colorFormat
+            colorAttachment?.isBlendingEnabled = true
+            colorAttachment?.rgbBlendOperation = .add
+            colorAttachment?.alphaBlendOperation = .add
+            colorAttachment?.sourceRGBBlendFactor = .one
+            colorAttachment?.sourceAlphaBlendFactor = .one
+            colorAttachment?.destinationRGBBlendFactor = .oneMinusSourceAlpha
+            colorAttachment?.destinationAlphaBlendFactor = .oneMinusSourceAlpha
+
+            pipelineDescriptor.depthAttachmentPixelFormat = depthFormat
+
+            singleStagePrecomputedPipelineState = try device.makeRenderPipelineState(descriptor: pipelineDescriptor)
+        } catch {
+            Self.log.warning("Failed to create precomputed single-stage pipeline, using standard path: \(error.localizedDescription)")
+        }
     }
 
     private func buildSingleStageDepthState() throws -> MTLDepthStencilState {
@@ -3374,6 +3411,22 @@ public class SplatRenderer: @unchecked Sendable {
             try buildSingleStagePipelineStatesIfNeeded()
         }
 
+        // PlayCanvas-style pre-projection: when the batch precompute pass ran for
+        // this camera, draw with the vertex shader variant that reads the cached
+        // projection instead of recomputing covariance for all 4 quad vertices.
+        // Single viewport only; edit transforms require the full per-vertex path.
+        var usePrecomputedVertexPath = batchPrecomputeEnabled
+            && !multiStage
+            && !useDitheredTransparency
+            && viewports.count == 1
+            && !precomputedDataDirty
+            && precomputedSplatBuffer != nil
+            && editTransformIndexBuffer == nil
+        if usePrecomputedVertexPath {
+            buildSingleStagePrecomputedPipelineStateIfNeeded()
+            usePrecomputedVertexPath = singleStagePrecomputedPipelineState != nil
+        }
+
         guard let renderEncoder = renderEncoder(multiStage: multiStage,
                                           viewports: viewports,
                                           colorTexture: colorTexture,
@@ -3443,7 +3496,14 @@ public class SplatRenderer: @unchecked Sendable {
             else { return }
 
             renderEncoder.pushDebugGroup("Draw Splats")
-            renderEncoder.setRenderPipelineState(singleStagePipelineState)
+            if usePrecomputedVertexPath,
+               let singleStagePrecomputedPipelineState,
+               let precomputedSplatBuffer {
+                renderEncoder.setRenderPipelineState(singleStagePrecomputedPipelineState)
+                renderEncoder.setVertexBuffer(precomputedSplatBuffer, offset: 0, index: BufferIndex.precomputed.rawValue)
+            } else {
+                renderEncoder.setRenderPipelineState(singleStagePipelineState)
+            }
             renderEncoder.setDepthStencilState(singleStageDepthState)
         }
 

@@ -167,17 +167,25 @@ kernel void batchPrecomputeSplats(
     }
     
     output.visible = 1;
-    
+
     // Compute 2D covariance
     output.opacityScale = 1.0f;
     output.cov2D = computeCovariance2D(viewPos, splat.covA, splat.covB,
                                         uniforms.viewMatrix, uniforms.projectionMatrix,
                                         uniforms.screenSize, uniforms.covarianceBlur,
                                         uniforms.renderMode, output.opacityScale);
-    
+
     // Decompose into axes
     decomposeCovariance(output.cov2D, output.axis1, output.axis2);
-    
+
+    // Screen-space LOD culling - cull sub-pixel splats (same test as the
+    // per-vertex path in SplatProcessing.metal)
+    float pixelRadius = max(length(output.axis1 + output.axis2),
+                            length(output.axis1 - output.axis2)) * float(kBoundsRadius);
+    if (pixelRadius < 0.5f) {
+        output.visible = 0;
+    }
+
     outputSplats[index] = output;
 }
 
