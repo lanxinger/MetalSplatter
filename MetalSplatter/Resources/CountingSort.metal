@@ -174,7 +174,63 @@ void countingSortHistogramNoCaching(
     }
 }
 
-// Pass 2: Parallel prefix sum on histogram
+// Pass 2 (preferred): Single-dispatch exclusive scan over the histogram using
+// SIMD-group prefix sums. One threadgroup walks the whole histogram in chunks
+// of tgSize elements, carrying the running total across chunks. This replaces
+// the 3-dispatch blocked Blelloch scan plus the separate bin-offsets copy with
+// a single dispatch, writing scatter-ready bin offsets directly.
+// Requires SIMD-group reduction support (Apple7+/Mac2); callers fall back to
+// the blocked kernels below on older GPUs.
+[[kernel]]
+void countingSortScanBins(
+    device const uint* histogram [[buffer(0)]],
+    device uint* binOffsets [[buffer(1)]],
+    constant uint& binCount [[buffer(2)]],
+    uint tid [[thread_position_in_threadgroup]],
+    uint tgSize [[threads_per_threadgroup]],
+    uint laneID [[thread_index_in_simdgroup]],
+    uint simdGroupID [[simdgroup_index_in_threadgroup]],
+    uint simdGroupCount [[simdgroups_per_threadgroup]],
+    uint simdSize [[threads_per_simdgroup]]
+) {
+    // Per-simdgroup partial sums (max 1024 threads / 32 lanes) + chunk total
+    threadgroup uint partials[33];
+
+    uint carry = 0;
+    for (uint base = 0; base < binCount; base += tgSize) {
+        uint index = base + tid;
+        uint value = (index < binCount) ? histogram[index] : 0;
+        uint lanePrefix = simd_prefix_exclusive_sum(value);
+
+        // Last lane holds the simdgroup's inclusive total
+        if (laneID == simdSize - 1) {
+            partials[simdGroupID] = lanePrefix + value;
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+
+        // First simdgroup scans the per-simdgroup totals
+        if (simdGroupID == 0) {
+            uint groupSum = (laneID < simdGroupCount) ? partials[laneID] : 0;
+            uint groupPrefix = simd_prefix_exclusive_sum(groupSum);
+            if (laneID < simdGroupCount) {
+                partials[laneID] = groupPrefix;
+            }
+            if (laneID == simdGroupCount - 1) {
+                partials[32] = groupPrefix + groupSum;
+            }
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+
+        if (index < binCount) {
+            binOffsets[index] = carry + partials[simdGroupID] + lanePrefix;
+        }
+        carry += partials[32];
+        // Keep partials stable until every thread has consumed them
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+}
+
+// Pass 2 (fallback): Parallel prefix sum on histogram
 // This converts counts to starting indices for each bin
 // For small bin counts, this can also be done on CPU
 [[kernel]]
@@ -477,15 +533,3 @@ void countingSortResetHistogram(
     }
 }
 
-// Copy prefix sum to bin offsets (for scatter pass initialization)
-[[kernel]]
-void countingSortInitBinOffsets(
-    device const uint* prefixSum [[buffer(0)]],
-    device uint* binOffsets [[buffer(1)]],
-    constant uint& binCount [[buffer(2)]],
-    uint tid [[thread_position_in_grid]]
-) {
-    if (tid < binCount) {
-        binOffsets[tid] = prefixSum[tid];
-    }
-}

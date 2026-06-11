@@ -5,9 +5,12 @@ import os
 /// O(n) Counting Sort implementation for Gaussian Splat sorting
 /// Replaces O(n log n) MPS argSort with faster histogram-based sorting
 ///
-/// The algorithm works in three passes:
-/// 1. Histogram: Count splats per depth bin
-/// 2. Prefix Sum: Convert counts to starting indices
+/// The algorithm works in three passes, all encoded into a single serial
+/// compute encoder (4 dispatches total on modern GPUs):
+/// 1. Histogram: Count splats per depth bin (plus a histogram reset dispatch)
+/// 2. Scan: Exclusive prefix sum converts counts to scatter-ready bin offsets;
+///    a single dispatch using SIMD-group prefix sums on Apple7+/Mac2, with a
+///    blocked multi-dispatch fallback for older GPUs
 /// 3. Scatter: Place splat indices in sorted order
 ///
 /// This is significantly faster than radix sort for large splat counts
@@ -96,9 +99,12 @@ internal class CountingSorter {
     private let prefixSumPipeline: MTLComputePipelineState
     private let scatterPipeline: MTLComputePipelineState
     private let resetHistogramPipeline: MTLComputePipelineState
-    private let initBinOffsetsPipeline: MTLComputePipelineState
 
-    // Blocked prefix sum pipelines (for large bin counts exceeding threadgroup memory)
+    // Single-dispatch scan over histogram bins (requires SIMD-group reductions: Apple7+/Mac2).
+    // When available, this replaces the blocked prefix sum and the bin-offsets copy.
+    private let scanBinsPipeline: MTLComputePipelineState?
+
+    // Blocked prefix sum pipelines (fallback for devices without SIMD-group reductions)
     private let blockPrefixSumPipeline: MTLComputePipelineState
     private let blockSumsPrefixSumPipeline: MTLComputePipelineState
     private let addBlockPrefixPipeline: MTLComputePipelineState
@@ -108,7 +114,6 @@ internal class CountingSorter {
 
     // Reusable buffers (allocated once, reused across frames)
     private var histogramBuffer: MTLBuffer?
-    private var prefixSumBuffer: MTLBuffer?
     private var binOffsetsBuffer: MTLBuffer?
     private var cachedBinsBuffer: MTLBuffer?  // Caches bin indices between histogram and scatter passes
     private var blockSumsBuffer: MTLBuffer?   // Block totals for blocked prefix sum
@@ -138,9 +143,6 @@ internal class CountingSorter {
         guard let resetFunction = library.makeFunction(name: "countingSortResetHistogram") else {
             throw SplatRendererError.failedToLoadShaderFunction(name: "countingSortResetHistogram")
         }
-        guard let initOffsetsFunction = library.makeFunction(name: "countingSortInitBinOffsets") else {
-            throw SplatRendererError.failedToLoadShaderFunction(name: "countingSortInitBinOffsets")
-        }
 
         // Blocked prefix sum functions
         guard let blockPrefixSumFunction = library.makeFunction(name: "countingSortBlockPrefixSum") else {
@@ -159,7 +161,14 @@ internal class CountingSorter {
         prefixSumPipeline = try device.makeComputePipelineState(function: prefixSumFunction)
         scatterPipeline = try device.makeComputePipelineState(function: scatterFunction)
         resetHistogramPipeline = try device.makeComputePipelineState(function: resetFunction)
-        initBinOffsetsPipeline = try device.makeComputePipelineState(function: initOffsetsFunction)
+
+        // Single-dispatch scan needs SIMD-group prefix sums (Apple7+/Mac2)
+        if device.supportsFamily(.apple7) || device.supportsFamily(.mac2),
+           let scanBinsFunction = library.makeFunction(name: "countingSortScanBins") {
+            scanBinsPipeline = try? device.makeComputePipelineState(function: scanBinsFunction)
+        } else {
+            scanBinsPipeline = nil
+        }
 
         // Blocked prefix sum pipelines
         blockPrefixSumPipeline = try device.makeComputePipelineState(function: blockPrefixSumFunction)
@@ -260,22 +269,20 @@ internal class CountingSorter {
             let bufferSize = binCount * MemoryLayout<UInt32>.stride
 
             guard let histogram = device.makeBuffer(length: bufferSize, options: .storageModePrivate),
-                  let prefixSum = device.makeBuffer(length: bufferSize, options: .storageModePrivate),
                   let binOffsets = device.makeBuffer(length: bufferSize, options: .storageModePrivate) else {
                 throw SplatRendererError.failedToCreateBuffer(length: bufferSize)
             }
 
             histogram.label = "CountingSort Histogram"
-            prefixSum.label = "CountingSort PrefixSum"
             binOffsets.label = "CountingSort BinOffsets"
 
             histogramBuffer = histogram
-            prefixSumBuffer = prefixSum
             binOffsetsBuffer = binOffsets
 
-            // Allocate block sums buffer for blocked prefix sum (when binCount > maxPrefixSumBlockSize)
+            // Allocate block sums buffer for the blocked prefix sum fallback
+            // (only needed when the single-dispatch scan is unavailable)
             let blockCount = (binCount + maxPrefixSumBlockSize - 1) / maxPrefixSumBlockSize
-            if blockCount > 1 {
+            if scanBinsPipeline == nil, blockCount > 1 {
                 let blockSumsSize = blockCount * MemoryLayout<UInt32>.stride
                 guard let blockSums = device.makeBuffer(length: blockSumsSize, options: .storageModePrivate) else {
                     throw SplatRendererError.failedToCreateBuffer(length: blockSumsSize)
@@ -386,7 +393,6 @@ internal class CountingSorter {
         try ensureBuffers(binCount: binCount, splatCount: splatCount)
 
         guard let histogram = histogramBuffer,
-              let prefixSum = prefixSumBuffer,
               let binOffsets = binOffsetsBuffer,
               let cachedBins = cachedBinsBuffer else {
             Self.log.error("Counting sort buffers not allocated")
@@ -417,84 +423,99 @@ internal class CountingSorter {
         let threadsPerGroup = min(256, histogramPipeline.maxTotalThreadsPerThreadgroup)
         let threadgroups = (splatCount + threadsPerGroup - 1) / threadsPerGroup
 
-        // Pass 1: Reset histogram
-        if let encoder = commandBuffer.makeComputeCommandEncoder() {
-            encoder.label = "CountingSort Reset"
-            encoder.setComputePipelineState(resetHistogramPipeline)
-            encoder.setBuffer(histogram, offset: 0, index: 0)
-            encoder.setBytes(&binCountVar, length: MemoryLayout<UInt32>.size, index: 1)
-
-            let resetThreadgroups = (binCount + 255) / 256
-            encoder.dispatchThreadgroups(
-                MTLSize(width: resetThreadgroups, height: 1, depth: 1),
-                threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1)
-            )
-            encoder.endEncoding()
+        // All passes share one serial compute encoder: Metal inserts the required
+        // barriers between dependent dispatches, and a single encoder avoids the
+        // CPU and GPU overhead of encoder churn (previously up to 7 encoders).
+        guard let encoder = commandBuffer.makeComputeCommandEncoder() else {
+            Self.log.error("Failed to create counting sort compute encoder")
+            return
         }
+        encoder.label = "CountingSort"
+
+        // Pass 1: Reset histogram
+        encoder.setComputePipelineState(resetHistogramPipeline)
+        encoder.setBuffer(histogram, offset: 0, index: 0)
+        encoder.setBytes(&binCountVar, length: MemoryLayout<UInt32>.size, index: 1)
+        let resetThreadgroups = (binCount + 255) / 256
+        encoder.dispatchThreadgroups(
+            MTLSize(width: resetThreadgroups, height: 1, depth: 1),
+            threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1)
+        )
 
         // Pass 2: Build histogram AND cache bin indices
-        if let encoder = commandBuffer.makeComputeCommandEncoder() {
-            if useCameraRelativeBinning {
-                // Use camera-relative weighted binning for better near-camera precision
-                encoder.label = "CountingSort Histogram (Weighted)"
-                encoder.setComputePipelineState(histogramWeightedPipeline)
+        if useCameraRelativeBinning {
+            // Use camera-relative weighted binning for better near-camera precision
+            encoder.setComputePipelineState(histogramWeightedPipeline)
 
-                var binParams = computeCameraRelativeBinParams(
-                    minDepth: bounds.min,
-                    maxDepth: bounds.max,
-                    cameraPosition: cameraPosition,
-                    sortByDistance: sortByDistance,
-                    binCount: binCount
-                )
-
-                encoder.setBuffer(splatBuffer, offset: 0, index: 0)
-                encoder.setBuffer(histogram, offset: 0, index: 1)
-                encoder.setBytes(&params, length: MemoryLayout<CountingSortParams>.size, index: 2)
-                encoder.setBytes(&cameraPos, length: MemoryLayout<SIMD3<Float>>.size, index: 3)
-                encoder.setBytes(&cameraFwd, length: MemoryLayout<SIMD3<Float>>.size, index: 4)
-                encoder.setBytes(&sortByDist, length: MemoryLayout<Bool>.size, index: 5)
-                encoder.setBuffer(cachedBins, offset: 0, index: 6)
-                encoder.setBytes(&binParams, length: MemoryLayout<CameraRelativeBinParams>.size, index: 7)
-                if let editStateBuffer {
-                    encoder.setBuffer(editStateBuffer, offset: 0, index: 8)
-                }
-            } else {
-                // Standard uniform binning
-                encoder.label = "CountingSort Histogram"
-                encoder.setComputePipelineState(histogramPipeline)
-                encoder.setBuffer(splatBuffer, offset: 0, index: 0)
-                encoder.setBuffer(histogram, offset: 0, index: 1)
-                encoder.setBytes(&params, length: MemoryLayout<CountingSortParams>.size, index: 2)
-                encoder.setBytes(&cameraPos, length: MemoryLayout<SIMD3<Float>>.size, index: 3)
-                encoder.setBytes(&cameraFwd, length: MemoryLayout<SIMD3<Float>>.size, index: 4)
-                encoder.setBytes(&sortByDist, length: MemoryLayout<Bool>.size, index: 5)
-                encoder.setBuffer(cachedBins, offset: 0, index: 6)
-                if let editStateBuffer {
-                    encoder.setBuffer(editStateBuffer, offset: 0, index: 7)
-                }
-            }
-
-            encoder.dispatchThreadgroups(
-                MTLSize(width: threadgroups, height: 1, depth: 1),
-                threadsPerThreadgroup: MTLSize(width: threadsPerGroup, height: 1, depth: 1)
+            var binParams = computeCameraRelativeBinParams(
+                minDepth: bounds.min,
+                maxDepth: bounds.max,
+                cameraPosition: cameraPosition,
+                sortByDistance: sortByDistance,
+                binCount: binCount
             )
-            encoder.endEncoding()
+
+            encoder.setBuffer(splatBuffer, offset: 0, index: 0)
+            encoder.setBuffer(histogram, offset: 0, index: 1)
+            encoder.setBytes(&params, length: MemoryLayout<CountingSortParams>.size, index: 2)
+            encoder.setBytes(&cameraPos, length: MemoryLayout<SIMD3<Float>>.size, index: 3)
+            encoder.setBytes(&cameraFwd, length: MemoryLayout<SIMD3<Float>>.size, index: 4)
+            encoder.setBytes(&sortByDist, length: MemoryLayout<Bool>.size, index: 5)
+            encoder.setBuffer(cachedBins, offset: 0, index: 6)
+            encoder.setBytes(&binParams, length: MemoryLayout<CameraRelativeBinParams>.size, index: 7)
+            if let editStateBuffer {
+                encoder.setBuffer(editStateBuffer, offset: 0, index: 8)
+            }
+        } else {
+            // Standard uniform binning
+            encoder.setComputePipelineState(histogramPipeline)
+            encoder.setBuffer(splatBuffer, offset: 0, index: 0)
+            encoder.setBuffer(histogram, offset: 0, index: 1)
+            encoder.setBytes(&params, length: MemoryLayout<CountingSortParams>.size, index: 2)
+            encoder.setBytes(&cameraPos, length: MemoryLayout<SIMD3<Float>>.size, index: 3)
+            encoder.setBytes(&cameraFwd, length: MemoryLayout<SIMD3<Float>>.size, index: 4)
+            encoder.setBytes(&sortByDist, length: MemoryLayout<Bool>.size, index: 5)
+            encoder.setBuffer(cachedBins, offset: 0, index: 6)
+            if let editStateBuffer {
+                encoder.setBuffer(editStateBuffer, offset: 0, index: 7)
+            }
         }
+        encoder.dispatchThreadgroups(
+            MTLSize(width: threadgroups, height: 1, depth: 1),
+            threadsPerThreadgroup: MTLSize(width: threadsPerGroup, height: 1, depth: 1)
+        )
 
-        // Pass 3: Prefix sum (converts histogram to starting indices)
-        // Use blocked approach for large bin counts that exceed threadgroup memory
-        let blockCount = (binCount + maxPrefixSumBlockSize - 1) / maxPrefixSumBlockSize
+        // Pass 3: Exclusive scan of the histogram, written directly as scatter-ready
+        // bin offsets (no separate copy pass).
+        if let scanPipeline = scanBinsPipeline {
+            // Preferred: single dispatch using SIMD-group prefix sums
+            encoder.setComputePipelineState(scanPipeline)
+            encoder.setBuffer(histogram, offset: 0, index: 0)
+            encoder.setBuffer(binOffsets, offset: 0, index: 1)
+            encoder.setBytes(&binCountVar, length: MemoryLayout<UInt32>.size, index: 2)
+            // The kernel assumes full simdgroups, and one simdgroup must be able to
+            // scan all per-simdgroup partials, so the threadgroup is capped at
+            // width * width threads (1024 = 32 simdgroups of 32 lanes on Apple GPUs).
+            let width = scanPipeline.threadExecutionWidth
+            let scanThreads = min(1024, width * width, scanPipeline.maxTotalThreadsPerThreadgroup)
+                / width * width
+            encoder.dispatchThreadgroups(
+                MTLSize(width: 1, height: 1, depth: 1),
+                threadsPerThreadgroup: MTLSize(width: scanThreads, height: 1, depth: 1)
+            )
+        } else {
+            // Fallback: blocked prefix sum for devices without SIMD-group reductions.
+            // Writes into binOffsets directly; the old separate prefix-sum buffer and
+            // copy pass are gone.
+            let blockCount = (binCount + maxPrefixSumBlockSize - 1) / maxPrefixSumBlockSize
 
-        if blockCount > 1, let blockSums = blockSumsBuffer {
-            // Blocked 3-phase prefix sum for large bin counts
-            var blockSizeVar = UInt32(maxPrefixSumBlockSize)
+            if blockCount > 1, let blockSums = blockSumsBuffer {
+                var blockSizeVar = UInt32(maxPrefixSumBlockSize)
 
-            // Phase 1: Local prefix sum per block, output block totals
-            if let encoder = commandBuffer.makeComputeCommandEncoder() {
-                encoder.label = "CountingSort BlockPrefixSum"
+                // Phase 1: Local prefix sum per block, output block totals
                 encoder.setComputePipelineState(blockPrefixSumPipeline)
                 encoder.setBuffer(histogram, offset: 0, index: 0)
-                encoder.setBuffer(prefixSum, offset: 0, index: 1)
+                encoder.setBuffer(binOffsets, offset: 0, index: 1)
                 encoder.setBuffer(blockSums, offset: 0, index: 2)
                 encoder.setBytes(&binCountVar, length: MemoryLayout<UInt32>.size, index: 3)
                 encoder.setBytes(&blockSizeVar, length: MemoryLayout<UInt32>.size, index: 4)
@@ -503,12 +524,8 @@ internal class CountingSorter {
                     MTLSize(width: blockCount, height: 1, depth: 1),
                     threadsPerThreadgroup: MTLSize(width: min(256, maxPrefixSumBlockSize), height: 1, depth: 1)
                 )
-                encoder.endEncoding()
-            }
 
-            // Phase 2: Prefix sum of block totals (small array, single-thread is fine)
-            if let encoder = commandBuffer.makeComputeCommandEncoder() {
-                encoder.label = "CountingSort BlockSumsPrefixSum"
+                // Phase 2: Prefix sum of block totals (small array, single-thread is fine)
                 encoder.setComputePipelineState(blockSumsPrefixSumPipeline)
                 encoder.setBuffer(blockSums, offset: 0, index: 0)
                 var blockCountVar = UInt32(blockCount)
@@ -517,14 +534,10 @@ internal class CountingSorter {
                     MTLSize(width: 1, height: 1, depth: 1),
                     threadsPerThreadgroup: MTLSize(width: 1, height: 1, depth: 1)
                 )
-                encoder.endEncoding()
-            }
 
-            // Phase 3: Add block prefix to each element
-            if let encoder = commandBuffer.makeComputeCommandEncoder() {
-                encoder.label = "CountingSort AddBlockPrefix"
+                // Phase 3: Add block prefix to each element
                 encoder.setComputePipelineState(addBlockPrefixPipeline)
-                encoder.setBuffer(prefixSum, offset: 0, index: 0)
+                encoder.setBuffer(binOffsets, offset: 0, index: 0)
                 encoder.setBuffer(blockSums, offset: 0, index: 1)
                 encoder.setBytes(&binCountVar, length: MemoryLayout<UInt32>.size, index: 2)
                 encoder.setBytes(&blockSizeVar, length: MemoryLayout<UInt32>.size, index: 3)
@@ -533,58 +546,34 @@ internal class CountingSorter {
                     MTLSize(width: addThreadgroups, height: 1, depth: 1),
                     threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1)
                 )
-                encoder.endEncoding()
-            }
-        } else {
-            // Single-thread prefix sum for small bin counts (fits in one block)
-            if let encoder = commandBuffer.makeComputeCommandEncoder() {
-                encoder.label = "CountingSort PrefixSum"
+            } else {
+                // Single-thread prefix sum for small bin counts (fits in one block)
                 encoder.setComputePipelineState(prefixSumPipeline)
                 encoder.setBuffer(histogram, offset: 0, index: 0)
-                encoder.setBuffer(prefixSum, offset: 0, index: 1)
+                encoder.setBuffer(binOffsets, offset: 0, index: 1)
                 encoder.setBytes(&binCountVar, length: MemoryLayout<UInt32>.size, index: 2)
                 encoder.dispatchThreadgroups(
                     MTLSize(width: 1, height: 1, depth: 1),
                     threadsPerThreadgroup: MTLSize(width: 1, height: 1, depth: 1)
                 )
-                encoder.endEncoding()
             }
         }
 
-        // Pass 4: Copy prefix sum to bin offsets
-        if let encoder = commandBuffer.makeComputeCommandEncoder() {
-            encoder.label = "CountingSort InitOffsets"
-            encoder.setComputePipelineState(initBinOffsetsPipeline)
-            encoder.setBuffer(prefixSum, offset: 0, index: 0)
-            encoder.setBuffer(binOffsets, offset: 0, index: 1)
-            encoder.setBytes(&binCountVar, length: MemoryLayout<UInt32>.size, index: 2)
-
-            let copyThreadgroups = (binCount + 255) / 256
-            encoder.dispatchThreadgroups(
-                MTLSize(width: copyThreadgroups, height: 1, depth: 1),
-                threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1)
-            )
-            encoder.endEncoding()
+        // Pass 4: Scatter indices to sorted positions (uses cached bin indices - no depth recomputation!)
+        encoder.setComputePipelineState(scatterPipeline)
+        encoder.setBuffer(cachedBins, offset: 0, index: 0)   // Use cached bin indices
+        encoder.setBuffer(binOffsets, offset: 0, index: 1)
+        encoder.setBuffer(outputBuffer, offset: 0, index: 2)
+        encoder.setBytes(&params, length: MemoryLayout<CountingSortParams>.size, index: 3)
+        if let editStateBuffer {
+            encoder.setBuffer(editStateBuffer, offset: 0, index: 4)
         }
+        encoder.dispatchThreadgroups(
+            MTLSize(width: threadgroups, height: 1, depth: 1),
+            threadsPerThreadgroup: MTLSize(width: threadsPerGroup, height: 1, depth: 1)
+        )
 
-        // Pass 5: Scatter indices to sorted positions (uses cached bin indices - no depth recomputation!)
-        if let encoder = commandBuffer.makeComputeCommandEncoder() {
-            encoder.label = "CountingSort Scatter"
-            encoder.setComputePipelineState(scatterPipeline)
-            encoder.setBuffer(cachedBins, offset: 0, index: 0)   // Use cached bin indices
-            encoder.setBuffer(binOffsets, offset: 0, index: 1)
-            encoder.setBuffer(outputBuffer, offset: 0, index: 2)
-            encoder.setBytes(&params, length: MemoryLayout<CountingSortParams>.size, index: 3)
-            if let editStateBuffer {
-                encoder.setBuffer(editStateBuffer, offset: 0, index: 4)
-            }
-
-            encoder.dispatchThreadgroups(
-                MTLSize(width: threadgroups, height: 1, depth: 1),
-                threadsPerThreadgroup: MTLSize(width: threadsPerGroup, height: 1, depth: 1)
-            )
-            encoder.endEncoding()
-        }
+        encoder.endEncoding()
     }
 
     /// Clears cached depth bounds (call when splats change)
