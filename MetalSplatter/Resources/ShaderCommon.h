@@ -111,6 +111,10 @@ typedef struct
 // Using index 12 to avoid conflict with SH (0-3)
 constant bool use2DGS [[function_constant(12)]];
 
+// Keep this struct minimal: every member is per-vertex parameter-buffer traffic
+// on TBDR GPUs. When 2DGS per-fragment ray-splat intersection lands, its
+// view-space attributes (center/normal/tangents) should be added behind the
+// use2DGS function constant rather than unconditionally.
 typedef struct
 {
     float4 position [[position]];
@@ -119,10 +123,4 @@ typedef struct
     half lodBand;
     uint debugFlags;
     uint splatID [[flat]];  // For temporal noise in Bayer dithering
-
-    // 2DGS ray-splat intersection data (flat-interpolated, same for all 4 quad vertices)
-    float3 viewCenter [[flat]];     // Splat center in view space
-    float3 viewNormal [[flat]];     // Splat normal in view space (smallest eigenvector of 3D cov)
-    float3 viewTangentU [[flat]];   // Tangent U axis in view space (scaled by 1/sigma_u)
-    float3 viewTangentV [[flat]];   // Tangent V axis in view space (scaled by 1/sigma_v)
 } FragmentIn;
