@@ -180,6 +180,23 @@ static FragmentIn splatVertexInternal(Splat splat,
         return culledFragment(splatID);
     }
 
+    // Distance-based LOD decimation: beyond each threshold band, keep only
+    // every 2nd/4th/8th splat and scale opacity up to preserve coverage.
+    // Splats are stored in Morton order, so index decimation thins spatially
+    // uniformly. Deterministic (no temporal flicker).
+    uint lodSkipFactor = 1u;
+    if (uniforms.lodSkipEnabled != 0u) {
+        float lodDistance = length(viewPosition3);
+        float3 lodThresholds = uniforms.lodThresholds;
+        uint lodBand = lodDistance > lodThresholds.z ? 3u
+                     : lodDistance > lodThresholds.y ? 2u
+                     : lodDistance > lodThresholds.x ? 1u : 0u;
+        lodSkipFactor = 1u << lodBand;
+        if ((splatID & (lodSkipFactor - 1u)) != 0u) {
+            return culledFragment(splatID);
+        }
+    }
+
     float opacityScale = 1.0f;
     float3 cov2D = calcCovariance2D(viewPosition3, covA, covB,
                                     uniforms.viewMatrix,
@@ -188,6 +205,7 @@ static FragmentIn splatVertexInternal(Splat splat,
                                     uniforms.covarianceBlur,
                                     uniforms.renderMode,
                                     opacityScale);
+    opacityScale *= float(lodSkipFactor);
 
     float2 axis1;
     float2 axis2;

@@ -168,6 +168,26 @@ kernel void batchPrecomputeSplats(
     
     output.visible = 1;
 
+    // Distance-based LOD decimation (same scheme as the per-vertex path in
+    // SplatProcessing.metal): keep every 2nd/4th/8th splat beyond each
+    // threshold band, compensating opacity to preserve coverage.
+    float lodOpacityScale = 1.0f;
+    if (uniforms.lodSkipEnabled != 0u) {
+        float lodDistance = length(viewPos);
+        float3 lodThresholds = uniforms.lodThresholds;
+        uint lodBand = lodDistance > lodThresholds.z ? 3u
+                     : lodDistance > lodThresholds.y ? 2u
+                     : lodDistance > lodThresholds.x ? 1u : 0u;
+        uint lodSkipFactor = 1u << lodBand;
+        if ((index & (lodSkipFactor - 1u)) != 0u) {
+            output.visible = 0;
+            output.opacityScale = 0.0f;
+            outputSplats[index] = output;
+            return;
+        }
+        lodOpacityScale = float(lodSkipFactor);
+    }
+
     // Compute 2D covariance
     output.opacityScale = 1.0f;
     output.cov2D = computeCovariance2D(viewPos, splat.covA, splat.covB,
@@ -177,6 +197,7 @@ kernel void batchPrecomputeSplats(
 
     // Decompose into axes
     decomposeCovariance(output.cov2D, output.axis1, output.axis2);
+    output.opacityScale *= lodOpacityScale;
 
     // Screen-space LOD culling - cull sub-pixel splats (same test as the
     // per-vertex path in SplatProcessing.metal)

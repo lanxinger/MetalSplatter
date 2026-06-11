@@ -44,7 +44,7 @@ typedef struct
     uint indexedSplatCount;
     uint debugFlags;
     uint renderMode;
-    uint padding0;
+    uint lodSkipEnabled;        // Distance-based LOD decimation (see lodThresholds)
     uint padding1;
     float3 lodThresholds;
     float covarianceBlur;       // Low-pass filter for 2D covariance (derived from render mode by default)

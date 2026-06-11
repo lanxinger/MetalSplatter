@@ -311,7 +311,7 @@ public class SplatRenderer: @unchecked Sendable {
         var indexedSplatCount: UInt32
         var debugFlags: UInt32
         var renderMode: UInt32
-        var padding0: UInt32
+        var lodSkipEnabled: UInt32
         var padding1: UInt32
         var lodThresholds: SIMD3<Float>
         var covarianceBlur: Float
@@ -431,6 +431,13 @@ public class SplatRenderer: @unchecked Sendable {
         let thresholds = Constants.lodDistanceThresholds
         return SIMD3<Float>(thresholds[0], thresholds[1], thresholds[2])
     }()
+
+    /// Distance-based LOD decimation (PlayCanvas-style): beyond each
+    /// `lodThresholds` band, only every 2nd/4th/8th splat is drawn, with
+    /// opacity scaled up to preserve perceived coverage. Splats are stored in
+    /// Morton order, so index decimation thins them spatially uniformly.
+    /// Use `.lodTint` in `debugOptions` to visualize the bands.
+    public var lodSkippingEnabled: Bool = false
 
     /// Rendering behavior for Brush-style covariance filtering.
     /// Updating the mode resets `covarianceBlur` to the mode default.
@@ -2677,7 +2684,8 @@ public class SplatRenderer: @unchecked Sendable {
                           covarianceBlur: covarianceBlur,
                           lodThresholds: lodThresholds,
                           selectionTintColor: selectionTintColor,
-                          editingEnabled: editingEnabled)
+                          editingEnabled: editingEnabled,
+                          lodSkippingEnabled: lodSkippingEnabled)
     }
 
     static func makeUniforms(for viewport: ViewportDescriptor,
@@ -2688,7 +2696,8 @@ public class SplatRenderer: @unchecked Sendable {
                              covarianceBlur: Float,
                              lodThresholds: SIMD3<Float>,
                              selectionTintColor: SIMD4<Float> = SIMD4<Float>(0.15, 0.55, 1.0, 0.45),
-                             editingEnabled: Bool = false) -> Uniforms {
+                             editingEnabled: Bool = false,
+                             lodSkippingEnabled: Bool = false) -> Uniforms {
         let proj00 = viewport.projectionMatrix[0][0]
         let proj11 = viewport.projectionMatrix[1][1]
         let focalX = Float(viewport.screenSize.x) * proj00 / 2
@@ -2708,7 +2717,7 @@ public class SplatRenderer: @unchecked Sendable {
             indexedSplatCount: indexedSplatCount,
             debugFlags: debugFlags,
             renderMode: renderMode.rawValue,
-            padding0: 0,
+            lodSkipEnabled: lodSkippingEnabled ? 1 : 0,
             padding1: 0,
             lodThresholds: lodThresholds,
             covarianceBlur: covarianceBlur,
