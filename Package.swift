@@ -78,13 +78,20 @@ let package = Package(
             path: "MetalSplatter",
             exclude: [ "Tests" ],
             sources: [ "Sources" ],
-            resources: [ .process("Resources") ]
+            resources: [
+                .process("Resources"),
+                // Shipped as source, not precompiled: requires MSL 4.1, which is
+                // newer than the deployment-target-pinned language version the
+                // build-time Metal compiler uses. Metal4Sorter compiles it at
+                // runtime on OS versions whose compiler supports MSL 4.1.
+                .copy("RuntimeShaders/OneSweepSort.metal"),
+            ]
         ),
         .testTarget(
             name: "MetalSplatterTests",
             dependencies: [ "MetalSplatter" ],
             path: "MetalSplatter",
-            exclude: [ "Sources", "Resources" ],
+            exclude: [ "Sources", "Resources", "RuntimeShaders" ],
             sources: [ "Tests" ]
         ),
         .target(

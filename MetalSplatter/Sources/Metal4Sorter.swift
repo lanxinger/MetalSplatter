@@ -58,8 +58,8 @@ internal class Metal4Sorter {
     private let scatterWritePipeline: MTLComputePipelineState     // Phase 3: stable write
     private let extractIndicesPipeline: MTLComputePipelineState
 
-    // OneSweep pipelines (MSL 4.1; nil when the library was built with an
-    // older SDK and the kernels were compiled out)
+    // OneSweep pipelines (MSL 4.1, compiled at runtime; nil when the OS's
+    // Metal compiler doesn't support MSL 4.1 or compilation fails)
     private let oneSweepHistogramPipeline: MTLComputePipelineState?
     private let oneSweepScanPipeline: MTLComputePipelineState?
     private let oneSweepResetPipeline: MTLComputePipelineState?
@@ -72,7 +72,7 @@ internal class Metal4Sorter {
     /// this algorithm, but worth a kill switch.
     var useOneSweep: Bool = true
 
-    private var oneSweepAvailable: Bool {
+    var oneSweepAvailable: Bool {
         oneSweepHistogramPipeline != nil && oneSweepScanPipeline != nil
             && oneSweepResetPipeline != nil && oneSweepDigitPassPipeline != nil
     }
@@ -136,12 +136,16 @@ internal class Metal4Sorter {
         }
         extractIndicesPipeline = try device.makeComputePipelineState(function: extractIndicesFunction)
 
-        // OneSweep kernels exist only when the library was compiled as MSL 4.1
-        // (Xcode SDK 26.4+); fall back to the legacy path otherwise.
-        if let histFunction = library.makeFunction(name: "onesweep_global_histogram"),
-           let scanFunction = library.makeFunction(name: "onesweep_scan_histograms"),
-           let resetFunction = library.makeFunction(name: "onesweep_reset_status"),
-           let digitFunction = library.makeFunction(name: "onesweep_digit_pass") {
+        // The OneSweep kernels require MSL 4.1, but the build-time Metal
+        // compiler pins the language version to the package's deployment
+        // target, so they can never ship in the precompiled library. Compile
+        // them from source at runtime on OS versions whose compiler supports
+        // MSL 4.1; fall back to the legacy path otherwise.
+        if let oneSweepLibrary = Self.makeOneSweepLibrary(device: device),
+           let histFunction = oneSweepLibrary.makeFunction(name: "onesweep_global_histogram"),
+           let scanFunction = oneSweepLibrary.makeFunction(name: "onesweep_scan_histograms"),
+           let resetFunction = oneSweepLibrary.makeFunction(name: "onesweep_reset_status"),
+           let digitFunction = oneSweepLibrary.makeFunction(name: "onesweep_digit_pass") {
             oneSweepHistogramPipeline = try? device.makeComputePipelineState(function: histFunction)
             oneSweepScanPipeline = try? device.makeComputePipelineState(function: scanFunction)
             oneSweepResetPipeline = try? device.makeComputePipelineState(function: resetFunction)
@@ -157,6 +161,27 @@ internal class Metal4Sorter {
             Self.log.info("Metal4Sorter initialized with OneSweep radix sort (MSL 4.1 decoupled lookback)")
         } else {
             Self.log.info("Metal4Sorter initialized with \(Self.radixPasses)-pass stable radix sort (8-bit buckets)")
+        }
+    }
+
+    /// Runtime-compile the OneSweep kernels (OneSweepSort.metal, shipped as a
+    /// copied resource) as MSL 4.1. Returns nil when the OS's Metal compiler
+    /// predates MSL 4.1 or compilation fails.
+    private static func makeOneSweepLibrary(device: MTLDevice) -> MTLLibrary? {
+        guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return nil }
+        guard let sourceURL = Bundle.module.url(forResource: "OneSweepSort", withExtension: "metal"),
+              let source = try? String(contentsOf: sourceURL, encoding: .utf8) else {
+            log.warning("OneSweepSort.metal resource missing; using legacy radix sort")
+            return nil
+        }
+        let options = MTLCompileOptions()
+        options.languageVersion = .version4_1
+        options.mathMode = .fast  // match the build-time -fmetal-math-mode=fast
+        do {
+            return try device.makeLibrary(source: source, options: options)
+        } catch {
+            log.warning("OneSweep runtime compilation failed; using legacy radix sort: \(error.localizedDescription)")
+            return nil
         }
     }
 

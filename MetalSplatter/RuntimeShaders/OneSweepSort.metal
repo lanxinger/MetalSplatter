@@ -1,5 +1,4 @@
 #include <metal_stdlib>
-#include "ShaderCommon.h"
 
 using namespace metal;
 
@@ -255,13 +254,15 @@ void onesweep_digit_pass(
         uint packed = (tileId == 0)
             ? (ONESWEEP_FLAG_PREFIX | aggregate)
             : (ONESWEEP_FLAG_AGGREGATE | aggregate);
-        atomic_store_explicit(&status[tileId * ONESWEEP_RADIX + digit], packed, memory_order_release);
+        atomic_store_explicit(&status[tileId * ONESWEEP_RADIX + digit], packed,
+                              memory_order_release, mem_flags::mem_device);
 
         uint exclusive = 0;
         if (tileId > 0) {
             uint look = tileId - 1;
             while (true) {
-                uint word = atomic_load_explicit(&status[look * ONESWEEP_RADIX + digit], memory_order_acquire);
+                uint word = atomic_load_explicit(&status[look * ONESWEEP_RADIX + digit],
+                                                 memory_order_acquire, mem_flags::mem_device);
                 uint flag = word & ONESWEEP_FLAG_MASK;
                 if (flag == 0) {
                     continue;  // predecessor not published yet; spin
@@ -274,7 +275,7 @@ void onesweep_digit_pass(
             }
             atomic_store_explicit(&status[tileId * ONESWEEP_RADIX + digit],
                                   ONESWEEP_FLAG_PREFIX | (exclusive + aggregate),
-                                  memory_order_release);
+                                  memory_order_release, mem_flags::mem_device);
         }
 
         tileExclusive[digit] = passOffsets[byteIndex * ONESWEEP_RADIX + digit] + exclusive;
