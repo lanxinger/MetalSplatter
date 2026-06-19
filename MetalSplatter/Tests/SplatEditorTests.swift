@@ -196,6 +196,34 @@ final class SplatEditorTests: XCTestCase {
         XCTAssertEqual(values[1], 9)
     }
 
+    func testRendererAddDoesNotAllocateEditingResourcesUntilEditingBegins() throws {
+        let renderer = try makeRenderer()
+
+        try renderer.add(makePoints())
+
+        XCTAssertNil(renderer.editStateBuffer)
+        XCTAssertNil(renderer.editTransformIndexBuffer)
+        XCTAssertNil(renderer.editTransformPaletteBuffer)
+        XCTAssertFalse(renderer.editingEnabled)
+        XCTAssertFalse(renderer.shouldBindEditingResources)
+    }
+
+    func testRendererVisibilityFilteringIgnoresEmptyEditingState() throws {
+        let renderer = try makeRenderer()
+        try renderer.add(makePoints())
+
+        try renderer.ensureEditingResources(pointCount: makePoints().count)
+        XCTAssertNotNil(renderer.editStateBuffer)
+        XCTAssertNil(renderer.visibilityFilteringEditStateBuffer)
+
+        try renderer.updateEditStates(
+            at: [1],
+            values: [EditableSplatState.hidden.rawValue]
+        )
+
+        XCTAssertNotNil(renderer.visibilityFilteringEditStateBuffer)
+    }
+
     func testRendererIncrementalEditStateTrackingUpdatesRenderableCount() throws {
         let renderer = try makeRenderer()
         try renderer.add(makePoints().prefix(3).map { $0 })

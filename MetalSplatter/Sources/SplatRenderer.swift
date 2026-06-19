@@ -854,6 +854,12 @@ public class SplatRenderer: @unchecked Sendable {
     internal var shouldBindEditingResources: Bool {
         editingEnabled || shouldDrawSelectionOutline
     }
+    private var hasEditingResourcesAllocated: Bool {
+        editStateBuffer != nil || editTransformIndexBuffer != nil || editTransformPaletteBuffer != nil
+    }
+    internal var visibilityFilteringEditStateBuffer: MTLBuffer? {
+        hiddenOrDeletedEditStateCount > 0 ? editStateBuffer : nil
+    }
 
     var sorting = false
     private var sortJobsInFlight: Int = 0  // Track concurrent sort operations
@@ -1938,7 +1944,9 @@ public class SplatRenderer: @unchecked Sendable {
         animationDirty = true
         markGeometryDirty()  // New splats affect geometry and require re-sorting
         colorsDirty = true   // New splats also have new colors
-        try ensureEditingResources(pointCount: splatBuffer.count)
+        if hasEditingResourcesAllocated {
+            try ensureEditingResources(pointCount: splatBuffer.count)
+        }
 
         // Initialize sorted indices with identity mapping (0, 1, 2, ...)
         // This ensures rendering works before first sort completes
@@ -2146,8 +2154,11 @@ public class SplatRenderer: @unchecked Sendable {
         }
         markGeometryDirty()
         colorsDirty = true
+        let hadEditingResourcesAllocated = hasEditingResourcesAllocated
         resetEditingTracking()
-        try ensureEditingResources(pointCount: points.count)
+        if hadEditingResourcesAllocated {
+            try ensureEditingResources(pointCount: points.count)
+        }
         try initializeIdentitySortedIndices()
     }
 
@@ -2880,7 +2891,7 @@ public class SplatRenderer: @unchecked Sendable {
         cullEncoder.setBuffer(indicesBuffer, offset: 0, index: 1)
         cullEncoder.setBuffer(countBuffer, offset: 0, index: 2)
         cullEncoder.setBuffer(cullDataBuffer, offset: 0, index: 3)
-        if let editStateBuffer {
+        if let editStateBuffer = visibilityFilteringEditStateBuffer {
             cullEncoder.setBuffer(editStateBuffer, offset: 0, index: 4)
         }
         
@@ -3958,7 +3969,7 @@ public class SplatRenderer: @unchecked Sendable {
                             try sorter.sort(
                                 commandBuffer: commandBuffer,
                                 splatBuffer: activeSplatBufferForRendering.buffer,
-                                editStateBuffer: self.editStateBuffer,
+                                editStateBuffer: self.visibilityFilteringEditStateBuffer,
                                 outputBuffer: indexOutputBuffer.buffer,
                                 cameraPosition: cameraWorldPosition,
                                 cameraForward: cameraWorldForward,
@@ -4050,7 +4061,7 @@ public class SplatRenderer: @unchecked Sendable {
                     computeEncoder.setComputePipelineState(computePipelineState)
                     computeEncoder.setBuffer(activeSplatBufferForRendering.buffer, offset: 0, index: 0)
                     computeEncoder.setBuffer(distanceBuffer.buffer, offset: 0, index: 1)
-                    if let editStateBuffer = self.editStateBuffer {
+                    if let editStateBuffer = self.visibilityFilteringEditStateBuffer {
                         computeEncoder.setBuffer(editStateBuffer, offset: 0, index: 2)
                     }
                     computeEncoder.setBytes(&cameraPos, length: MemoryLayout<SIMD3<Float>>.size, index: 3)
