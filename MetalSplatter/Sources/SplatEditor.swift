@@ -68,6 +68,11 @@ public struct SplatEditTransform: Sendable {
     public static let identity = SplatEditTransform()
 }
 
+public enum SplatTransformPreviewScope: Sendable {
+    case selection
+    case selectionOrVisible
+}
+
 public struct SplatSelectionBounds: Sendable {
     public var min: SIMD3<Float>
     public var max: SIMD3<Float>
@@ -977,9 +982,18 @@ public actor SplatEditor {
         try applyStateHistory(changes)
     }
 
-    public func beginPreviewTransform(pivot: SIMD3<Float>) async {
+    public func beginPreviewTransform(
+        pivot: SIMD3<Float>,
+        scope: SplatTransformPreviewScope = .selection
+    ) async {
         previewTransform = PreviewTransformState(pivot: pivot, transform: .identity)
-        previewTransformTouchedIndices = store.selectedIndices
+        switch scope {
+        case .selection:
+            previewTransformTouchedIndices = store.selectedIndices
+        case .selectionOrVisible:
+            let selected = store.selectedIndices
+            previewTransformTouchedIndices = selected.isEmpty ? store.selectableIndices : selected
+        }
         for index in previewTransformTouchedIndices {
             previewTransformIndices[index] = 1
         }
@@ -1007,7 +1021,11 @@ public actor SplatEditor {
             throw SplatEditorError.previewTransformNotActive
         }
 
-        let changes = store.applyCommittedTransform(current.transform, pivot: current.pivot)
+        let changes = store.applyCommittedTransform(
+            current.transform,
+            pivot: current.pivot,
+            indices: previewTransformTouchedIndices
+        )
         try clearPreviewTransformState()
         try applyPointHistory(changes)
     }

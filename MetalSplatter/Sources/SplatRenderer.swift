@@ -6,7 +6,6 @@ import SplatIO
 
 #if arch(x86_64)
 typealias Float16 = Float
-#warning("x86_64 targets are unsupported by MetalSplatter and will fail at runtime. MetalSplatter builds on x86_64 only because Xcode builds Swift Packages as universal binaries and provides no way to override this. When Swift supports Float16 on x86_64, this may be revisited.")
 #endif
 
 // MARK: - Error Types
@@ -56,6 +55,14 @@ public enum SplatRendererError: LocalizedError {
 }
 
 public class SplatRenderer: @unchecked Sendable {
+    private static var supportsCurrentArchitecture: Bool {
+#if arch(x86_64)
+        false
+#else
+        true
+#endif
+    }
+
     public enum SplatRenderMode: UInt32, Sendable {
         case standard = 0
         case mip = 1
@@ -275,12 +282,20 @@ public class SplatRenderer: @unchecked Sendable {
         public var projectionMatrix: simd_float4x4
         public var viewMatrix: simd_float4x4
         public var screenSize: SIMD2<Int>
+        public var isOrthographic: Bool
 
-        public init(viewport: MTLViewport, projectionMatrix: simd_float4x4, viewMatrix: simd_float4x4, screenSize: SIMD2<Int>) {
+        public init(
+            viewport: MTLViewport,
+            projectionMatrix: simd_float4x4,
+            viewMatrix: simd_float4x4,
+            screenSize: SIMD2<Int>,
+            isOrthographic: Bool = false
+        ) {
             self.viewport = viewport
             self.projectionMatrix = projectionMatrix
             self.viewMatrix = viewMatrix
             self.screenSize = screenSize
+            self.isOrthographic = isOrthographic
         }
     }
 
@@ -311,7 +326,7 @@ public class SplatRenderer: @unchecked Sendable {
         var indexedSplatCount: UInt32
         var debugFlags: UInt32
         var renderMode: UInt32
-        var padding0: UInt32
+        var isOrthographic: UInt32
         var padding1: UInt32
         var lodThresholds: SIMD3<Float>
         var covarianceBlur: Float
@@ -695,15 +710,18 @@ public class SplatRenderer: @unchecked Sendable {
     internal let library: MTLLibrary
     // Single-stage pipeline
     internal var singleStagePipelineState: MTLRenderPipelineState?
+    internal var singleStageEditingPipelineState: MTLRenderPipelineState?
     internal var singleStageDepthState: MTLDepthStencilState?
     internal var selectionOutlinePipelineState: MTLRenderPipelineState?
     internal var selectionOutlineDepthState: MTLDepthStencilState?
     // Dithered transparency pipeline (order-independent, no sorting required)
     private var ditheredPipelineState: MTLRenderPipelineState?
+    private var ditheredEditingPipelineState: MTLRenderPipelineState?
     private var ditheredDepthState: MTLDepthStencilState?
     // Multi-stage pipeline
     private var initializePipelineState: MTLRenderPipelineState?
     internal var drawSplatPipelineState: MTLRenderPipelineState?
+    internal var drawSplatEditingPipelineState: MTLRenderPipelineState?
     internal var drawSplatDepthState: MTLDepthStencilState?
     private var postprocessPipelineState: MTLRenderPipelineState?
     private var postprocessDepthState: MTLDepthStencilState?
@@ -832,6 +850,9 @@ public class SplatRenderer: @unchecked Sendable {
     }
     internal var shouldDrawSelectionOutline: Bool {
         selectionOutlineEnabled && selectedEditStateCount > 0 && !isInteracting
+    }
+    internal var shouldBindEditingResources: Bool {
+        editingEnabled || shouldDrawSelectionOutline
     }
 
     var sorting = false
@@ -1089,9 +1110,9 @@ public class SplatRenderer: @unchecked Sendable {
                 sampleCount: Int,
                 maxViewCount: Int,
                 maxSimultaneousRenders: Int) throws {
-#if arch(x86_64)
-        throw SplatRendererError.unsupportedArchitecture
-#endif
+        guard Self.supportsCurrentArchitecture else {
+            throw SplatRendererError.unsupportedArchitecture
+        }
 
         self.device = device
 
@@ -1432,13 +1453,16 @@ public class SplatRenderer: @unchecked Sendable {
 
     internal func resetPipelineStates() {
         singleStagePipelineState = nil
+        singleStageEditingPipelineState = nil
         singleStageDepthState = nil
         selectionOutlinePipelineState = nil
         selectionOutlineDepthState = nil
         ditheredPipelineState = nil
+        ditheredEditingPipelineState = nil
         ditheredDepthState = nil
         initializePipelineState = nil
         drawSplatPipelineState = nil
+        drawSplatEditingPipelineState = nil
         drawSplatDepthState = nil
         postprocessPipelineState = nil
         postprocessDepthState = nil
@@ -1509,39 +1533,62 @@ public class SplatRenderer: @unchecked Sendable {
     }
 
     private func buildSingleStagePipelineStatesIfNeeded() throws {
-        guard singleStagePipelineState == nil else { return }
-
-        singleStagePipelineState = try buildSingleStagePipelineState()
-        singleStageDepthState = try buildSingleStageDepthState()
-        selectionOutlinePipelineState = try buildSelectionOutlinePipelineState()
-        selectionOutlineDepthState = try buildSelectionOutlineDepthState()
+        if singleStagePipelineState == nil {
+            singleStagePipelineState = try buildSingleStagePipelineState(editing: false)
+        }
+        if singleStageEditingPipelineState == nil {
+            singleStageEditingPipelineState = try buildSingleStagePipelineState(editing: true)
+        }
+        if singleStageDepthState == nil {
+            singleStageDepthState = try buildSingleStageDepthState()
+        }
+        if selectionOutlinePipelineState == nil {
+            selectionOutlinePipelineState = try buildSelectionOutlinePipelineState()
+        }
+        if selectionOutlineDepthState == nil {
+            selectionOutlineDepthState = try buildSelectionOutlineDepthState()
+        }
     }
 
     private func buildMultiStagePipelineStatesIfNeeded() throws {
-        guard initializePipelineState == nil else { return }
-
-        initializePipelineState = try buildInitializePipelineState()
-        drawSplatPipelineState = try buildDrawSplatPipelineState()
-        drawSplatDepthState = try buildDrawSplatDepthState()
-        postprocessPipelineState = try buildPostprocessPipelineState()
-        postprocessDepthState = try buildPostprocessDepthState()
+        if initializePipelineState == nil {
+            initializePipelineState = try buildInitializePipelineState()
+        }
+        if drawSplatPipelineState == nil {
+            drawSplatPipelineState = try buildDrawSplatPipelineState(editing: false)
+        }
+        if drawSplatEditingPipelineState == nil {
+            drawSplatEditingPipelineState = try buildDrawSplatPipelineState(editing: true)
+        }
+        if drawSplatDepthState == nil {
+            drawSplatDepthState = try buildDrawSplatDepthState()
+        }
+        if postprocessPipelineState == nil {
+            postprocessPipelineState = try buildPostprocessPipelineState()
+        }
+        if postprocessDepthState == nil {
+            postprocessDepthState = try buildPostprocessDepthState()
+        }
     }
 
-    private func buildSingleStagePipelineState() throws -> MTLRenderPipelineState {
+    private func buildSingleStagePipelineState(editing: Bool) throws -> MTLRenderPipelineState {
         guard !useMultiStagePipeline else {
             throw SplatRendererError.internalPipelineMismatch(expected: "single-stage", actual: "multi-stage")
         }
 
         let pipelineDescriptor = MTLRenderPipelineDescriptor()
 
-        pipelineDescriptor.label = "SingleStagePipeline"
+        pipelineDescriptor.label = editing ? "SingleStageEditingPipeline" : "SingleStagePipeline"
 
         // Set function constants for 2DGS mode
         let functionConstants = MTLFunctionConstantValues()
         var use2DGSValue = use2DGSMode
         functionConstants.setConstantValue(&use2DGSValue, type: .bool, index: 12)
 
-        pipelineDescriptor.vertexFunction = try library.makeFunction(name: "singleStageSplatVertexShader", constantValues: functionConstants)
+        pipelineDescriptor.vertexFunction = try library.makeFunction(
+            name: editing ? "singleStageSplatVertexShaderEditing" : "singleStageSplatVertexShader",
+            constantValues: functionConstants
+        )
         pipelineDescriptor.fragmentFunction = try library.makeRequiredFunction(name: "singleStageSplatFragmentShader")
 
         pipelineDescriptor.rasterSampleCount = sampleCount
@@ -1622,23 +1669,31 @@ public class SplatRenderer: @unchecked Sendable {
     // MARK: - Dithered Transparency Pipeline
 
     private func buildDitheredPipelineStatesIfNeeded() throws {
-        guard ditheredPipelineState == nil else { return }
-
-        ditheredPipelineState = try buildDitheredPipelineState()
-        ditheredDepthState = try buildDitheredDepthState()
+        if ditheredPipelineState == nil {
+            ditheredPipelineState = try buildDitheredPipelineState(editing: false)
+        }
+        if ditheredEditingPipelineState == nil {
+            ditheredEditingPipelineState = try buildDitheredPipelineState(editing: true)
+        }
+        if ditheredDepthState == nil {
+            ditheredDepthState = try buildDitheredDepthState()
+        }
     }
 
-    private func buildDitheredPipelineState() throws -> MTLRenderPipelineState {
+    private func buildDitheredPipelineState(editing: Bool) throws -> MTLRenderPipelineState {
         let pipelineDescriptor = MTLRenderPipelineDescriptor()
 
-        pipelineDescriptor.label = "DitheredTransparencyPipeline"
+        pipelineDescriptor.label = editing ? "DitheredTransparencyEditingPipeline" : "DitheredTransparencyPipeline"
 
         // Set function constants for 2DGS mode
         let functionConstants = MTLFunctionConstantValues()
         var use2DGSValue = use2DGSMode
         functionConstants.setConstantValue(&use2DGSValue, type: .bool, index: 12)
 
-        pipelineDescriptor.vertexFunction = try library.makeFunction(name: "singleStageSplatVertexShader", constantValues: functionConstants)
+        pipelineDescriptor.vertexFunction = try library.makeFunction(
+            name: editing ? "singleStageSplatVertexShaderEditing" : "singleStageSplatVertexShader",
+            constantValues: functionConstants
+        )
         pipelineDescriptor.fragmentFunction = try library.makeRequiredFunction(name: "singleStageSplatFragmentShaderDithered")
 
         pipelineDescriptor.rasterSampleCount = sampleCount
@@ -1681,21 +1736,24 @@ public class SplatRenderer: @unchecked Sendable {
         return try device.makeRenderPipelineState(tileDescriptor: pipelineDescriptor, options: [], reflection: nil)
     }
 
-    private func buildDrawSplatPipelineState() throws -> MTLRenderPipelineState {
+    private func buildDrawSplatPipelineState(editing: Bool) throws -> MTLRenderPipelineState {
         guard useMultiStagePipeline else {
             throw SplatRendererError.internalPipelineMismatch(expected: "multi-stage", actual: "single-stage")
         }
 
         let pipelineDescriptor = MTLRenderPipelineDescriptor()
 
-        pipelineDescriptor.label = "DrawSplatPipeline"
+        pipelineDescriptor.label = editing ? "DrawSplatEditingPipeline" : "DrawSplatPipeline"
 
         // Set function constants for 2DGS mode
         let functionConstants = MTLFunctionConstantValues()
         var use2DGSValue = use2DGSMode
         functionConstants.setConstantValue(&use2DGSValue, type: .bool, index: 12)
 
-        pipelineDescriptor.vertexFunction = try library.makeFunction(name: "multiStageSplatVertexShader", constantValues: functionConstants)
+        pipelineDescriptor.vertexFunction = try library.makeFunction(
+            name: editing ? "multiStageSplatVertexShaderEditing" : "multiStageSplatVertexShader",
+            constantValues: functionConstants
+        )
         pipelineDescriptor.fragmentFunction = try library.makeRequiredFunction(name: "multiStageSplatFragmentShader")
 
         pipelineDescriptor.rasterSampleCount = sampleCount
@@ -2671,7 +2729,7 @@ public class SplatRenderer: @unchecked Sendable {
             indexedSplatCount: indexedSplatCount,
             debugFlags: debugFlags,
             renderMode: renderMode.rawValue,
-            padding0: 0,
+            isOrthographic: viewport.isOrthographic ? 1 : 0,
             padding1: 0,
             lodThresholds: lodThresholds,
             covarianceBlur: covarianceBlur,
@@ -3414,9 +3472,14 @@ public class SplatRenderer: @unchecked Sendable {
             frameBufferUploads += 1
         }
 
+        let bindEditingResources = shouldBindEditingResources
+            && editStateBuffer != nil
+            && editTransformIndexBuffer != nil
+            && editTransformPaletteBuffer != nil
+
         if multiStage {
             guard let initializePipelineState,
-                  let drawSplatPipelineState
+                  let drawPipelineState = bindEditingResources ? drawSplatEditingPipelineState : drawSplatPipelineState
             else { return }
 
             renderEncoder.pushDebugGroup("Initialize")
@@ -3425,10 +3488,10 @@ public class SplatRenderer: @unchecked Sendable {
             renderEncoder.popDebugGroup()
 
             renderEncoder.pushDebugGroup("Draw Splats")
-            renderEncoder.setRenderPipelineState(drawSplatPipelineState)
+            renderEncoder.setRenderPipelineState(drawPipelineState)
             renderEncoder.setDepthStencilState(drawSplatDepthState)
         } else if useDitheredTransparency {
-            guard let ditheredPipelineState
+            guard let ditheredPipelineState = bindEditingResources ? ditheredEditingPipelineState : ditheredPipelineState
             else { return }
 
             renderEncoder.pushDebugGroup("Draw Splats (Dithered)")
@@ -3439,7 +3502,7 @@ public class SplatRenderer: @unchecked Sendable {
                 renderEncoder.setDepthStencilState(ditheredDepthState)
             }
         } else {
-            guard let singleStagePipelineState
+            guard let singleStagePipelineState = bindEditingResources ? singleStageEditingPipelineState : singleStagePipelineState
             else { return }
 
             renderEncoder.pushDebugGroup("Draw Splats")
@@ -3449,13 +3512,13 @@ public class SplatRenderer: @unchecked Sendable {
 
         renderEncoder.setVertexBuffer(dynamicUniformBuffers, offset: uniformBufferOffset, index: BufferIndex.uniforms.rawValue)
         renderEncoder.setVertexBuffer(activeSplatBufferForRendering.buffer, offset: 0, index: BufferIndex.splat.rawValue)
-        if let editStateBuffer {
+        if bindEditingResources, let editStateBuffer {
             renderEncoder.setVertexBuffer(editStateBuffer, offset: 0, index: BufferIndex.editState.rawValue)
         }
-        if let editTransformIndexBuffer {
+        if bindEditingResources, let editTransformIndexBuffer {
             renderEncoder.setVertexBuffer(editTransformIndexBuffer, offset: 0, index: BufferIndex.transformIndex.rawValue)
         }
-        if let editTransformPaletteBuffer {
+        if bindEditingResources, let editTransformPaletteBuffer {
             renderEncoder.setVertexBuffer(editTransformPaletteBuffer, offset: 0, index: BufferIndex.transformPalette.rawValue)
         }
 
@@ -3778,7 +3841,11 @@ public class SplatRenderer: @unchecked Sendable {
 //        }
 
         if useGPU {
-            Task(priority: .high) {
+            Task(priority: .high) { [weak self] in
+                guard let self else {
+                    return
+                }
+
                 // Acquire index output buffer from pool
                 let indexOutputBuffer: MetalBuffer<Int32>
 

@@ -13,22 +13,32 @@ float3 calcCovariance2D(float3 viewPos,
                         float tanHalfFovY,
                         float covarianceBlur,
                         uint renderMode,
+                        uint isOrthographic,
                         thread float &opacityScale) {
-    // Guard against division by zero with epsilon
-    float safeViewPosZ = (abs(viewPos.z) < kDivisionEpsilon) ? copysign(kDivisionEpsilon, viewPos.z) : viewPos.z;
-    float invViewPosZ = fast::divide(1.0f, safeViewPosZ);
-    float invViewPosZSquared = invViewPosZ * invViewPosZ;
+    float3x3 J;
+    if (isOrthographic != 0u) {
+        J = float3x3(
+            focalX, 0, 0,
+            0, focalY, 0,
+            0, 0, 0
+        );
+    } else {
+        // Guard against division by zero with epsilon
+        float safeViewPosZ = (abs(viewPos.z) < kDivisionEpsilon) ? copysign(kDivisionEpsilon, viewPos.z) : viewPos.z;
+        float invViewPosZ = fast::divide(1.0f, safeViewPosZ);
+        float invViewPosZSquared = invViewPosZ * invViewPosZ;
 
-    float limX = 1.3f * tanHalfFovX;
-    float limY = 1.3f * tanHalfFovY;
-    viewPos.x = clamp(viewPos.x * invViewPosZ, -limX, limX) * viewPos.z;
-    viewPos.y = clamp(viewPos.y * invViewPosZ, -limY, limY) * viewPos.z;
+        float limX = 1.3f * tanHalfFovX;
+        float limY = 1.3f * tanHalfFovY;
+        viewPos.x = clamp(viewPos.x * invViewPosZ, -limX, limX) * viewPos.z;
+        viewPos.y = clamp(viewPos.y * invViewPosZ, -limY, limY) * viewPos.z;
 
-    float3x3 J = float3x3(
-        focalX * invViewPosZ, 0, 0,
-        0, focalY * invViewPosZ, 0,
-        -(focalX * viewPos.x) * invViewPosZSquared, -(focalY * viewPos.y) * invViewPosZSquared, 0
-    );
+        J = float3x3(
+            focalX * invViewPosZ, 0, 0,
+            0, focalY * invViewPosZ, 0,
+            -(focalX * viewPos.x) * invViewPosZSquared, -(focalY * viewPos.y) * invViewPosZSquared, 0
+        );
+    }
     float3x3 W = float3x3(viewMatrix[0].xyz, viewMatrix[1].xyz, viewMatrix[2].xyz);
     float3x3 T = J * W;
     float3x3 Vrk = float3x3(
@@ -191,6 +201,7 @@ static FragmentIn splatVertexInternal(Splat splat,
                                     uniforms.tanHalfFovX, uniforms.tanHalfFovY,
                                     uniforms.covarianceBlur,
                                     uniforms.renderMode,
+                                    uniforms.isOrthographic,
                                     opacityScale);
 
     float2 axis1;

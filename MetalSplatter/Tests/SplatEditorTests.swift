@@ -230,6 +230,30 @@ final class SplatEditorTests: XCTestCase {
         XCTAssertTrue(renderer.batchPrecomputeEnabled)
     }
 
+    func testPreviewTransformCancelRestoresInteractionAndEditingState() async throws {
+        let renderer = try makeRenderer()
+        let editor = try await SplatEditor(points: makePoints(), renderer: renderer)
+
+        XCTAssertFalse(renderer.editingEnabled)
+        XCTAssertFalse(renderer.shouldBindEditingResources)
+        XCTAssertFalse(renderer.isInteracting)
+
+        await editor.beginPreviewTransform(
+            pivot: SIMD3<Float>(0, 0, -2),
+            scope: .selectionOrVisible
+        )
+
+        XCTAssertTrue(renderer.editingEnabled)
+        XCTAssertTrue(renderer.shouldBindEditingResources)
+        XCTAssertTrue(renderer.isInteracting)
+
+        await editor.cancelPreviewTransform()
+
+        XCTAssertFalse(renderer.editingEnabled)
+        XCTAssertFalse(renderer.shouldBindEditingResources)
+        XCTAssertFalse(renderer.isInteracting)
+    }
+
     func testEditableStoreSelectAllClearAndInvertRespectVisibility() {
         var store = EditableSplatStore(points: makePoints())
         store.states[2].insert(.hidden)
@@ -500,6 +524,33 @@ final class SplatEditorTests: XCTestCase {
         try await editor.redo()
         exported = try await editor.exportVisiblePoints()
         XCTAssertEqual(exported[1].position.x, 1.0, accuracy: 0.0001)
+    }
+
+    func testPreviewTransformSelectionOrVisibleBakesVisibleWhenNoSelection() async throws {
+        let renderer = try makeRenderer()
+        let editor = try await SplatEditor(points: makePoints(), renderer: renderer)
+
+        await editor.beginPreviewTransform(
+            pivot: SIMD3<Float>(0, 0, -2),
+            scope: .selectionOrVisible
+        )
+        try await editor.updatePreviewTransform(
+            SplatEditTransform(translation: SIMD3<Float>(1, 0, 0))
+        )
+        try await editor.commitPreviewTransform()
+
+        let exported = try await editor.exportVisiblePoints()
+        XCTAssertEqual(exported[0].position.x, 0.25, accuracy: 0.0001)
+        XCTAssertEqual(exported[1].position.x, 1.0, accuracy: 0.0001)
+        XCTAssertEqual(exported[2].position.x, 1.55, accuracy: 0.0001)
+        XCTAssertEqual(exported[3].position.x, 1.75, accuracy: 0.0001)
+
+        try await editor.undo()
+        let restored = try await editor.exportVisiblePoints()
+        XCTAssertEqual(restored[0].position.x, -0.75, accuracy: 0.0001)
+        XCTAssertEqual(restored[1].position.x, 0.0, accuracy: 0.0001)
+        XCTAssertEqual(restored[2].position.x, 0.55, accuracy: 0.0001)
+        XCTAssertEqual(restored[3].position.x, 0.75, accuracy: 0.0001)
     }
 
     func testMaskSelectionAndSelectionBounds() async throws {

@@ -39,7 +39,8 @@ final class SplatSelectionEngine: @unchecked Sendable {
         var tanHalfFovY: Float
         var covarianceBlur: Float
         var renderMode: UInt32
-        var padding3: SIMD2<UInt32>
+        var isOrthographic: UInt32
+        var padding3: UInt32
     }
 
     private let device: MTLDevice
@@ -130,7 +131,8 @@ final class SplatSelectionEngine: @unchecked Sendable {
             tanHalfFovY: 1 / projectionY,
             covarianceBlur: renderer.covarianceBlur,
             renderMode: renderer.renderMode.rawValue,
-            padding3: .zero
+            isOrthographic: viewport.isOrthographic ? 1 : 0,
+            padding3: 0
         )
 
         switch query {
@@ -257,7 +259,8 @@ final class SplatSelectionEngine: @unchecked Sendable {
             tanHalfFovY: 1 / projectionY,
             covarianceBlur: renderer.covarianceBlur,
             renderMode: renderer.renderMode.rawValue,
-            padding3: .zero
+            isOrthographic: viewport.isOrthographic ? 1 : 0,
+            padding3: 0
         )
         memcpy(queryBuffer.contents(), &parameters, MemoryLayout<QueryParameters>.stride)
 

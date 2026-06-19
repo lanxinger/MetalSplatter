@@ -71,6 +71,17 @@ final class SplatRenderModeTests: XCTestCase {
         XCTAssertEqual(uniforms.covarianceBlur, 0.1, accuracy: 0.0001)
     }
 
+    func testOrthographicViewportBuildsOrthographicUniforms() {
+        let uniforms = SplatRenderer.makeUniforms(for: makeViewport(isOrthographic: true),
+                                                  splatCount: 4,
+                                                  indexedSplatCount: 4,
+                                                  debugFlags: 0,
+                                                  renderMode: .standard,
+                                                  covarianceBlur: 0.3,
+                                                  lodThresholds: SIMD3<Float>(10, 25, 50))
+        XCTAssertEqual(uniforms.isOrthographic, 1)
+    }
+
     func testSPZDegree4CoefficientsFallbackToRenderableDegree3() {
         let coefficients = (0..<25).map { SIMD3<Float>(repeating: Float($0)) }
 
@@ -81,12 +92,13 @@ final class SplatRenderModeTests: XCTestCase {
         XCTAssertEqual(supported[15].x, 15)
     }
 
-    private func makeViewport() -> SplatRenderer.ViewportDescriptor {
+    private func makeViewport(isOrthographic: Bool = false) -> SplatRenderer.ViewportDescriptor {
         SplatRenderer.ViewportDescriptor(
             viewport: MTLViewport(originX: 0, originY: 0, width: 128, height: 128, znear: 0, zfar: 1),
             projectionMatrix: matrix_identity_float4x4,
             viewMatrix: matrix_identity_float4x4,
-            screenSize: SIMD2<Int>(128, 128)
+            screenSize: SIMD2<Int>(128, 128),
+            isOrthographic: isOrthographic
         )
     }
 }

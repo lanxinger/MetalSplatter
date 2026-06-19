@@ -110,17 +110,17 @@ Splat evaluateSplatWithSH(SplatSH splatSH,
 
 // Fast SH vertex shader using pre-evaluated colors
 // GPU-only sorted rendering: uses sorted indices buffer to access splats in depth order
-vertex FragmentIn fastSHSplatVertexShader(uint vertexID [[vertex_id]],
-                                         uint instanceID [[instance_id]],
-                                         ushort amplificationID [[amplification_id]],
-                                         constant SplatSH* splatArray [[ buffer(BufferIndexSplat) ]],
-                                         constant UniformsArray & uniformsArray [[ buffer(BufferIndexUniforms) ]],
-                                         constant int32_t* sortedIndices [[ buffer(BufferIndexSortedIndices) ]],
-                                         const device uint *editStates [[ buffer(BufferIndexEditState) ]],
-                                         const device uint *transformIndices [[ buffer(BufferIndexTransformIndex) ]],
-                                         const device float4x4 *transformPalette [[ buffer(BufferIndexTransformPalette) ]],
-                                         device const half3* shPalette [[ buffer(FastSHBufferIndexPalette) ]],
-                                         constant FastSHParams& params [[ buffer(FastSHBufferIndexParams) ]]) {
+inline FragmentIn fastSHSplatVertex(uint vertexID,
+                                    uint instanceID,
+                                    ushort amplificationID,
+                                    constant SplatSH* splatArray,
+                                    constant UniformsArray &uniformsArray,
+                                    constant int32_t* sortedIndices,
+                                    const device uint *editStates,
+                                    const device uint *transformIndices,
+                                    const device float4x4 *transformPalette,
+                                    device const half3* shPalette,
+                                    constant FastSHParams& params) {
     Uniforms uniforms = uniformsArray.uniforms[min(int(amplificationID), kMaxViewCount - 1)];
     
     uint logicalSplatID = instanceID * uniforms.indexedSplatCount + (vertexID / 4);
@@ -160,6 +160,51 @@ vertex FragmentIn fastSHSplatVertexShader(uint vertexID [[vertex_id]],
                        editState,
                        transformIndices,
                        transformPalette);
+}
+
+vertex FragmentIn fastSHSplatVertexShader(uint vertexID [[vertex_id]],
+                                          uint instanceID [[instance_id]],
+                                          ushort amplificationID [[amplification_id]],
+                                          constant SplatSH* splatArray [[ buffer(BufferIndexSplat) ]],
+                                          constant UniformsArray & uniformsArray [[ buffer(BufferIndexUniforms) ]],
+                                          constant int32_t* sortedIndices [[ buffer(BufferIndexSortedIndices) ]],
+                                          device const half3* shPalette [[ buffer(FastSHBufferIndexPalette) ]],
+                                          constant FastSHParams& params [[ buffer(FastSHBufferIndexParams) ]]) {
+    return fastSHSplatVertex(vertexID,
+                             instanceID,
+                             amplificationID,
+                             splatArray,
+                             uniformsArray,
+                             sortedIndices,
+                             nullptr,
+                             nullptr,
+                             nullptr,
+                             shPalette,
+                             params);
+}
+
+vertex FragmentIn fastSHSplatVertexShaderEditing(uint vertexID [[vertex_id]],
+                                                 uint instanceID [[instance_id]],
+                                                 ushort amplificationID [[amplification_id]],
+                                                 constant SplatSH* splatArray [[ buffer(BufferIndexSplat) ]],
+                                                 constant UniformsArray & uniformsArray [[ buffer(BufferIndexUniforms) ]],
+                                                 constant int32_t* sortedIndices [[ buffer(BufferIndexSortedIndices) ]],
+                                                 const device uint *editStates [[ buffer(BufferIndexEditState) ]],
+                                                 const device uint *transformIndices [[ buffer(BufferIndexTransformIndex) ]],
+                                                 const device float4x4 *transformPalette [[ buffer(BufferIndexTransformPalette) ]],
+                                                 device const half3* shPalette [[ buffer(FastSHBufferIndexPalette) ]],
+                                                 constant FastSHParams& params [[ buffer(FastSHBufferIndexParams) ]]) {
+    return fastSHSplatVertex(vertexID,
+                             instanceID,
+                             amplificationID,
+                             splatArray,
+                             uniformsArray,
+                             sortedIndices,
+                             editStates,
+                             transformIndices,
+                             transformPalette,
+                             shPalette,
+                             params);
 }
 
 // Fragment shader remains the same

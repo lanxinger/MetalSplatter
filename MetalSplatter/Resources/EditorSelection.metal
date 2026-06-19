@@ -36,7 +36,8 @@ typedef struct
     float tanHalfFovY;
     float covarianceBlur;
     uint renderMode;
-    uint2 padding3;
+    uint isOrthographic;
+    uint padding3;
 } SelectionQueryParameters;
 
 typedef struct
@@ -172,6 +173,7 @@ inline bool projectEditableSplat(float3 worldPosition,
                                     params.tanHalfFovY,
                                     params.covarianceBlur,
                                     params.renderMode,
+                                    params.isOrthographic,
                                     opacityScale);
     float2 axis1;
     float2 axis2;

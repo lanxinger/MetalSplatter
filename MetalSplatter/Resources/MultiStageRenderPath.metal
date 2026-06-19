@@ -29,15 +29,15 @@ kernel void initializeFragmentStore(imageblock<FragmentValues, imageblock_layout
 }
 
 // GPU-only sorted rendering: uses sorted indices buffer to access splats in depth order
-vertex FragmentIn multiStageSplatVertexShader(uint vertexID [[vertex_id]],
-                                              uint instanceID [[instance_id]],
-                                              ushort amplificationID [[amplification_id]],
-                                              constant Splat* splatArray [[ buffer(BufferIndexSplat) ]],
-                                              constant UniformsArray & uniformsArray [[ buffer(BufferIndexUniforms) ]],
-                                              constant int32_t* sortedIndices [[ buffer(BufferIndexSortedIndices) ]],
-                                              const device uint *editStates [[ buffer(BufferIndexEditState) ]],
-                                              const device uint *transformIndices [[ buffer(BufferIndexTransformIndex) ]],
-                                              const device float4x4 *transformPalette [[ buffer(BufferIndexTransformPalette) ]]) {
+inline FragmentIn multiStageSplatVertex(uint vertexID,
+                                        uint instanceID,
+                                        ushort amplificationID,
+                                        constant Splat* splatArray,
+                                        constant UniformsArray &uniformsArray,
+                                        constant int32_t* sortedIndices,
+                                        const device uint *editStates,
+                                        const device uint *transformIndices,
+                                        const device float4x4 *transformPalette) {
     Uniforms uniforms = uniformsArray.uniforms[min(int(amplificationID), kMaxViewCount - 1)];
 
     uint logicalSplatID = instanceID * uniforms.indexedSplatCount + (vertexID / 4);
@@ -71,9 +71,46 @@ vertex FragmentIn multiStageSplatVertexShader(uint vertexID [[vertex_id]],
                        uniforms,
                        vertexID % 4,
                        actualSplatID,
-                       editStates[actualSplatID],
+                       editStates != nullptr ? editStates[actualSplatID] : 0u,
                        transformIndices,
                        transformPalette);
+}
+
+vertex FragmentIn multiStageSplatVertexShader(uint vertexID [[vertex_id]],
+                                              uint instanceID [[instance_id]],
+                                              ushort amplificationID [[amplification_id]],
+                                              constant Splat* splatArray [[ buffer(BufferIndexSplat) ]],
+                                              constant UniformsArray & uniformsArray [[ buffer(BufferIndexUniforms) ]],
+                                              constant int32_t* sortedIndices [[ buffer(BufferIndexSortedIndices) ]]) {
+    return multiStageSplatVertex(vertexID,
+                                 instanceID,
+                                 amplificationID,
+                                 splatArray,
+                                 uniformsArray,
+                                 sortedIndices,
+                                 nullptr,
+                                 nullptr,
+                                 nullptr);
+}
+
+vertex FragmentIn multiStageSplatVertexShaderEditing(uint vertexID [[vertex_id]],
+                                                     uint instanceID [[instance_id]],
+                                                     ushort amplificationID [[amplification_id]],
+                                                     constant Splat* splatArray [[ buffer(BufferIndexSplat) ]],
+                                                     constant UniformsArray & uniformsArray [[ buffer(BufferIndexUniforms) ]],
+                                                     constant int32_t* sortedIndices [[ buffer(BufferIndexSortedIndices) ]],
+                                                     const device uint *editStates [[ buffer(BufferIndexEditState) ]],
+                                                     const device uint *transformIndices [[ buffer(BufferIndexTransformIndex) ]],
+                                                     const device float4x4 *transformPalette [[ buffer(BufferIndexTransformPalette) ]]) {
+    return multiStageSplatVertex(vertexID,
+                                 instanceID,
+                                 amplificationID,
+                                 splatArray,
+                                 uniformsArray,
+                                 sortedIndices,
+                                 editStates,
+                                 transformIndices,
+                                 transformPalette);
 }
 
 fragment FragmentStore multiStageSplatFragmentShader(FragmentIn in [[stage_in]],

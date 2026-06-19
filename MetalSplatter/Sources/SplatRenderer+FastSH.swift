@@ -82,6 +82,7 @@ public class FastSHSplatRenderer: SplatRenderer, @unchecked Sendable {
     public var shRenderingEnabled: Bool = true
     private var shPaletteBuffer: MTLBuffer?
     private var fastSHPipelineState: MTLRenderPipelineState?
+    private var fastSHEditingPipelineState: MTLRenderPipelineState?
     
     // SH data storage
     public private(set) var shCoefficients: [[SIMD3<Float>]] = []
@@ -121,6 +122,7 @@ public class FastSHSplatRenderer: SplatRenderer, @unchecked Sendable {
     internal override func resetPipelineStates() {
         super.resetPipelineStates()
         fastSHPipelineState = nil
+        fastSHEditingPipelineState = nil
     }
 
     public override func prepareForSorting(count: Int) throws {
@@ -193,6 +195,7 @@ public class FastSHSplatRenderer: SplatRenderer, @unchecked Sendable {
 
             // Buffer-based fast SH pipeline
             let vertexFunction = try library.makeFunction(name: "fastSHSplatVertexShader", constantValues: functionConstants)
+            let editingVertexFunction = try library.makeFunction(name: "fastSHSplatVertexShaderEditing", constantValues: functionConstants)
             let fragmentFunction = try library.makeFunction(name: "fastSHSplatFragmentShader", constantValues: functionConstants)
 
             let pipelineDescriptor = MTLRenderPipelineDescriptor()
@@ -217,6 +220,11 @@ public class FastSHSplatRenderer: SplatRenderer, @unchecked Sendable {
             }
 
             fastSHPipelineState = try device.makeRenderPipelineState(descriptor: pipelineDescriptor)
+
+            let editingPipelineDescriptor = pipelineDescriptor.copy() as! MTLRenderPipelineDescriptor
+            editingPipelineDescriptor.label = "Fast SH Splat Editing Pipeline"
+            editingPipelineDescriptor.vertexFunction = editingVertexFunction
+            fastSHEditingPipelineState = try device.makeRenderPipelineState(descriptor: editingPipelineDescriptor)
         } catch {
             print("Failed to create fast SH pipeline: \(error)")
         }
@@ -393,9 +401,15 @@ extension FastSHSplatRenderer {
         let didUpdateAnimatedSplats = updateAnimatedSplatsIfNeeded(to: commandBuffer)
         updateAnimatedSHSplatsIfNeeded(to: commandBuffer, forceRebuild: didUpdateAnimatedSplats)
 
+        let bindEditingResources = shouldBindEditingResources
+            && editStateBuffer != nil
+            && editTransformIndexBuffer != nil
+            && editTransformPaletteBuffer != nil
+        let pipeline = bindEditingResources ? fastSHEditingPipelineState : fastSHPipelineState
+
         // Use fast SH pipeline if enabled and available
         if fastSHConfig.enabled,
-           let pipeline = fastSHPipelineState,
+           let pipeline,
            shPaletteBuffer != nil,
            shDegree > 0,
            shCoefficientsPerEntry > 0 {
@@ -470,13 +484,18 @@ extension FastSHSplatRenderer {
         // Set buffers
         renderEncoder.setVertexBuffer(activeSplatSHBuffer.buffer, offset: 0, index: BufferIndex.splat.rawValue)
         renderEncoder.setVertexBuffer(dynamicUniformBuffers, offset: uniformBufferOffset, index: BufferIndex.uniforms.rawValue)
-        if let editStateBuffer {
+        let bindEditingResources = shouldBindEditingResources
+            && editStateBuffer != nil
+            && editTransformIndexBuffer != nil
+            && editTransformPaletteBuffer != nil
+
+        if bindEditingResources, let editStateBuffer {
             renderEncoder.setVertexBuffer(editStateBuffer, offset: 0, index: BufferIndex.editState.rawValue)
         }
-        if let editTransformIndexBuffer {
+        if bindEditingResources, let editTransformIndexBuffer {
             renderEncoder.setVertexBuffer(editTransformIndexBuffer, offset: 0, index: BufferIndex.transformIndex.rawValue)
         }
-        if let editTransformPaletteBuffer {
+        if bindEditingResources, let editTransformPaletteBuffer {
             renderEncoder.setVertexBuffer(editTransformPaletteBuffer, offset: 0, index: BufferIndex.transformPalette.rawValue)
         }
 

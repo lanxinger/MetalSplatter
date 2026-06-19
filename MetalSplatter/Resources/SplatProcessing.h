@@ -14,6 +14,7 @@ float3 calcCovariance2D(float3 viewPos,
                         float tanHalfFovY,
                         float covarianceBlur,
                         uint renderMode,
+                        uint isOrthographic,
                         thread float &opacityScale);
 
 void decomposeCovariance(float3 cov2D, thread float2 &v1, thread float2 &v2);
