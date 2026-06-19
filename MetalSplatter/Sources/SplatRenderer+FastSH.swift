@@ -232,10 +232,15 @@ public class FastSHSplatRenderer: SplatRenderer, @unchecked Sendable {
     
     /// Load splats with SH coefficients support
     private func loadSplatsWithSHSynchronously(_ splats: [SplatScenePoint]) throws {
+        try replaceAllSplats(with: splats)
+    }
+
+    private func rebuildFastSHBuffers(from splats: [SplatScenePoint]) throws {
         // Extract unique SH coefficient sets and build palette
         var uniqueSHSets: [[SIMD3<Float>]] = []
         var shSetToIndex: [[SIMD3<Float>]: UInt32] = [:]
         shPaletteMap.removeAll()
+        shDegree = 0
         
         // Determine SH degree from first splat with SH
         for splat in splats {
@@ -328,9 +333,6 @@ public class FastSHSplatRenderer: SplatRenderer, @unchecked Sendable {
                                    shDegree: shDeg)
             splatSHBuffer.append(splatSH)
         }
-        
-        // Also fill regular splat buffer for sorting/culling compatibility
-        try replaceAllSplats(with: splats)
     }
 
     public func loadSplatsWithSH(_ splats: [SplatScenePoint]) async throws {
@@ -359,15 +361,34 @@ public class FastSHSplatRenderer: SplatRenderer, @unchecked Sendable {
 
     public override func replaceSceneLayers(_ layers: [SplatSceneLayer]) throws {
         let allPoints = layers.flatMap(\.points)
-        splatSHBuffer.count = 0
-        splatSHBufferPrime.count = 0
         if let animatedSplatSHBuffer {
             splatSHBufferPool.release(animatedSplatSHBuffer)
             self.animatedSplatSHBuffer = nil
             lastAppliedAnimationTimeSH = nil
         }
-        try loadSplatsWithSHSynchronously(allPoints)
         try replaceAllSplats(with: allPoints, sceneCounts: layers.map { $0.points.count })
+    }
+
+    internal override func updateSplats(_ points: [SplatScenePoint], at indices: [Int]) throws {
+        try super.updateSplats(points, at: indices)
+        try rebuildFastSHBuffers(from: sourceScenePoints)
+        if let animatedSplatSHBuffer {
+            splatSHBufferPool.release(animatedSplatSHBuffer)
+            self.animatedSplatSHBuffer = nil
+            lastAppliedAnimationTimeSH = nil
+        }
+    }
+
+    internal override func replaceAllSplats(with points: [SplatScenePoint],
+                                            sceneCounts: [Int]? = nil,
+                                            sceneIndices: [UInt32]? = nil) throws {
+        try super.replaceAllSplats(with: points, sceneCounts: sceneCounts, sceneIndices: sceneIndices)
+        try rebuildFastSHBuffers(from: sourceScenePoints)
+        if let animatedSplatSHBuffer {
+            splatSHBufferPool.release(animatedSplatSHBuffer)
+            self.animatedSplatSHBuffer = nil
+            lastAppliedAnimationTimeSH = nil
+        }
     }
 
     public func replaceSceneLayersWithSH(_ layers: [SplatSceneLayer]) async throws {

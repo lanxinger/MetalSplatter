@@ -553,6 +553,27 @@ final class SplatEditorTests: XCTestCase {
         XCTAssertEqual(restored[3].position.x, 0.75, accuracy: 0.0001)
     }
 
+    func testFastSHEditorCommitRefreshesSplatSHBuffer() async throws {
+        let renderer = try makeFastSHRenderer()
+        let points = makeSHPoints()
+        try await renderer.loadSplatsWithSH(points)
+        let editor = try await SplatEditor(points: points, renderer: renderer)
+
+        await editor.beginPreviewTransform(
+            pivot: SIMD3<Float>(0, 0, -2),
+            scope: .selectionOrVisible
+        )
+        try await editor.updatePreviewTransform(
+            SplatEditTransform(translation: SIMD3<Float>(1, 0, 0))
+        )
+        try await editor.commitPreviewTransform()
+
+        let positions = try fastSHPositions(from: renderer)
+        XCTAssertEqual(positions.count, points.count)
+        XCTAssertEqual(positions[0].x, points[0].position.x + 1, accuracy: 0.0001)
+        XCTAssertEqual(positions[1].x, points[1].position.x + 1, accuracy: 0.0001)
+    }
+
     func testMaskSelectionAndSelectionBounds() async throws {
         let renderer = try makeRenderer()
         let editor = try await SplatEditor(points: makePoints(), renderer: renderer)
@@ -765,6 +786,40 @@ final class SplatEditorTests: XCTestCase {
         }
     }
 
+    private func makeFastSHRenderer() throws -> FastSHSplatRenderer {
+        guard let device else {
+            throw XCTSkip("Metal device unavailable")
+        }
+
+        do {
+            return try FastSHSplatRenderer(
+                device: device,
+                colorFormat: .bgra8Unorm,
+                depthFormat: .depth32Float,
+                sampleCount: 1,
+                maxViewCount: 1,
+                maxSimultaneousRenders: 3
+            )
+        } catch {
+            throw XCTSkip("FastSH renderer unavailable in swift test environment: \(error.localizedDescription)")
+        }
+    }
+
+    private func fastSHPositions(from renderer: FastSHSplatRenderer) throws -> [SIMD3<Float>] {
+        let mirror = Mirror(reflecting: renderer)
+        guard let buffer = mirror.children.first(where: { $0.label == "splatSHBuffer" })?.value as? MetalBuffer<SplatRenderer.SplatSH> else {
+            XCTFail("Missing FastSH splat buffer")
+            return []
+        }
+
+        return buffer.withLockedValues { values, count in
+            (0..<count).map { index in
+                let position = values[index].position
+                return SIMD3<Float>(position.x, position.y, position.z)
+            }
+        }
+    }
+
     private func makeViewport() -> SplatRenderer.ViewportDescriptor {
         SplatRenderer.ViewportDescriptor(
             viewport: MTLViewport(originX: 0, originY: 0, width: 256, height: 256, znear: 0, zfar: 1),
@@ -781,6 +836,19 @@ final class SplatEditorTests: XCTestCase {
             makePoint(position: SIMD3<Float>(0.55, 0.0, -2.0), color: SIMD3<Float>(0.0, 0.0, 1.0)),
             makePoint(position: SIMD3<Float>(0.75, 0.75, -2.0), color: SIMD3<Float>(1.0, 1.0, 0.0))
         ]
+    }
+
+    private func makeSHPoints() -> [SplatScenePoint] {
+        makePoints().enumerated().map { index, point in
+            var point = point
+            point.color = .sphericalHarmonic([
+                SIMD3<Float>(Float(index) * 0.1, 0, 0),
+                SIMD3<Float>(0.01, 0.02, 0.03),
+                SIMD3<Float>(0.04, 0.05, 0.06),
+                SIMD3<Float>(0.07, 0.08, 0.09)
+            ])
+            return point
+        }
     }
 
     private func makeOutlierPoints() -> [SplatScenePoint] {
