@@ -88,6 +88,40 @@ void countingSortHistogram(
     }
 }
 
+[[kernel]]
+void countingSortHistogramNoEdit(
+    device const Splat* splats [[buffer(0)]],
+    device atomic_uint* histogram [[buffer(1)]],
+    constant CountingSortParams& params [[buffer(2)]],
+    constant float3& cameraPosition [[buffer(3)]],
+    constant float3& cameraForward [[buffer(4)]],
+    constant bool& sortByDistance [[buffer(5)]],
+    device ushort* cachedBins [[buffer(6)]],
+    uint tid [[thread_position_in_grid]],
+    uint threadCount [[threads_per_grid]]
+) {
+    for (uint i = tid; i < params.splatCount; i += threadCount) {
+        float3 splatPos = float3(splats[i].position);
+
+        float depth;
+        if (sortByDistance) {
+            float3 delta = splatPos - cameraPosition;
+            depth = length(delta);
+        } else {
+            float3 delta = splatPos - cameraPosition;
+            depth = dot(delta, cameraForward);
+        }
+
+        float normalizedDepth = (depth - params.minDepth) * params.invRange;
+        uint bin = clamp(uint(normalizedDepth), 0u, params.binCount - 1);
+        bin = params.binCount - 1 - bin;
+
+        cachedBins[i] = ushort(bin);
+
+        atomic_fetch_add_explicit(&histogram[bin], 1, memory_order_relaxed);
+    }
+}
+
 // Camera-relative weighted histogram kernel
 // Uses PlayCanvas-style bin weighting for better near-camera precision
 [[kernel]]
@@ -136,6 +170,46 @@ void countingSortHistogramWeighted(
         uint bin = binParams.totalBuckets - 1 - sortKey;
 
         // Cache the bin index for the scatter pass
+        cachedBins[i] = ushort(bin);
+
+        atomic_fetch_add_explicit(&histogram[bin], 1, memory_order_relaxed);
+    }
+}
+
+[[kernel]]
+void countingSortHistogramWeightedNoEdit(
+    device const Splat* splats [[buffer(0)]],
+    device atomic_uint* histogram [[buffer(1)]],
+    constant CountingSortParams& params [[buffer(2)]],
+    constant float3& cameraPosition [[buffer(3)]],
+    constant float3& cameraForward [[buffer(4)]],
+    constant bool& sortByDistance [[buffer(5)]],
+    device ushort* cachedBins [[buffer(6)]],
+    constant CameraRelativeBinParams& binParams [[buffer(7)]],
+    uint tid [[thread_position_in_grid]],
+    uint threadCount [[threads_per_grid]]
+) {
+    for (uint i = tid; i < params.splatCount; i += threadCount) {
+        float3 splatPos = float3(splats[i].position);
+
+        float depth;
+        if (sortByDistance) {
+            float3 delta = splatPos - cameraPosition;
+            depth = length(delta);
+        } else {
+            float3 delta = splatPos - cameraPosition;
+            depth = dot(delta, cameraForward);
+        }
+
+        float normalizedDist = (depth - binParams.minDepth) * binParams.invRange;
+        uint distBin = clamp(uint(normalizedDist), 0u, NUM_DISTANCE_BINS - 1);
+        float binFraction = normalizedDist - float(distBin);
+
+        uint sortKey = binParams.binBase[distBin] + uint(float(binParams.binDivider[distBin]) * binFraction);
+        sortKey = min(sortKey, binParams.totalBuckets - 1);
+
+        uint bin = binParams.totalBuckets - 1 - sortKey;
+
         cachedBins[i] = ushort(bin);
 
         atomic_fetch_add_explicit(&histogram[bin], 1, memory_order_relaxed);
@@ -366,6 +440,23 @@ void countingSortScatter(
         uint bin = uint(cachedBins[i]);
 
         // Atomically get position and increment
+        uint pos = atomic_fetch_add_explicit(&binOffsets[bin], 1, memory_order_relaxed);
+        sortedIndices[pos] = int32_t(i);
+    }
+}
+
+[[kernel]]
+void countingSortScatterNoEdit(
+    device const ushort* cachedBins [[buffer(0)]],
+    device atomic_uint* binOffsets [[buffer(1)]],
+    device int32_t* sortedIndices [[buffer(2)]],
+    constant CountingSortParams& params [[buffer(3)]],
+    uint tid [[thread_position_in_grid]],
+    uint threadCount [[threads_per_grid]]
+) {
+    for (uint i = tid; i < params.splatCount; i += threadCount) {
+        uint bin = uint(cachedBins[i]);
+
         uint pos = atomic_fetch_add_explicit(&binOffsets[bin], 1, memory_order_relaxed);
         sortedIndices[pos] = int32_t(i);
     }

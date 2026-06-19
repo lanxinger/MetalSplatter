@@ -92,9 +92,12 @@ internal class CountingSorter {
 
     // Pipeline states
     private let histogramPipeline: MTLComputePipelineState
+    private let histogramNoEditPipeline: MTLComputePipelineState
     private let histogramWeightedPipeline: MTLComputePipelineState
+    private let histogramWeightedNoEditPipeline: MTLComputePipelineState
     private let prefixSumPipeline: MTLComputePipelineState
     private let scatterPipeline: MTLComputePipelineState
+    private let scatterNoEditPipeline: MTLComputePipelineState
     private let resetHistogramPipeline: MTLComputePipelineState
     private let initBinOffsetsPipeline: MTLComputePipelineState
 
@@ -126,14 +129,23 @@ internal class CountingSorter {
         guard let histogramFunction = library.makeFunction(name: "countingSortHistogram") else {
             throw SplatRendererError.failedToLoadShaderFunction(name: "countingSortHistogram")
         }
+        guard let histogramNoEditFunction = library.makeFunction(name: "countingSortHistogramNoEdit") else {
+            throw SplatRendererError.failedToLoadShaderFunction(name: "countingSortHistogramNoEdit")
+        }
         guard let histogramWeightedFunction = library.makeFunction(name: "countingSortHistogramWeighted") else {
             throw SplatRendererError.failedToLoadShaderFunction(name: "countingSortHistogramWeighted")
+        }
+        guard let histogramWeightedNoEditFunction = library.makeFunction(name: "countingSortHistogramWeightedNoEdit") else {
+            throw SplatRendererError.failedToLoadShaderFunction(name: "countingSortHistogramWeightedNoEdit")
         }
         guard let prefixSumFunction = library.makeFunction(name: "countingSortPrefixSum") else {
             throw SplatRendererError.failedToLoadShaderFunction(name: "countingSortPrefixSum")
         }
         guard let scatterFunction = library.makeFunction(name: "countingSortScatter") else {
             throw SplatRendererError.failedToLoadShaderFunction(name: "countingSortScatter")
+        }
+        guard let scatterNoEditFunction = library.makeFunction(name: "countingSortScatterNoEdit") else {
+            throw SplatRendererError.failedToLoadShaderFunction(name: "countingSortScatterNoEdit")
         }
         guard let resetFunction = library.makeFunction(name: "countingSortResetHistogram") else {
             throw SplatRendererError.failedToLoadShaderFunction(name: "countingSortResetHistogram")
@@ -155,9 +167,12 @@ internal class CountingSorter {
 
         // Create pipeline states
         histogramPipeline = try device.makeComputePipelineState(function: histogramFunction)
+        histogramNoEditPipeline = try device.makeComputePipelineState(function: histogramNoEditFunction)
         histogramWeightedPipeline = try device.makeComputePipelineState(function: histogramWeightedFunction)
+        histogramWeightedNoEditPipeline = try device.makeComputePipelineState(function: histogramWeightedNoEditFunction)
         prefixSumPipeline = try device.makeComputePipelineState(function: prefixSumFunction)
         scatterPipeline = try device.makeComputePipelineState(function: scatterFunction)
+        scatterNoEditPipeline = try device.makeComputePipelineState(function: scatterNoEditFunction)
         resetHistogramPipeline = try device.makeComputePipelineState(function: resetFunction)
         initBinOffsetsPipeline = try device.makeComputePipelineState(function: initOffsetsFunction)
 
@@ -413,6 +428,7 @@ internal class CountingSorter {
         var cameraFwd = cameraForward
         var sortByDist = sortByDistance
         var binCountVar = UInt32(binCount)
+        let shouldFilterEditingState = editStateBuffer != nil
 
         let threadsPerGroup = min(256, histogramPipeline.maxTotalThreadsPerThreadgroup)
         let threadgroups = (splatCount + threadsPerGroup - 1) / threadsPerGroup
@@ -437,7 +453,7 @@ internal class CountingSorter {
             if useCameraRelativeBinning {
                 // Use camera-relative weighted binning for better near-camera precision
                 encoder.label = "CountingSort Histogram (Weighted)"
-                encoder.setComputePipelineState(histogramWeightedPipeline)
+                encoder.setComputePipelineState(shouldFilterEditingState ? histogramWeightedPipeline : histogramWeightedNoEditPipeline)
 
                 var binParams = computeCameraRelativeBinParams(
                     minDepth: bounds.min,
@@ -455,13 +471,13 @@ internal class CountingSorter {
                 encoder.setBytes(&sortByDist, length: MemoryLayout<Bool>.size, index: 5)
                 encoder.setBuffer(cachedBins, offset: 0, index: 6)
                 encoder.setBytes(&binParams, length: MemoryLayout<CameraRelativeBinParams>.size, index: 7)
-                if let editStateBuffer {
+                if shouldFilterEditingState, let editStateBuffer {
                     encoder.setBuffer(editStateBuffer, offset: 0, index: 8)
                 }
             } else {
                 // Standard uniform binning
                 encoder.label = "CountingSort Histogram"
-                encoder.setComputePipelineState(histogramPipeline)
+                encoder.setComputePipelineState(shouldFilterEditingState ? histogramPipeline : histogramNoEditPipeline)
                 encoder.setBuffer(splatBuffer, offset: 0, index: 0)
                 encoder.setBuffer(histogram, offset: 0, index: 1)
                 encoder.setBytes(&params, length: MemoryLayout<CountingSortParams>.size, index: 2)
@@ -469,7 +485,7 @@ internal class CountingSorter {
                 encoder.setBytes(&cameraFwd, length: MemoryLayout<SIMD3<Float>>.size, index: 4)
                 encoder.setBytes(&sortByDist, length: MemoryLayout<Bool>.size, index: 5)
                 encoder.setBuffer(cachedBins, offset: 0, index: 6)
-                if let editStateBuffer {
+                if shouldFilterEditingState, let editStateBuffer {
                     encoder.setBuffer(editStateBuffer, offset: 0, index: 7)
                 }
             }
@@ -570,12 +586,12 @@ internal class CountingSorter {
         // Pass 5: Scatter indices to sorted positions (uses cached bin indices - no depth recomputation!)
         if let encoder = commandBuffer.makeComputeCommandEncoder() {
             encoder.label = "CountingSort Scatter"
-            encoder.setComputePipelineState(scatterPipeline)
+            encoder.setComputePipelineState(shouldFilterEditingState ? scatterPipeline : scatterNoEditPipeline)
             encoder.setBuffer(cachedBins, offset: 0, index: 0)   // Use cached bin indices
             encoder.setBuffer(binOffsets, offset: 0, index: 1)
             encoder.setBuffer(outputBuffer, offset: 0, index: 2)
             encoder.setBytes(&params, length: MemoryLayout<CountingSortParams>.size, index: 3)
-            if let editStateBuffer {
+            if shouldFilterEditingState, let editStateBuffer {
                 encoder.setBuffer(editStateBuffer, offset: 0, index: 4)
             }
 

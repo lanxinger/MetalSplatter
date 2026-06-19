@@ -119,6 +119,86 @@ kernel void frustumCullSplats(uint index [[thread_position_in_grid]],
     }
 }
 
+[[kernel, max_total_threads_per_threadgroup(256)]]
+kernel void frustumCullSplatsNoEdit(uint index [[thread_position_in_grid]],
+                                    uint tid [[thread_index_in_threadgroup]],
+                                    uint tgid [[threadgroup_position_in_grid]],
+                                    constant Splat* inputSplats [[ buffer(0) ]],
+                                    device uint* visibleIndices [[ buffer(1) ]],
+                                    device atomic_uint* visibleCount [[ buffer(2) ]],
+                                    constant FrustumCullData& cullData [[ buffer(3) ]],
+                                    constant uint& splatCount [[ buffer(4) ]]) {
+    threadgroup uint localVisibleIndices[256];
+    threadgroup atomic_uint localVisibleCount;
+
+    if (tid == 0) {
+        atomic_store_explicit(&localVisibleCount, 0, memory_order_relaxed);
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    bool inBounds = index < splatCount;
+    bool visible = false;
+
+    if (inBounds) {
+        visible = true;
+
+        float3 splatPos = float3(inputSplats[index].position);
+
+        if (cullData.maxDistance < 10000.0) {
+            float3 toCam = splatPos - cullData.cameraPosition;
+            float distanceSquared = dot(toCam, toCam);
+            float maxDistanceSquared = cullData.maxDistance * cullData.maxDistance;
+
+            if (distanceSquared > maxDistanceSquared) {
+                visible = false;
+            }
+        }
+
+        if (visible) {
+            float4 clipPos = cullData.viewProjectionMatrix * float4(splatPos, 1.0);
+
+            if (clipPos.w < -0.1) {
+                visible = false;
+            }
+
+            if (visible && clipPos.w > 0.001) {
+                float invW = 1.0 / clipPos.w;
+                float ndcX = clipPos.x * invW;
+                float ndcY = clipPos.y * invW;
+                float margin = 1.5;
+
+                visible = (ndcX >= -1.0 - margin) && (ndcX <= 1.0 + margin) &&
+                          (ndcY >= -1.0 - margin) && (ndcY <= 1.0 + margin);
+            }
+        }
+    }
+
+    if (visible) {
+        uint localIdx = atomic_fetch_add_explicit(&localVisibleCount, 1, memory_order_relaxed);
+        if (localIdx < 256) {
+            localVisibleIndices[localIdx] = index;
+        }
+    }
+
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    threadgroup uint globalStartIdx;
+    if (tid == 0) {
+        uint localCount = min(atomic_load_explicit(&localVisibleCount, memory_order_relaxed), 256u);
+        globalStartIdx = (localCount > 0) ?
+            atomic_fetch_add_explicit(visibleCount, localCount, memory_order_relaxed) : 0;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    uint localCount = min(atomic_load_explicit(&localVisibleCount, memory_order_relaxed), 256u);
+    for (uint i = tid; i < localCount; i += 256) {
+        uint globalIdx = globalStartIdx + i;
+        if (globalIdx < splatCount) {
+            visibleIndices[globalIdx] = localVisibleIndices[i];
+        }
+    }
+}
+
 // =============================================================================
 // Indirect Draw Arguments Generation
 // =============================================================================

@@ -224,6 +224,20 @@ final class SplatEditorTests: XCTestCase {
         XCTAssertNotNil(renderer.visibilityFilteringEditStateBuffer)
     }
 
+    func testRendererLoadsNoEditSortAndCullShaderVariants() throws {
+        let renderer = try makeRenderer()
+        let requiredFunctions = [
+            "countingSortHistogramNoEdit",
+            "countingSortHistogramWeightedNoEdit",
+            "countingSortScatterNoEdit",
+            "frustumCullSplatsNoEdit"
+        ]
+
+        for functionName in requiredFunctions {
+            XCTAssertNotNil(renderer.library.makeFunction(name: functionName), "Missing \(functionName)")
+        }
+    }
+
     func testRendererIncrementalEditStateTrackingUpdatesRenderableCount() throws {
         let renderer = try makeRenderer()
         try renderer.add(makePoints().prefix(3).map { $0 })

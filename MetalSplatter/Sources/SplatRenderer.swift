@@ -216,6 +216,7 @@ public class SplatRenderer: @unchecked Sendable {
     private var computeDepthsPipelineState: MTLComputePipelineState?
     private var computeDistancesPipelineState: MTLComputePipelineState?
     private var frustumCullPipelineState: MTLComputePipelineState?
+    private var frustumCullNoEditPipelineState: MTLComputePipelineState?
     
     // Frustum culling buffers and state
     private var visibleIndicesBuffer: MTLBuffer?
@@ -1206,6 +1207,9 @@ public class SplatRenderer: @unchecked Sendable {
         do {
             if let frustumFunction = library.makeFunction(name: "frustumCullSplats") {
                 frustumCullPipelineState = try device.makeComputePipelineState(function: frustumFunction)
+            }
+            if let frustumNoEditFunction = library.makeFunction(name: "frustumCullSplatsNoEdit") {
+                frustumCullNoEditPipelineState = try device.makeComputePipelineState(function: frustumNoEditFunction)
             }
             if let generateArgsFunction = library.makeFunction(name: "generateIndirectDrawArguments") {
                 generateIndirectArgsPipelineState = try device.makeComputePipelineState(function: generateArgsFunction)
@@ -2830,8 +2834,10 @@ public class SplatRenderer: @unchecked Sendable {
     /// Encode frustum culling compute pass into command buffer
     /// Includes: reset count → cull splats → generate indirect draw args
     private func encodeFrustumCulling(viewport: ViewportDescriptor, to commandBuffer: MTLCommandBuffer) {
+        let editStateBuffer = visibilityFilteringEditStateBuffer
+        let cullPipeline = editStateBuffer == nil ? frustumCullNoEditPipelineState : frustumCullPipelineState
         guard frustumCullingEnabled,
-              let cullPipeline = frustumCullPipelineState,
+              let cullPipeline,
               let resetPipeline = resetVisibleCountPipelineState,
               let generateArgsPipeline = generateIndirectArgsPipelineState,
               let cullDataBuffer = frustumCullDataBuffer,
@@ -2891,12 +2897,13 @@ public class SplatRenderer: @unchecked Sendable {
         cullEncoder.setBuffer(indicesBuffer, offset: 0, index: 1)
         cullEncoder.setBuffer(countBuffer, offset: 0, index: 2)
         cullEncoder.setBuffer(cullDataBuffer, offset: 0, index: 3)
-        if let editStateBuffer = visibilityFilteringEditStateBuffer {
-            cullEncoder.setBuffer(editStateBuffer, offset: 0, index: 4)
-        }
-        
         var count = UInt32(splatCount)
-        cullEncoder.setBytes(&count, length: MemoryLayout<UInt32>.stride, index: 5)
+        if let editStateBuffer {
+            cullEncoder.setBuffer(editStateBuffer, offset: 0, index: 4)
+            cullEncoder.setBytes(&count, length: MemoryLayout<UInt32>.stride, index: 5)
+        } else {
+            cullEncoder.setBytes(&count, length: MemoryLayout<UInt32>.stride, index: 4)
+        }
         
         let threadsPerThreadgroup = MTLSize(width: 256, height: 1, depth: 1)
         let threadgroups = MTLSize(width: (splatCount + 255) / 256, height: 1, depth: 1)
