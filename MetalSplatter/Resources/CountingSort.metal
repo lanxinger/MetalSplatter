@@ -50,7 +50,7 @@ void countingSortHistogram(
     constant float3& cameraForward [[buffer(4)]],
     constant bool& sortByDistance [[buffer(5)]],
     device ushort* cachedBins [[buffer(6)]],  // NEW: Cache bin indices (ushort saves memory vs uint)
-    const device uint *editStates [[buffer(7)]],
+    const device uchar *editStates [[buffer(7)]],
     uint tid [[thread_position_in_grid]],
     uint threadCount [[threads_per_grid]]
 ) {
@@ -134,7 +134,7 @@ void countingSortHistogramWeighted(
     constant bool& sortByDistance [[buffer(5)]],
     device ushort* cachedBins [[buffer(6)]],
     constant CameraRelativeBinParams& binParams [[buffer(7)]],
-    const device uint *editStates [[buffer(8)]],
+    const device uchar *editStates [[buffer(8)]],
     uint tid [[thread_position_in_grid]],
     uint threadCount [[threads_per_grid]]
 ) {
@@ -425,7 +425,7 @@ void countingSortScatter(
     device atomic_uint* binOffsets [[buffer(1)]],   // Current write position per bin (initialized from prefix sum)
     device int32_t* sortedIndices [[buffer(2)]],
     constant CountingSortParams& params [[buffer(3)]],
-    const device uint *editStates [[buffer(4)]],
+    const device uchar *editStates [[buffer(4)]],
     uint tid [[thread_position_in_grid]],
     uint threadCount [[threads_per_grid]]
 ) {

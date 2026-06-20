@@ -46,7 +46,7 @@ typedef struct
     float distanceSquared;
 } NearestSelectionCandidate;
 
-inline float4x4 editorTransformForIndex(const device uint *transformIndices,
+inline float4x4 editorTransformForIndex(const device ushort *transformIndices,
                                         const device float4x4 *transformPalette,
                                         uint index) {
     uint transformIndex = transformIndices[index];
@@ -108,7 +108,7 @@ inline bool maskContainsProjectedCircle(texture2d<float, access::read> maskTextu
 }
 
 inline void editableWorldState(constant Splat &splat,
-                               const device uint *transformIndices,
+                               const device ushort *transformIndices,
                                const device float4x4 *transformPalette,
                                uint index,
                                thread float3 &worldPosition,
@@ -194,8 +194,8 @@ inline bool projectEditableSplat(float3 worldPosition,
 }
 
 kernel void selectEditableSplats(constant Splat *splats [[buffer(0)]],
-                                 const device uint *states [[buffer(1)]],
-                                 const device uint *transformIndices [[buffer(2)]],
+                                 const device uchar *states [[buffer(1)]],
+                                 const device ushort *transformIndices [[buffer(2)]],
                                  const device float4x4 *transformPalette [[buffer(3)]],
                                  device uint *outputIndices [[buffer(4)]],
                                  device atomic_uint *outputCount [[buffer(5)]],
@@ -273,8 +273,8 @@ kernel void selectEditableSplats(constant Splat *splats [[buffer(0)]],
 
 [[kernel, max_total_threads_per_threadgroup(256)]]
 kernel void pickNearestEditableSplat(constant Splat *splats [[buffer(0)]],
-                                     const device uint *states [[buffer(1)]],
-                                     const device uint *transformIndices [[buffer(2)]],
+                                     const device uchar *states [[buffer(1)]],
+                                     const device ushort *transformIndices [[buffer(2)]],
                                      const device float4x4 *transformPalette [[buffer(3)]],
                                      device NearestSelectionCandidate *candidates [[buffer(4)]],
                                      constant SelectionQueryParameters &params [[buffer(5)]],

@@ -229,6 +229,7 @@ public class SplatRenderer: @unchecked Sendable {
         didSet {
             if frustumCullingEnabled != oldValue {
                 frustumCullDirtyDueToData = true
+                invalidateRender()
             }
         }
     }
@@ -258,7 +259,24 @@ public class SplatRenderer: @unchecked Sendable {
     private var precomputedSplatBuffer: MTLBuffer?
     internal var precomputedDataDirty = true
     private var lastPrecomputeViewMatrix: simd_float4x4?
-    public var batchPrecomputeEnabled = false  // Enable for large scenes
+    public var batchPrecomputeEnabled = false {  // Enable for large scenes
+        didSet {
+            if batchPrecomputeEnabled != oldValue {
+                invalidatePrecomputedData()
+                invalidateRender()
+            }
+        }
+    }
+
+    public private(set) var renderRevision: UInt64 = 0
+    public private(set) var lastRenderedRevision: UInt64 = 0
+    public var needsRender: Bool {
+        renderRevision != lastRenderedRevision || isSorting
+    }
+
+    public func invalidateRender() {
+        renderRevision &+= 1
+    }
     
     // PrecomputedSplat structure size (must match Metal shader with proper alignment)
     // Metal alignment: float4 (16) + float3 (12+4 padding) + float2 (8) + float2 (8)
@@ -381,6 +399,9 @@ public class SplatRenderer: @unchecked Sendable {
         var z: Float16
     }
 
+    typealias EditStateStorage = UInt8
+    typealias TransformIndexStorage = UInt16
+
     // Keep in sync with Shaders.metal : Splat
     struct Splat {
         var position: MTLPackedFloat3
@@ -412,7 +433,13 @@ public class SplatRenderer: @unchecked Sendable {
     /**
      High-quality depth takes longer, but results in a continuous, more-representative depth buffer result, which is useful for reducing artifacts during Vision Pro's frame reprojection.
      */
-    public var highQualityDepth: Bool = true
+    public var highQualityDepth: Bool = true {
+        didSet {
+            if highQualityDepth != oldValue {
+                invalidateRender()
+            }
+        }
+    }
 
     private var writeDepth: Bool {
         depthFormat != .invalid
@@ -435,7 +462,11 @@ public class SplatRenderer: @unchecked Sendable {
 #endif
     }
 
-    public var clearColor = MTLClearColor(red: 0.0, green: 0.0, blue: 0.0, alpha: 0.0)
+    public var clearColor = MTLClearColor(red: 0.0, green: 0.0, blue: 0.0, alpha: 0.0) {
+        didSet {
+            invalidateRender()
+        }
+    }
 
     public var onSortStart: (() -> Void)?
     public var onSortComplete: ((TimeInterval) -> Void)?
@@ -443,11 +474,23 @@ public class SplatRenderer: @unchecked Sendable {
     public var onRenderComplete: ((TimeInterval) -> Void)?
     public var onFrameReady: ((FrameStatistics) -> Void)?
     
-    public var debugOptions: DebugOptions = []
+    public var debugOptions: DebugOptions = [] {
+        didSet {
+            if debugOptions != oldValue {
+                invalidateRender()
+            }
+        }
+    }
     public var lodThresholds: SIMD3<Float> = {
         let thresholds = Constants.lodDistanceThresholds
         return SIMD3<Float>(thresholds[0], thresholds[1], thresholds[2])
-    }()
+    }() {
+        didSet {
+            if lodThresholds != oldValue {
+                invalidateRender()
+            }
+        }
+    }
 
     /// Rendering behavior for Brush-style covariance filtering.
     /// Updating the mode resets `covarianceBlur` to the mode default.
@@ -455,6 +498,7 @@ public class SplatRenderer: @unchecked Sendable {
         didSet {
             covarianceBlur = renderMode.defaultCovarianceBlur
             invalidatePrecomputedData()
+            invalidateRender()
         }
     }
 
@@ -464,6 +508,7 @@ public class SplatRenderer: @unchecked Sendable {
     public var covarianceBlur: Float = SplatRenderMode.standard.defaultCovarianceBlur {
         didSet {
             invalidatePrecomputedData()
+            invalidateRender()
         }
     }
 
@@ -485,6 +530,10 @@ public class SplatRenderer: @unchecked Sendable {
     /// Note: This only affects newly added splats. Existing splats are not reordered.
     /// For best results, enable this before loading splat data.
     public var mortonOrderingEnabled: Bool = true
+
+    /// Set before loading sources that are already spatially ordered or whose source
+    /// order should be preserved, such as animation frames.
+    public var preserveSourceOrderOnAdd: Bool = false
 
     /// Threshold for using parallel Morton code computation.
     /// Scenes with more splats than this will use parallel processing.
@@ -512,6 +561,7 @@ public class SplatRenderer: @unchecked Sendable {
             if useDitheredTransparency != oldValue {
                 // Invalidate pipeline states to rebuild with correct settings
                 invalidatePipelineStates()
+                invalidateRender()
             }
         }
     }
@@ -536,6 +586,7 @@ public class SplatRenderer: @unchecked Sendable {
             if use2DGSMode != oldValue {
                 // Invalidate pipeline states to rebuild with correct settings
                 invalidatePipelineStates()
+                invalidateRender()
             }
         }
     }
@@ -734,7 +785,13 @@ public class SplatRenderer: @unchecked Sendable {
     // Mesh Shader Pipeline (Metal 3+, Apple Silicon)
     private var meshShaderPipelineState: MTLRenderPipelineState?
     private var meshShaderDepthState: MTLDepthStencilState?
-    public var meshShaderEnabled = false
+    public var meshShaderEnabled = false {
+        didSet {
+            if meshShaderEnabled != oldValue {
+                invalidateRender()
+            }
+        }
+    }
     private var meshShadersSupported = false
     
     /// Returns true if mesh shaders are supported on this device
@@ -1945,7 +2002,7 @@ public class SplatRenderer: @unchecked Sendable {
 
         // Apply Morton ordering if enabled (improves GPU cache coherency)
         let orderedPoints: [SplatScenePoint]
-        if mortonOrderingEnabled && points.count > 1 {
+        if mortonOrderingEnabled && !preserveSourceOrderOnAdd && points.count > 1 {
             let startTime = CFAbsoluteTimeGetCurrent()
             if points.count > mortonParallelThreshold {
                 orderedPoints = MortonOrder.reorderParallel(points)
@@ -2014,7 +2071,7 @@ public class SplatRenderer: @unchecked Sendable {
     }
 
     internal func ensureEditingResources(pointCount: Int) throws {
-        let stateLength = max(pointCount, 1) * MemoryLayout<UInt32>.stride
+        let stateLength = max(pointCount, 1) * MemoryLayout<EditStateStorage>.stride
         if editStateBuffer == nil || editStateBuffer?.length != stateLength {
             guard let buffer = device.makeBuffer(length: stateLength, options: .storageModeShared) else {
                 throw SplatRendererError.failedToCreateBuffer(length: stateLength)
@@ -2024,12 +2081,13 @@ public class SplatRenderer: @unchecked Sendable {
             editStateBuffer = buffer
         }
 
-        if editTransformIndexBuffer == nil || editTransformIndexBuffer?.length != stateLength {
-            guard let buffer = device.makeBuffer(length: stateLength, options: .storageModeShared) else {
-                throw SplatRendererError.failedToCreateBuffer(length: stateLength)
+        let transformIndexLength = max(pointCount, 1) * MemoryLayout<TransformIndexStorage>.stride
+        if editTransformIndexBuffer == nil || editTransformIndexBuffer?.length != transformIndexLength {
+            guard let buffer = device.makeBuffer(length: transformIndexLength, options: .storageModeShared) else {
+                throw SplatRendererError.failedToCreateBuffer(length: transformIndexLength)
             }
             buffer.label = "Editable Transform Index Buffer"
-            memset(buffer.contents(), 0, stateLength)
+            memset(buffer.contents(), 0, transformIndexLength)
             editTransformIndexBuffer = buffer
         }
 
@@ -2059,27 +2117,30 @@ public class SplatRenderer: @unchecked Sendable {
         }
 
         let bufferCount = max(pointCount, 1)
-        let statePointer = editStateBuffer.contents().bindMemory(to: UInt32.self, capacity: bufferCount)
+        let statePointer = editStateBuffer.contents().bindMemory(to: EditStateStorage.self, capacity: bufferCount)
         memset(statePointer, 0, stateLength(for: bufferCount))
         nonZeroEditStateCount = 0
         selectedEditStateCount = 0
         hiddenOrDeletedEditStateCount = 0
         for (index, value) in rawStates.enumerated() {
-            statePointer[index] = value
-            updateEditStateCounters(from: 0, to: value)
+            let storedValue = EditStateStorage(clamping: value)
+            statePointer[index] = storedValue
+            updateEditStateCounters(from: 0, to: UInt32(storedValue))
         }
 
-        let transformIndexPointer = editTransformIndexBuffer.contents().bindMemory(to: UInt32.self, capacity: bufferCount)
-        memset(transformIndexPointer, 0, stateLength(for: bufferCount))
+        let transformIndexPointer = editTransformIndexBuffer.contents().bindMemory(to: TransformIndexStorage.self, capacity: bufferCount)
+        memset(transformIndexPointer, 0, transformIndexLength(for: bufferCount))
         activeTransformIndexCount = 0
         for (index, value) in transformIndices.prefix(pointCount).enumerated() {
-            transformIndexPointer[index] = value
-            updateTransformIndexCounters(from: 0, to: value)
+            let storedValue = TransformIndexStorage(clamping: value)
+            transformIndexPointer[index] = storedValue
+            updateTransformIndexCounters(from: 0, to: UInt32(storedValue))
         }
 
         let palettePointer = editTransformPaletteBuffer.contents().bindMemory(to: matrix_float4x4.self, capacity: max(transformPalette.count, 2))
         writeTransformPalette(transformPalette, to: palettePointer)
         refreshEditingEnabled()
+        invalidateRender()
     }
 
     internal func updateEditingState(_ rawStates: [UInt32],
@@ -2094,16 +2155,23 @@ public class SplatRenderer: @unchecked Sendable {
         guard let editStateBuffer else { return }
 
         let previousRenderableCount = renderableSplatCountForCurrentEditState
-        let pointer = editStateBuffer.contents().bindMemory(to: UInt32.self, capacity: max(splatCount, 1))
+        let pointer = editStateBuffer.contents().bindMemory(to: EditStateStorage.self, capacity: max(splatCount, 1))
+        var didChange = false
         var visibilityChanged = false
         for (index, value) in zip(indices, values) where index >= 0 && index < splatCount {
-            let oldValue = pointer[index]
-            guard oldValue != value else { continue }
-            visibilityChanged = visibilityChanged || isHiddenOrDeleted(oldValue) != isHiddenOrDeleted(value)
-            updateEditStateCounters(from: oldValue, to: value)
-            pointer[index] = value
+            let oldValue = UInt32(pointer[index])
+            let storedValue = EditStateStorage(clamping: value)
+            let newValue = UInt32(storedValue)
+            guard oldValue != newValue else { continue }
+            didChange = true
+            visibilityChanged = visibilityChanged || isHiddenOrDeleted(oldValue) != isHiddenOrDeleted(newValue)
+            updateEditStateCounters(from: oldValue, to: newValue)
+            pointer[index] = storedValue
         }
         refreshEditingEnabled()
+        if didChange {
+            invalidateRender()
+        }
         if visibilityChanged {
             let currentRenderableCount = renderableSplatCountForCurrentEditState
             if currentRenderableCount < previousRenderableCount,
@@ -2120,14 +2188,21 @@ public class SplatRenderer: @unchecked Sendable {
         try ensureEditingResources(pointCount: splatCount)
         guard let editTransformIndexBuffer else { return }
 
-        let pointer = editTransformIndexBuffer.contents().bindMemory(to: UInt32.self, capacity: max(splatCount, 1))
+        let pointer = editTransformIndexBuffer.contents().bindMemory(to: TransformIndexStorage.self, capacity: max(splatCount, 1))
+        var didChange = false
         for (index, value) in zip(indices, values) where index >= 0 && index < splatCount {
-            let oldValue = pointer[index]
-            guard oldValue != value else { continue }
-            updateTransformIndexCounters(from: oldValue, to: value)
-            pointer[index] = value
+            let oldValue = UInt32(pointer[index])
+            let storedValue = TransformIndexStorage(clamping: value)
+            let newValue = UInt32(storedValue)
+            guard oldValue != newValue else { continue }
+            didChange = true
+            updateTransformIndexCounters(from: oldValue, to: newValue)
+            pointer[index] = storedValue
         }
         refreshEditingEnabled()
+        if didChange {
+            invalidateRender()
+        }
     }
 
     internal func updateTransformPalette(_ transformPalette: [matrix_float4x4]) throws {
@@ -2135,6 +2210,7 @@ public class SplatRenderer: @unchecked Sendable {
         guard let editTransformPaletteBuffer else { return }
         let palettePointer = editTransformPaletteBuffer.contents().bindMemory(to: matrix_float4x4.self, capacity: max(transformPalette.count, 2))
         writeTransformPalette(transformPalette, to: palettePointer)
+        invalidateRender()
     }
 
     internal func setPreviewTransformActive(_ active: Bool) throws {
@@ -2150,6 +2226,7 @@ public class SplatRenderer: @unchecked Sendable {
             batchPrecomputeEnabled = savedOptimizedEditSettings.batchPrecomputeEnabled
             self.savedOptimizedEditSettings = nil
         }
+        invalidateRender()
     }
 
     internal func updateSplats(_ points: [SplatScenePoint], at indices: [Int]) throws {
@@ -2245,16 +2322,22 @@ public class SplatRenderer: @unchecked Sendable {
     }
 
     private func stateLength(for pointCount: Int) -> Int {
-        max(pointCount, 1) * MemoryLayout<UInt32>.stride
+        max(pointCount, 1) * MemoryLayout<EditStateStorage>.stride
+    }
+
+    private func transformIndexLength(for pointCount: Int) -> Int {
+        max(pointCount, 1) * MemoryLayout<TransformIndexStorage>.stride
     }
 
     private func markRenderableSetDirty() {
         frustumCullDirtyDueToData = true
         markSortDataDirty()
+        invalidateRender()
     }
 
     private func markRenderableSetReducedWithoutResort() {
         frustumCullDirtyDueToData = true
+        invalidateRender()
     }
 
     @discardableResult
@@ -2264,7 +2347,7 @@ public class SplatRenderer: @unchecked Sendable {
             return false
         }
 
-        let statePointer = editStateBuffer.contents().bindMemory(to: UInt32.self, capacity: max(splatCount, 1))
+        let statePointer = editStateBuffer.contents().bindMemory(to: EditStateStorage.self, capacity: max(splatCount, 1))
         var didCompact = false
         var compactedCount: Int?
 
@@ -2275,7 +2358,7 @@ public class SplatRenderer: @unchecked Sendable {
             for readIndex in 0..<count {
                 let splatIndex = Int(values[readIndex])
                 guard splatIndex >= 0 && splatIndex < splatCount else { continue }
-                guard !isHiddenOrDeleted(statePointer[splatIndex]) else {
+                guard !isHiddenOrDeleted(UInt32(statePointer[splatIndex])) else {
                     didCompact = true
                     continue
                 }
@@ -2338,6 +2421,7 @@ public class SplatRenderer: @unchecked Sendable {
         // Mark only colors as dirty, NOT geometry
         colorsDirty = true
         colorRevision &+= 1
+        invalidateRender()
 
         // Do NOT set these - they would trigger unnecessary work:
         // sortDirtyDueToData = true  // Skip - positions unchanged
@@ -2367,6 +2451,7 @@ public class SplatRenderer: @unchecked Sendable {
 
         colorsDirty = true
         colorRevision &+= 1
+        invalidateRender()
     }
 
     /// Updates a single splat's color without triggering re-sorting.
@@ -2387,6 +2472,7 @@ public class SplatRenderer: @unchecked Sendable {
 
         colorsDirty = true
         colorRevision &+= 1
+        invalidateRender()
     }
 
     /// Applies any pending color updates to the splat buffer in FIFO order.
@@ -2454,6 +2540,7 @@ public class SplatRenderer: @unchecked Sendable {
         boundsDirty = true
         animationDirty = true
         invalidatePrecomputedData()
+        invalidateRender()
     }
 
     internal func markAnimationDependentDataDirty() {
@@ -2461,6 +2548,7 @@ public class SplatRenderer: @unchecked Sendable {
         markSortDataDirty()
         boundsDirty = true
         invalidatePrecomputedData()
+        invalidateRender()
     }
 
     internal func acquireAnimatedSplatBuffer(minimumCapacity: Int) throws -> MetalBuffer<Splat> {
@@ -2995,6 +3083,7 @@ public class SplatRenderer: @unchecked Sendable {
         
         isInteracting = true
         interactionEndTime = nil
+        invalidateRender()
         
         // Store current quality settings
         qualitySortPositionEpsilon = sortPositionEpsilon
@@ -3025,6 +3114,7 @@ public class SplatRenderer: @unchecked Sendable {
         isInteracting = false
         let endTime = CFAbsoluteTimeGetCurrent()
         interactionEndTime = endTime
+        invalidateRender()
         
         // Restore quality settings
         sortPositionEpsilon = qualitySortPositionEpsilon
@@ -3350,6 +3440,10 @@ public class SplatRenderer: @unchecked Sendable {
         onRenderStart?()
         frameStartTime = CFAbsoluteTimeGetCurrent()
         frameBufferUploads = 0
+        let renderedRevision = renderRevision
+        defer {
+            lastRenderedRevision = renderedRevision
+        }
 
         // Apply any pending color updates before GPU work begins.
         // This prevents CPU/GPU data races on the shared splatBuffer.
@@ -3805,6 +3899,7 @@ public class SplatRenderer: @unchecked Sendable {
             sortViewMatrix: sortViewMatrix,
             dataDirtySnapshot: dataDirtySnapshot
         )
+        invalidateRender()
 
         let sample = performanceContext.makeSample(
             wallTime: elapsed,

@@ -17,7 +17,7 @@ kernel void frustumCullSplats(uint index [[thread_position_in_grid]],
                              device uint* visibleIndices [[ buffer(1) ]],
                              device atomic_uint* visibleCount [[ buffer(2) ]],
                              constant FrustumCullData& cullData [[ buffer(3) ]],
-                             const device uint *editStates [[ buffer(4) ]],
+                             const device uchar *editStates [[ buffer(4) ]],
                              constant uint& splatCount [[ buffer(5) ]]) {
     // Note: visibleIndices buffer must be at least splatCount elements (all could be visible)
 

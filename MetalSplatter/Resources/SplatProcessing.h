@@ -24,7 +24,7 @@ FragmentIn splatVertex(Splat splat,
                        uint relativeVertexIndex,
                        uint splatID,
                        uint editState,
-                       const device uint *transformIndices,
+                       const device ushort *transformIndices,
                        const device float4x4 *transformPalette);
 
 FragmentIn selectedOutlineVertex(Splat splat,
@@ -32,7 +32,7 @@ FragmentIn selectedOutlineVertex(Splat splat,
                                  uint relativeVertexIndex,
                                  uint splatID,
                                  uint editState,
-                                 const device uint *transformIndices,
+                                 const device ushort *transformIndices,
                                  const device float4x4 *transformPalette);
 
 FragmentIn splatVertex(Splat splat,

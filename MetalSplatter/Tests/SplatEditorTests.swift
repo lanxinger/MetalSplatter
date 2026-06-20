@@ -191,9 +191,57 @@ final class SplatEditorTests: XCTestCase {
             return
         }
 
-        let values = buffer.contents().bindMemory(to: UInt32.self, capacity: 2)
+        let values = buffer.contents().bindMemory(to: UInt16.self, capacity: 2)
         XCTAssertEqual(values[0], 7)
         XCTAssertEqual(values[1], 9)
+    }
+
+    func testRendererEditingBuffersUsePackedStorage() throws {
+        let renderer = try makeRenderer()
+
+        try renderer.replaceEditingState(
+            [EditableSplatState.selected.rawValue, EditableSplatState.hidden.rawValue],
+            transformIndices: [1, 2],
+            transformPalette: [matrix_identity_float4x4]
+        )
+
+        let stateBuffer = try XCTUnwrap(renderer.editStateBuffer)
+        let transformIndexBuffer = try XCTUnwrap(renderer.editTransformIndexBuffer)
+
+        XCTAssertEqual(stateBuffer.length, 2 * MemoryLayout<UInt8>.stride)
+        XCTAssertEqual(transformIndexBuffer.length, 2 * MemoryLayout<UInt16>.stride)
+
+        let states = stateBuffer.contents().bindMemory(to: UInt8.self, capacity: 2)
+        let transformIndices = transformIndexBuffer.contents().bindMemory(to: UInt16.self, capacity: 2)
+        XCTAssertEqual(states[0], UInt8(EditableSplatState.selected.rawValue))
+        XCTAssertEqual(states[1], UInt8(EditableSplatState.hidden.rawValue))
+        XCTAssertEqual(transformIndices[0], 1)
+        XCTAssertEqual(transformIndices[1], 2)
+    }
+
+    func testRendererCanPreserveSourceOrderWhenAddingSplats() throws {
+        let renderer = try makeRenderer()
+        renderer.preserveSourceOrderOnAdd = true
+        let points = [
+            makePoint(position: SIMD3<Float>(10.0, 0.0, 0.0), color: SIMD3<Float>(1.0, 0.0, 0.0)),
+            makePoint(position: SIMD3<Float>(-10.0, 0.0, 0.0), color: SIMD3<Float>(0.0, 1.0, 0.0)),
+            makePoint(position: SIMD3<Float>(0.0, 10.0, 0.0), color: SIMD3<Float>(0.0, 0.0, 1.0)),
+            makePoint(position: SIMD3<Float>(0.0, -10.0, 0.0), color: SIMD3<Float>(1.0, 1.0, 0.0))
+        ]
+
+        try renderer.add(points)
+
+        XCTAssertEqual(renderer.sourceScenePoints.map(\.position), points.map(\.position))
+    }
+
+    func testRendererManualRenderInvalidationSetsNeedsRender() throws {
+        let renderer = try makeRenderer()
+
+        XCTAssertFalse(renderer.needsRender)
+
+        renderer.invalidateRender()
+
+        XCTAssertTrue(renderer.needsRender)
     }
 
     func testRendererAddDoesNotAllocateEditingResourcesUntilEditingBegins() throws {

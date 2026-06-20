@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "skills": {
+    "metal-gpu": {
+      "source": "ios-agent/iosagent.dev",
+      "sourceType": "github",
+      "skillPath": "metal/SKILL.md",
+      "computedHash": "3ee626b4e524e50a114191c760b651968824e9aa2d3c83a690dca2b483dd5358"
+    },
+    "metal-shader-expert": {
+      "source": "erichowens/some_claude_skills",
+      "sourceType": "github",
+      "skillPath": ".claude/skills/metal-shader-expert/SKILL.md",
+      "computedHash": "14dfd898f5781126002398efabbe7a5650ae2e12da4a7f8b9f286899e6a5e891"
+    }
+  }
+}

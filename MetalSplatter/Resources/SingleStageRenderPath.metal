@@ -8,8 +8,8 @@ inline FragmentIn singleStageSplatVertex(uint vertexID,
                                          constant Splat* splatArray,
                                          constant UniformsArray &uniformsArray,
                                          constant int32_t* sortedIndices,
-                                         const device uint *editStates,
-                                         const device uint *transformIndices,
+                                         const device uchar *editStates,
+                                         const device ushort *transformIndices,
                                          const device float4x4 *transformPalette) {
     Uniforms uniforms = uniformsArray.uniforms[min(int(amplificationID), kMaxViewCount - 1)];
 
@@ -73,8 +73,8 @@ vertex FragmentIn singleStageSplatVertexShaderEditing(uint vertexID [[vertex_id]
                                                       constant Splat* splatArray [[ buffer(BufferIndexSplat) ]],
                                                       constant UniformsArray & uniformsArray [[ buffer(BufferIndexUniforms) ]],
                                                       constant int32_t* sortedIndices [[ buffer(BufferIndexSortedIndices) ]],
-                                                      const device uint *editStates [[ buffer(BufferIndexEditState) ]],
-                                                      const device uint *transformIndices [[ buffer(BufferIndexTransformIndex) ]],
+                                                      const device uchar *editStates [[ buffer(BufferIndexEditState) ]],
+                                                      const device ushort *transformIndices [[ buffer(BufferIndexTransformIndex) ]],
                                                       const device float4x4 *transformPalette [[ buffer(BufferIndexTransformPalette) ]]) {
     return singleStageSplatVertex(vertexID,
                                   instanceID,
@@ -104,8 +104,8 @@ vertex FragmentIn selectedOutlineVertexShader(uint vertexID [[vertex_id]],
                                               constant Splat* splatArray [[ buffer(BufferIndexSplat) ]],
                                               constant UniformsArray & uniformsArray [[ buffer(BufferIndexUniforms) ]],
                                               constant int32_t* sortedIndices [[ buffer(BufferIndexSortedIndices) ]],
-                                              const device uint *editStates [[ buffer(BufferIndexEditState) ]],
-                                              const device uint *transformIndices [[ buffer(BufferIndexTransformIndex) ]],
+                                              const device uchar *editStates [[ buffer(BufferIndexEditState) ]],
+                                              const device ushort *transformIndices [[ buffer(BufferIndexTransformIndex) ]],
                                               const device float4x4 *transformPalette [[ buffer(BufferIndexTransformPalette) ]]) {
     Uniforms uniforms = uniformsArray.uniforms[min(int(amplificationID), kMaxViewCount - 1)];
 
