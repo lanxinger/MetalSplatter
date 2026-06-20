@@ -232,6 +232,7 @@ public class SplatRenderer: @unchecked Sendable {
             }
         }
     }
+    public var cameraDrivenFrustumCullingEnabled: Bool = true
     private var lastVisibleCount: Int = 0
     private var lastFrustumCullCameraPosition: SIMD3<Float>?
     private var lastFrustumCullCameraForward: SIMD3<Float>?
@@ -542,6 +543,7 @@ public class SplatRenderer: @unchecked Sendable {
     public var sortPositionEpsilon: Float = 0.01
     public var sortDirectionEpsilon: Float = 0.0001  // ~0.5-1° rotation (reduced from 0.001 to fix flickering during rotation)
     public var minimumSortInterval: TimeInterval = 0
+    public var cameraDrivenSortingEnabled: Bool = true
     public var frustumCullPositionEpsilon: Float = 0.01
     public var frustumCullDirectionEpsilon: Float = 0.0001
     public var minimumFrustumCullInterval: TimeInterval = 0
@@ -556,6 +558,7 @@ public class SplatRenderer: @unchecked Sendable {
 
     /// Minimum interval between SH updates (seconds). Set to 0 for no limit.
     public var minimumSHUpdateInterval: TimeInterval = 0
+    public var cameraDrivenSHUpdatesEnabled: Bool = true
 
     /// Last camera direction used for SH evaluation (for threshold comparison)
     internal var lastSHCameraDirection: SIMD3<Float>?
@@ -603,7 +606,8 @@ public class SplatRenderer: @unchecked Sendable {
     /// Computed adaptive sort interval based on recent frame performance.
     /// Respects interaction mode (minimumSortInterval is already adjusted there).
     private var effectiveMinimumSortInterval: TimeInterval {
-        var interval = minimumSortInterval
+        let configuredMinimumInterval = minimumSortInterval
+        var interval = configuredMinimumInterval
 
         guard adaptiveSortFrequencyEnabled else { return interval }
 
@@ -614,7 +618,7 @@ public class SplatRenderer: @unchecked Sendable {
             interval = max(interval, targetFrameTime * 2.0)
         } else if averageFrameTime < targetFrameTime * 0.8 {
             // Under budget by 20%+ - can sort more often
-            interval = interval * 0.5
+            interval = max(configuredMinimumInterval, interval * 0.5)
         }
         return interval
     }
@@ -766,6 +770,7 @@ public class SplatRenderer: @unchecked Sendable {
     private var lastSortedViewMatrix: simd_float4x4?
     private var lastSortedCameraPosition: SIMD3<Float>?
     private var lastSortedCameraForward: SIMD3<Float>?
+    private var lastSortStartTime: CFAbsoluteTime = 0
     private var sortDirtyDueToData = true
     private var sortDataRevision: UInt64 = 0
 
@@ -964,7 +969,7 @@ public class SplatRenderer: @unchecked Sendable {
 
     /// Atomically try to start a sort operation.
     /// Returns true if sort was started, false if already sorting or too many jobs in flight.
-    private func tryStartSort() -> Bool {
+    private func tryStartSort(minimumStartInterval: TimeInterval = 0) -> Bool {
         os_unfair_lock_lock(&sortStateLock)
         defer { os_unfair_lock_unlock(&sortStateLock) }
 
@@ -972,9 +977,14 @@ public class SplatRenderer: @unchecked Sendable {
         guard !sorting && sortJobsInFlight < maxConcurrentSorts else {
             return false
         }
+        let now = CFAbsoluteTimeGetCurrent()
+        if minimumStartInterval > 0, now - lastSortStartTime < minimumStartInterval {
+            return false
+        }
 
         // Set sorting flag and increment job count atomically
         sorting = true
+        lastSortStartTime = now
         sortJobsInFlight += 1
         return true
     }
@@ -1108,7 +1118,27 @@ public class SplatRenderer: @unchecked Sendable {
             ? sortedIndicesBufferA
             : sortedIndicesBufferB
 
+        if oldBuffer === newBuffer {
+            return nil
+        }
         return oldBuffer
+    }
+
+    private func acquireSortOutputBuffer(minimumCapacity: Int) throws -> (buffer: MetalBuffer<Int32>, releaseOnFailure: Bool) {
+        os_unfair_lock_lock(&sortStateLock)
+        let reusableBuffer = usingSortedBufferA ? sortedIndicesBufferB : sortedIndicesBufferA
+        os_unfair_lock_unlock(&sortStateLock)
+
+        if let reusableBuffer, reusableBuffer.capacity >= minimumCapacity {
+            return (reusableBuffer, false)
+        }
+
+        return (try sortIndexBufferPool.acquire(minimumCapacity: minimumCapacity), true)
+    }
+
+    private func releaseSortOutputBufferOnFailure(_ buffer: MetalBuffer<Int32>, releaseOnFailure: Bool) {
+        guard releaseOnFailure else { return }
+        sortIndexBufferPool.release(buffer)
     }
 
     public init(device: MTLDevice,
@@ -3077,6 +3107,9 @@ public class SplatRenderer: @unchecked Sendable {
         let previousSortForward = lastSortedCameraForward
         os_unfair_lock_unlock(&sortStateLock)
 
+        guard cameraDrivenSortingEnabled else {
+            return false
+        }
         if sortDirty {
             return true
         }
@@ -3098,6 +3131,12 @@ public class SplatRenderer: @unchecked Sendable {
     }
 
     private func shouldUpdateFrustumCullingForCurrentCamera() -> Bool {
+        if frustumCullDirtyDueToData {
+            return true
+        }
+        guard cameraDrivenFrustumCullingEnabled else {
+            return false
+        }
         if Self.projectionMatrixChanged(
             currentFrustumCullProjectionMatrix,
             lastFrustumCullProjectionMatrix
@@ -3106,7 +3145,7 @@ public class SplatRenderer: @unchecked Sendable {
         }
 
         return Self.shouldRunCameraDrivenUpdate(
-            dirty: frustumCullDirtyDueToData,
+            dirty: false,
             now: CFAbsoluteTimeGetCurrent(),
             lastUpdateTime: lastFrustumCullTime,
             minimumInterval: minimumFrustumCullInterval,
@@ -3167,6 +3206,9 @@ public class SplatRenderer: @unchecked Sendable {
     internal func shouldUpdateSHForCurrentCamera() -> Bool {
         if shDirtyDueToData {
             return true
+        }
+        guard cameraDrivenSHUpdatesEnabled else {
+            return false
         }
 
         let now = CFAbsoluteTimeGetCurrent()
@@ -3764,26 +3806,20 @@ public class SplatRenderer: @unchecked Sendable {
             dataDirtySnapshot: dataDirtySnapshot
         )
 
-        // Keep external observers and logging on main. Scheduling metadata above is
-        // already published so frame-aligned main-queue delays do not keep sorting gated.
-        DispatchQueue.main.async { [weak self] in
-            guard let self = self else {
-                return
+        let sample = performanceContext.makeSample(
+            wallTime: elapsed,
+            callbackWallTime: callbackWallTime,
+            gpuTime: gpuTime,
+            mainQueueDelay: nil,
+            inFlightSortsAtCompletion: inFlightSortsAtCompletion,
+            status: commandBufferStatus
+        )
+        Self.log.debug("\(sample.logMessage, privacy: .public)")
+
+        if let onSortComplete {
+            DispatchQueue.main.async {
+                onSortComplete(elapsed)
             }
-
-            let mainApplyTime = CFAbsoluteTimeGetCurrent()
-            let mainQueueDelay = max(0, mainApplyTime - bufferReadyTime)
-            self.onSortComplete?(elapsed)
-            let sample = performanceContext.makeSample(
-                wallTime: elapsed,
-                callbackWallTime: callbackWallTime,
-                gpuTime: gpuTime,
-                mainQueueDelay: mainQueueDelay,
-                inFlightSortsAtCompletion: inFlightSortsAtCompletion,
-                status: commandBufferStatus
-            )
-
-            Self.log.debug("\(sample.logMessage, privacy: .public)")
         }
     }
 
@@ -3819,8 +3855,10 @@ public class SplatRenderer: @unchecked Sendable {
 
     // Sort splatBuffer (read-only), storing the results in splatBuffer (write-only) then swap splatBuffer and splatBufferPrime
     public func resort(useGPU: Bool = true) {
+        let minimumStartInterval = isInteracting ? effectiveMinimumSortInterval : 0
+
         // Atomically check sorting flag and job count, and set if available
-        guard tryStartSort() else {
+        guard tryStartSort(minimumStartInterval: minimumStartInterval) else {
             // Already sorting or too many jobs in flight
             return
         }
@@ -3864,11 +3902,13 @@ public class SplatRenderer: @unchecked Sendable {
                     return
                 }
 
-                // Acquire index output buffer from pool
                 let indexOutputBuffer: MetalBuffer<Int32>
+                let releaseIndexOutputBufferOnFailure: Bool
 
                 do {
-                    indexOutputBuffer = try sortIndexBufferPool.acquire(minimumCapacity: splatCount)
+                    let outputLease = try self.acquireSortOutputBuffer(minimumCapacity: splatCount)
+                    indexOutputBuffer = outputLease.buffer
+                    releaseIndexOutputBufferOnFailure = outputLease.releaseOnFailure
                     indexOutputBuffer.count = max(renderableCount, 0)
                 } catch {
                     Self.log.error("Failed to acquire index output buffer from pool: \(error)")
@@ -3894,7 +3934,7 @@ public class SplatRenderer: @unchecked Sendable {
                         let sortCommandBufferManager = self.computeCommandBufferManager ?? commandBufferManager
                         guard let commandBuffer = sortCommandBufferManager.makeCommandBuffer() else {
                             Self.log.error("Failed to create compute command buffer for Metal 4 sort.")
-                            sortIndexBufferPool.release(indexOutputBuffer)
+                            self.releaseSortOutputBufferOnFailure(indexOutputBuffer, releaseOnFailure: releaseIndexOutputBufferOnFailure)
                             self.finishSort()
                             return
                         }
@@ -3911,7 +3951,7 @@ public class SplatRenderer: @unchecked Sendable {
                             )
                         } catch {
                             Self.log.error("Metal 4 radix sort failed: \(error)")
-                            sortIndexBufferPool.release(indexOutputBuffer)
+                            self.releaseSortOutputBufferOnFailure(indexOutputBuffer, releaseOnFailure: releaseIndexOutputBufferOnFailure)
                             self.finishSort()
                             return
                         }
@@ -3919,8 +3959,9 @@ public class SplatRenderer: @unchecked Sendable {
                         // Capture pool before weak self check to ensure buffer release even if self is deallocated
                         commandBuffer.addCompletedHandler { [weak self, sortIndexBufferPool] buffer in
                             guard let self = self else {
-                                // Self deallocated during async sort - release buffer via captured pool
-                                sortIndexBufferPool.release(indexOutputBuffer)
+                                if releaseIndexOutputBufferOnFailure {
+                                    sortIndexBufferPool.release(indexOutputBuffer)
+                                }
                                 return
                             }
                             self.finishSort(
@@ -3956,7 +3997,7 @@ public class SplatRenderer: @unchecked Sendable {
                     let sortCommandBufferManager = self.computeCommandBufferManager ?? commandBufferManager
                     guard let commandBuffer = sortCommandBufferManager.makeCommandBuffer() else {
                         Self.log.error("Failed to create compute command buffer.")
-                        sortIndexBufferPool.release(indexOutputBuffer)
+                        self.releaseSortOutputBufferOnFailure(indexOutputBuffer, releaseOnFailure: releaseIndexOutputBufferOnFailure)
                         self.finishSort()
                         return
                     }
@@ -3987,7 +4028,7 @@ public class SplatRenderer: @unchecked Sendable {
                         )
                     } catch {
                         Self.log.error("Counting sort failed: \(error)")
-                        sortIndexBufferPool.release(indexOutputBuffer)
+                        self.releaseSortOutputBufferOnFailure(indexOutputBuffer, releaseOnFailure: releaseIndexOutputBufferOnFailure)
                         self.finishSort()
                         return
                     }
@@ -3997,8 +4038,9 @@ public class SplatRenderer: @unchecked Sendable {
                     // Capture pool before weak self check to ensure buffer release even if self is deallocated
                     commandBuffer.addCompletedHandler { [weak self, sortIndexBufferPool] buffer in
                         guard let self = self else {
-                            // Self deallocated during async sort - release buffer via captured pool
-                            sortIndexBufferPool.release(indexOutputBuffer)
+                            if releaseIndexOutputBufferOnFailure {
+                                sortIndexBufferPool.release(indexOutputBuffer)
+                            }
                             return
                         }
                         self.finishSort(
@@ -4035,7 +4077,7 @@ public class SplatRenderer: @unchecked Sendable {
                         distanceBuffer.count = splatCount
                     } catch {
                         Self.log.error("Failed to acquire distance buffer from pool: \(error)")
-                        sortIndexBufferPool.release(indexOutputBuffer)
+                        self.releaseSortOutputBufferOnFailure(indexOutputBuffer, releaseOnFailure: releaseIndexOutputBufferOnFailure)
                         self.finishSort()
                         return
                     }
@@ -4044,7 +4086,7 @@ public class SplatRenderer: @unchecked Sendable {
                     guard let commandBuffer = commandBufferManager.makeCommandBuffer() else {
                         Self.log.error("Failed to create compute command buffer.")
                         sortDistanceBufferPool.release(distanceBuffer)
-                        sortIndexBufferPool.release(indexOutputBuffer)
+                        self.releaseSortOutputBufferOnFailure(indexOutputBuffer, releaseOnFailure: releaseIndexOutputBufferOnFailure)
                         self.finishSort()
                         return
                     }
@@ -4054,7 +4096,7 @@ public class SplatRenderer: @unchecked Sendable {
                           let computePipelineState = computeDistancesPipelineState else {
                         Self.log.error("Failed to create compute encoder.")
                         sortDistanceBufferPool.release(distanceBuffer)
-                        sortIndexBufferPool.release(indexOutputBuffer)
+                        self.releaseSortOutputBufferOnFailure(indexOutputBuffer, releaseOnFailure: releaseIndexOutputBufferOnFailure)
                         self.finishSort()
                         return
                     }
@@ -4097,7 +4139,7 @@ public class SplatRenderer: @unchecked Sendable {
                         guard let argSortCommandBuffer = sortQueue.makeCommandBuffer() else {
                             Self.log.error("Failed to create MPS arg sort command buffer.")
                             self.sortDistanceBufferPool.release(distanceBuffer)
-                            self.sortIndexBufferPool.release(indexOutputBuffer)
+                            self.releaseSortOutputBufferOnFailure(indexOutputBuffer, releaseOnFailure: releaseIndexOutputBufferOnFailure)
                             self.finishSort()
                             return
                         }
@@ -4108,7 +4150,7 @@ public class SplatRenderer: @unchecked Sendable {
 
                             if buffer.status != .completed {
                                 Self.log.error("MPSArgSort command buffer failed: \(String(describing: buffer.error))")
-                                self.sortIndexBufferPool.release(indexOutputBuffer)
+                                self.releaseSortOutputBufferOnFailure(indexOutputBuffer, releaseOnFailure: releaseIndexOutputBufferOnFailure)
                                 self.finishSort()
                                 return
                             }
@@ -4181,8 +4223,7 @@ public class SplatRenderer: @unchecked Sendable {
                 // CPU fallback: populate sortedIndicesBuffer instead of reordering splats
                 // This maintains consistency with GPU path - splat data stays static
                 do {
-                    // Acquire new buffer and fill with sorted indices
-                    let cpuSortedIndices = try sortIndexBufferPool.acquire(minimumCapacity: max(actualCount, 1))
+                    let cpuSortedIndices = try acquireSortOutputBuffer(minimumCapacity: max(actualCount, 1)).buffer
                     cpuSortedIndices.count = actualCount
                     for newIndex in 0..<actualCount {
                         cpuSortedIndices.values[newIndex] = Int32(orderAndDepthTempSort[newIndex].index)
