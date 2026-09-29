@@ -55,7 +55,7 @@ inline FragmentIn multiStageSplatVertex(uint vertexID,
     // Use sorted index to access splat in depth-sorted order
     uint actualSplatID = uint(sortedIndices[logicalSplatID]);
     // Defensive check for transient stale/corrupt sorted indices.
-    if (actualSplatID >= uniforms.splatCount) {
+    if (actualSplatID >= uniforms.totalSplatCount) {
         FragmentIn out;
         out.position = float4(1, 1, 0, 1);
         out.relativePosition = half2(0);

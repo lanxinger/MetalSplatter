@@ -168,12 +168,13 @@ fileprivate extension PLYElement {
         appendProperty(directColor.y)
         appendProperty(directColor.z)
 
-        for i in 0..<mapping.indirectColorCount {
-            let shColorIndex = (1 + i)
-            let shColor = shColorIndex >= color.count ? .zero : color[shColorIndex]
-            appendProperty(shColor.x)
-            appendProperty(shColor.y)
-            appendProperty(shColor.z)
+        // Standard Gaussian PLY f_rest_N properties are channel-major.
+        for channel in 0..<3 {
+            for i in 0..<mapping.indirectColorCount {
+                let shColorIndex = 1 + i
+                let shColor = shColorIndex >= color.count ? .zero : color[shColorIndex]
+                appendProperty(shColor[channel])
+            }
         }
 
         // Opacity

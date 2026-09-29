@@ -4,11 +4,11 @@
 
 using namespace metal;
 
-// Spherical harmonics basis functions
+// Spherical harmonics basis functions for world-space camera-to-surface directions
 // Based on: https://github.com/graphdeco-inria/gaussian-splatting/blob/main/utils/sh_utils.py
 // Coefficient order (shared with SphericalHarmonicsEvaluator.swift/FastSHRenderPath.metal):
 // 0: dc,
-// 1: y, 2: z, 3: x,
+// 1: -y, 2: z, 3: -x (including the signs of the real SH basis),
 // 4: xy, 5: yz, 6: 2zz-xx-yy, 7: xz, 8: xx-yy,
 // 9: y*(3xx-yy), 10: xy*z, 11: y*(4zz-xx-yy), 12: z*(2zz-3xx-3yy),
 // 13: x*(4zz-xx-yy), 14: z*(xx-yy), 15: x*(xx-3yy)
@@ -83,9 +83,9 @@ half4 evaluateSHSpecializedHalf(float3 dir, device const half3* sh_coeffs) {
 
     // Band 1
     if (HAS_SH_BAND_1) {
-        result += SH_C1_H * d.y * sh_coeffs[1];
+        result -= SH_C1_H * d.y * sh_coeffs[1];
         result += SH_C1_H * d.z * sh_coeffs[2];
-        result += SH_C1_H * d.x * sh_coeffs[3];
+        result -= SH_C1_H * d.x * sh_coeffs[3];
     }
 
     // Band 2
@@ -125,9 +125,9 @@ half4 evaluateSHHalf(float3 dir, device const half3* sh_coeffs, uint degree) {
     half3 result = half3(0.5h) + SH_C0_H * sh_coeffs[0];
 
     if (degree >= 1) {
-        result += SH_C1_H * d.y * sh_coeffs[1];
+        result -= SH_C1_H * d.y * sh_coeffs[1];
         result += SH_C1_H * d.z * sh_coeffs[2];
-        result += SH_C1_H * d.x * sh_coeffs[3];
+        result -= SH_C1_H * d.x * sh_coeffs[3];
     }
 
     if (degree >= 2) {
@@ -171,9 +171,9 @@ float4 evaluateSHSpecialized(float3 dir, device const float3* sh_coeffs) {
 
     // Band 1 - compile-time check via function constant
     if (HAS_SH_BAND_1) {
-        result += SH_C1 * d.y * sh_coeffs[1];
+        result -= SH_C1 * d.y * sh_coeffs[1];
         result += SH_C1 * d.z * sh_coeffs[2];
-        result += SH_C1 * d.x * sh_coeffs[3];
+        result -= SH_C1 * d.x * sh_coeffs[3];
     }
 
     // Band 2 - compile-time check via function constant
@@ -220,9 +220,9 @@ float4 evaluateSH(float3 dir, device const float3* sh_coeffs, uint degree) {
 
     if (degree >= 1) {
         // Band 1
-        result += SH_C1 * d.y * sh_coeffs[1];
+        result -= SH_C1 * d.y * sh_coeffs[1];
         result += SH_C1 * d.z * sh_coeffs[2];
-        result += SH_C1 * d.x * sh_coeffs[3];
+        result -= SH_C1 * d.x * sh_coeffs[3];
     }
 
     if (degree >= 2) {

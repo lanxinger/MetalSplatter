@@ -36,11 +36,11 @@ final class SplatEditorTests: XCTestCase {
         XCTAssertEqual(snapshot.selectedCount, 0)
     }
 
-    func testEditableStoreCommittedTransformBakesPositionAndSelectionBounds() {
+    func testEditableStoreCommittedTransformBakesPositionAndSelectionBounds() throws {
         var store = EditableSplatStore(points: makePoints())
         _ = store.applySelection(indices: [1], mode: .replace)
 
-        let pointChanges = store.applyCommittedTransform(
+        let pointChanges = try store.applyCommittedTransform(
             SplatEditTransform(
                 translation: SIMD3<Float>(0.5, 0.25, -0.5),
                 rotation: simd_quatf(angle: .pi / 2, axis: SIMD3<Float>(0, 1, 0)),

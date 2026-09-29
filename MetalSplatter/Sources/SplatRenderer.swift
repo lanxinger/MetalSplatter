@@ -347,7 +347,7 @@ public class SplatRenderer: @unchecked Sendable {
         var debugFlags: UInt32
         var renderMode: UInt32
         var isOrthographic: UInt32
-        var padding1: UInt32
+        var totalSplatCount: UInt32
         var lodThresholds: SIMD3<Float>
         var covarianceBlur: Float
         var selectionTintColor: SIMD4<Float>
@@ -842,8 +842,10 @@ public class SplatRenderer: @unchecked Sendable {
     /// Tracks whether colors have changed and need GPU buffer update
     private var colorsDirty = true
 
-    /// Revision counter for color-only updates (allows skipping sort on color changes)
-    private var colorRevision: UInt64 = 0
+    /// Render-thread revision of colors actually applied to the source and GPU buffer.
+    /// Staging an update must not advance this: it may arrive after this frame drains
+    /// the queue. Keep it monotonic across scene replacements and discarded updates.
+    internal private(set) var appliedColorRevision: UInt64 = 0
 
     // MARK: - Staged Color Updates (GPU Race Prevention)
     // Color updates are staged and applied at render start to avoid CPU/GPU data races.
@@ -927,7 +929,8 @@ public class SplatRenderer: @unchecked Sendable {
     var sorting = false
     private var sortJobsInFlight: Int = 0  // Track concurrent sort operations
     private let maxConcurrentSorts: Int = 2  // Allow overlap: one sorting while one renders
-    private var sortStateLock = os_unfair_lock()  // Protects sort scheduling state and buffer swap
+    // Stable allocated storage avoids overlapping Swift inout accesses when threads contend.
+    private let sortStateLock = OSAllocatedUnfairLock<Void>()  // Protects sort scheduling state and buffer swap
     var orderAndDepthTempSort: [SplatIndexAndDepth] = []
 
     // Metal 4 command buffer pool for improved performance
@@ -995,40 +998,40 @@ public class SplatRenderer: @unchecked Sendable {
     // MARK: - Thread-safe sort state accessors
 
     private func incrementSortJobsInFlight() {
-        os_unfair_lock_lock(&sortStateLock)
+        sortStateLock.lock()
         sortJobsInFlight += 1
-        os_unfair_lock_unlock(&sortStateLock)
+        sortStateLock.unlock()
     }
 
     private func decrementSortJobsInFlight() {
-        os_unfair_lock_lock(&sortStateLock)
+        sortStateLock.lock()
         sortJobsInFlight -= 1
-        os_unfair_lock_unlock(&sortStateLock)
+        sortStateLock.unlock()
     }
 
     private func getSortJobsInFlight() -> Int {
-        os_unfair_lock_lock(&sortStateLock)
-        defer { os_unfair_lock_unlock(&sortStateLock) }
+        sortStateLock.lock()
+        defer { sortStateLock.unlock() }
         return sortJobsInFlight
     }
 
     private func getSortFrameState() -> (ready: Bool, duration: TimeInterval?, jobsInFlight: Int) {
-        os_unfair_lock_lock(&sortStateLock)
-        defer { os_unfair_lock_unlock(&sortStateLock) }
+        sortStateLock.lock()
+        defer { sortStateLock.unlock() }
         return (!sorting, lastSortDuration, sortJobsInFlight)
     }
 
     private func canStartNewSort() -> Bool {
-        os_unfair_lock_lock(&sortStateLock)
-        defer { os_unfair_lock_unlock(&sortStateLock) }
+        sortStateLock.lock()
+        defer { sortStateLock.unlock() }
         return sortJobsInFlight < maxConcurrentSorts
     }
 
     /// Atomically try to start a sort operation.
     /// Returns true if sort was started, false if already sorting or too many jobs in flight.
     private func tryStartSort(minimumStartInterval: TimeInterval = 0) -> Bool {
-        os_unfair_lock_lock(&sortStateLock)
-        defer { os_unfair_lock_unlock(&sortStateLock) }
+        sortStateLock.lock()
+        defer { sortStateLock.unlock() }
 
         // Check both conditions atomically
         guard !sorting && sortJobsInFlight < maxConcurrentSorts else {
@@ -1048,10 +1051,10 @@ public class SplatRenderer: @unchecked Sendable {
 
     /// Atomically mark sort as complete.
     private func finishSort() {
-        os_unfair_lock_lock(&sortStateLock)
+        sortStateLock.lock()
         sorting = false
         sortJobsInFlight -= 1
-        os_unfair_lock_unlock(&sortStateLock)
+        sortStateLock.unlock()
     }
 
     /// Atomically publish scheduling metadata and clear the in-flight sort gate.
@@ -1063,7 +1066,7 @@ public class SplatRenderer: @unchecked Sendable {
         sortViewMatrix: simd_float4x4?,
         dataDirtySnapshot: UInt64
     ) -> Int {
-        os_unfair_lock_lock(&sortStateLock)
+        sortStateLock.lock()
         lastSortDuration = duration
         lastSortedCameraPosition = cameraWorldPosition
         lastSortedCameraForward = cameraWorldForward
@@ -1075,40 +1078,40 @@ public class SplatRenderer: @unchecked Sendable {
         sorting = false
         sortJobsInFlight -= 1
         let inFlightSortsAtCompletion = sortJobsInFlight
-        os_unfair_lock_unlock(&sortStateLock)
+        sortStateLock.unlock()
         return inFlightSortsAtCompletion
     }
 
     private func markSortDataDirty() {
-        os_unfair_lock_lock(&sortStateLock)
+        sortStateLock.lock()
         sortDirtyDueToData = true
         sortDataRevision &+= 1
-        os_unfair_lock_unlock(&sortStateLock)
+        sortStateLock.unlock()
     }
 
     private func markSortDirtyWithoutRevisionChange() {
-        os_unfair_lock_lock(&sortStateLock)
+        sortStateLock.lock()
         sortDirtyDueToData = true
-        os_unfair_lock_unlock(&sortStateLock)
+        sortStateLock.unlock()
     }
 
     private func getSortDataRevision() -> UInt64 {
-        os_unfair_lock_lock(&sortStateLock)
-        defer { os_unfair_lock_unlock(&sortStateLock) }
+        sortStateLock.lock()
+        defer { sortStateLock.unlock() }
         return sortDataRevision
     }
 
     /// Thread-safe access to the current sorted indices buffer for rendering
-    private func getCurrentSortedIndicesBuffer() -> MetalBuffer<Int32>? {
-        os_unfair_lock_lock(&sortStateLock)
-        defer { os_unfair_lock_unlock(&sortStateLock) }
+    internal func getCurrentSortedIndicesBuffer() -> MetalBuffer<Int32>? {
+        sortStateLock.lock()
+        defer { sortStateLock.unlock() }
         return sortedIndicesBuffer
     }
 
     /// Thread-safe check if currently sorting
     private var isSorting: Bool {
-        os_unfair_lock_lock(&sortStateLock)
-        defer { os_unfair_lock_unlock(&sortStateLock) }
+        sortStateLock.lock()
+        defer { sortStateLock.unlock() }
         return sorting
     }
 
@@ -1153,8 +1156,8 @@ public class SplatRenderer: @unchecked Sendable {
     /// Thread-safe buffer swap for double-buffered sorting
     /// Returns the old buffer that was replaced (if any) for release back to pool
     private func swapSortedIndicesBuffer(newBuffer: MetalBuffer<Int32>) -> MetalBuffer<Int32>? {
-        os_unfair_lock_lock(&sortStateLock)
-        defer { os_unfair_lock_unlock(&sortStateLock) }
+        sortStateLock.lock()
+        defer { sortStateLock.unlock() }
 
         let oldBuffer: MetalBuffer<Int32>?
         if usingSortedBufferA {
@@ -1182,9 +1185,9 @@ public class SplatRenderer: @unchecked Sendable {
     }
 
     private func acquireSortOutputBuffer(minimumCapacity: Int) throws -> (buffer: MetalBuffer<Int32>, releaseOnFailure: Bool) {
-        os_unfair_lock_lock(&sortStateLock)
+        sortStateLock.lock()
         let reusableBuffer = usingSortedBufferA ? sortedIndicesBufferB : sortedIndicesBufferA
-        os_unfair_lock_unlock(&sortStateLock)
+        sortStateLock.unlock()
 
         if let reusableBuffer, reusableBuffer.capacity >= minimumCapacity {
             return (reusableBuffer, false)
@@ -1477,6 +1480,7 @@ public class SplatRenderer: @unchecked Sendable {
     }
 
     public func reset() {
+        discardPendingColorUpdates()
         // Clear current buffers and return them to pools
         splatBufferPool.release(splatBuffer)
         splatBufferPool.release(splatBufferPrime)
@@ -1629,7 +1633,7 @@ public class SplatRenderer: @unchecked Sendable {
         manager.makeResourcesResident(commandBuffer: commandBuffer)
     }
 
-    private func buildSingleStagePipelineStatesIfNeeded() throws {
+    internal func buildSingleStagePipelineStatesIfNeeded() throws {
         if singleStagePipelineState == nil {
             singleStagePipelineState = try buildSingleStagePipelineState(editing: false)
         }
@@ -2254,6 +2258,7 @@ public class SplatRenderer: @unchecked Sendable {
                                    sceneCounts: [Int]? = nil,
                                    sceneIndices: [UInt32]? = nil) throws {
         try ensureAdditionalCapacity(points.count)
+        discardPendingColorUpdates()
         splatBuffer.count = 0
         splatBuffer.append(points.map { Splat($0) })
         if let sceneIndices, sceneIndices.count == points.count {
@@ -2420,7 +2425,6 @@ public class SplatRenderer: @unchecked Sendable {
 
         // Mark only colors as dirty, NOT geometry
         colorsDirty = true
-        colorRevision &+= 1
         invalidateRender()
 
         // Do NOT set these - they would trigger unnecessary work:
@@ -2450,7 +2454,6 @@ public class SplatRenderer: @unchecked Sendable {
         os_unfair_lock_unlock(&pendingColorUpdateLock)
 
         colorsDirty = true
-        colorRevision &+= 1
         invalidateRender()
     }
 
@@ -2471,8 +2474,13 @@ public class SplatRenderer: @unchecked Sendable {
         os_unfair_lock_unlock(&pendingColorUpdateLock)
 
         colorsDirty = true
-        colorRevision &+= 1
         invalidateRender()
+    }
+
+    private func discardPendingColorUpdates() {
+        os_unfair_lock_lock(&pendingColorUpdateLock)
+        pendingColorUpdates.removeAll()
+        os_unfair_lock_unlock(&pendingColorUpdateLock)
     }
 
     /// Applies any pending color updates to the splat buffer in FIFO order.
@@ -2497,6 +2505,7 @@ public class SplatRenderer: @unchecked Sendable {
 
         // Apply updates in order to preserve "last write wins" semantics
         // Use withLockedValues to safely access buffer during potential resize operations
+        var didApplyUpdate = false
         splatBuffer.withLockedValues { values, bufferCount in
             for update in updates[startIndex...] {
                 switch update {
@@ -2504,6 +2513,7 @@ public class SplatRenderer: @unchecked Sendable {
                     for i in 0..<min(colors.count, bufferCount) {
                         let c = colors[i]
                         values[i].packedColor = SplatRenderer.packRGBA8(c.x, c.y, c.z, c.w)
+                        didApplyUpdate = true
                         if i < sourceScenePoints.count {
                             sourceScenePoints[i].color = .linearFloat(SIMD3<Float>(c.x, c.y, c.z))
                             sourceScenePoints[i].opacity = .linearFloat(c.w)
@@ -2513,6 +2523,7 @@ public class SplatRenderer: @unchecked Sendable {
                     for (i, colorIndex) in range.enumerated() where colorIndex < bufferCount {
                         let c = colors[i]
                         values[colorIndex].packedColor = SplatRenderer.packRGBA8(c.x, c.y, c.z, c.w)
+                        didApplyUpdate = true
                         if colorIndex < sourceScenePoints.count {
                             sourceScenePoints[colorIndex].color = .linearFloat(SIMD3<Float>(c.x, c.y, c.z))
                             sourceScenePoints[colorIndex].opacity = .linearFloat(c.w)
@@ -2521,6 +2532,7 @@ public class SplatRenderer: @unchecked Sendable {
                 case .single(let color, let index):
                     guard index < bufferCount else { continue }
                     values[index].packedColor = SplatRenderer.packRGBA8(color.x, color.y, color.z, color.w)
+                    didApplyUpdate = true
                     if index < sourceScenePoints.count {
                         sourceScenePoints[index].color = .linearFloat(SIMD3<Float>(color.x, color.y, color.z))
                         sourceScenePoints[index].opacity = .linearFloat(color.w)
@@ -2528,7 +2540,10 @@ public class SplatRenderer: @unchecked Sendable {
                 }
             }
         }
-        animationDirty = true
+        if didApplyUpdate {
+            appliedColorRevision &+= 1
+            animationDirty = true
+        }
     }
 
     /// Marks that geometry has changed and requires re-sorting and bounds update.
@@ -2831,7 +2846,8 @@ public class SplatRenderer: @unchecked Sendable {
                           covarianceBlur: covarianceBlur,
                           lodThresholds: lodThresholds,
                           selectionTintColor: selectionTintColor,
-                          editingEnabled: editingEnabled)
+                          editingEnabled: editingEnabled,
+                          totalSplatCount: UInt32(self.splatCount))
     }
 
     static func makeUniforms(for viewport: ViewportDescriptor,
@@ -2842,7 +2858,8 @@ public class SplatRenderer: @unchecked Sendable {
                              covarianceBlur: Float,
                              lodThresholds: SIMD3<Float>,
                              selectionTintColor: SIMD4<Float> = SIMD4<Float>(0.15, 0.55, 1.0, 0.45),
-                             editingEnabled: Bool = false) -> Uniforms {
+                             editingEnabled: Bool = false,
+                             totalSplatCount: UInt32? = nil) -> Uniforms {
         let proj00 = viewport.projectionMatrix[0][0]
         let proj11 = viewport.projectionMatrix[1][1]
         let focalX = Float(viewport.screenSize.x) * proj00 / 2
@@ -2863,7 +2880,7 @@ public class SplatRenderer: @unchecked Sendable {
             debugFlags: debugFlags,
             renderMode: renderMode.rawValue,
             isOrthographic: viewport.isOrthographic ? 1 : 0,
-            padding1: 0,
+            totalSplatCount: totalSplatCount ?? splatCount,
             lodThresholds: lodThresholds,
             covarianceBlur: covarianceBlur,
             selectionTintColor: selectionTintColor,
@@ -3190,12 +3207,12 @@ public class SplatRenderer: @unchecked Sendable {
             return false
         }
 
-        os_unfair_lock_lock(&sortStateLock)
+        sortStateLock.lock()
         let sortDirty = sortDirtyDueToData
         let previousSortTime = lastSortTime
         let previousSortPosition = lastSortedCameraPosition
         let previousSortForward = lastSortedCameraForward
-        os_unfair_lock_unlock(&sortStateLock)
+        sortStateLock.unlock()
 
         guard cameraDrivenSortingEnabled else {
             return false
@@ -3428,6 +3445,21 @@ public class SplatRenderer: @unchecked Sendable {
         return renderEncoder
     }
 
+    /// Optional draw implementation after the shared frame lifecycle and
+    /// uniforms are prepared. Returning false uses the standard pipelines.
+    internal func renderSpecialized(viewports: [ViewportDescriptor],
+                                    colorTexture: MTLTexture,
+                                    colorLoadAction: MTLLoadAction,
+                                    colorStoreAction: MTLStoreAction,
+                                    depthTexture: MTLTexture?,
+                                    depthStoreAction: MTLStoreAction,
+                                    rasterizationRateMap: MTLRasterizationRateMap?,
+                                    renderTargetArrayLength: Int,
+                                    animatedSplatsUpdated: Bool,
+                                    to commandBuffer: MTLCommandBuffer) throws -> Bool {
+        false
+    }
+
     public func render(viewports: [ViewportDescriptor],
                        colorTexture: MTLTexture,
                        colorLoadAction: MTLLoadAction = .clear,
@@ -3443,18 +3475,35 @@ public class SplatRenderer: @unchecked Sendable {
         let renderedRevision = renderRevision
         defer {
             lastRenderedRevision = renderedRevision
+            completeRenderFrame()
         }
 
         // Apply any pending color updates before GPU work begins.
         // This prevents CPU/GPU data races on the shared splatBuffer.
         applyPendingColorUpdates()
-        updateAnimatedSplatsIfNeeded(to: commandBuffer)
+        let animatedSplatsUpdated = updateAnimatedSplatsIfNeeded(to: commandBuffer)
         schedulePendingBufferRelease(on: commandBuffer)
 
         let splatCount = splatBuffer.count
-        guard splatCount != 0 else { return }
         let drawSplatCount = renderableSplatCountForCurrentEditState
-        guard drawSplatCount > 0 else { return }
+        guard splatCount > 0, drawSplatCount > 0 else {
+            // An empty/fully hidden scene still owns the requested render pass:
+            // clear a reused target, or preserve it when the caller uses .load.
+            guard let encoder = renderEncoder(multiStage: false,
+                                              viewports: viewports,
+                                              colorTexture: colorTexture,
+                                              colorLoadAction: colorLoadAction,
+                                              colorStoreAction: colorStoreAction,
+                                              depthTexture: depthTexture,
+                                              depthStoreAction: depthStoreAction,
+                                              rasterizationRateMap: rasterizationRateMap,
+                                              renderTargetArrayLength: renderTargetArrayLength,
+                                              for: commandBuffer) else {
+                throw SplatRendererError.failedToCreateRenderEncoder
+            }
+            encoder.endEncoding()
+            return
+        }
         let indexedSplatCount = min(drawSplatCount, Constants.maxIndexedSplatCount)
         let instanceCount = (drawSplatCount + indexedSplatCount - 1) / indexedSplatCount
 
@@ -3465,6 +3514,19 @@ public class SplatRenderer: @unchecked Sendable {
         switchToNextDynamicBuffer()
         updateUniforms(forViewports: viewports, splatCount: UInt32(drawSplatCount), indexedSplatCount: UInt32(indexedSplatCount))
         frameBufferUploads += 1 // uniforms update
+
+        if try renderSpecialized(viewports: viewports,
+                                 colorTexture: colorTexture,
+                                 colorLoadAction: colorLoadAction,
+                                 colorStoreAction: colorStoreAction,
+                                 depthTexture: depthTexture,
+                                 depthStoreAction: depthStoreAction,
+                                 rasterizationRateMap: rasterizationRateMap,
+                                 renderTargetArrayLength: renderTargetArrayLength,
+                                 animatedSplatsUpdated: animatedSplatsUpdated,
+                                 to: commandBuffer) {
+            return
+        }
         
         // GPU Frustum Culling: encode compute pass before rendering
         if frustumCullingEnabled,
@@ -3778,6 +3840,9 @@ public class SplatRenderer: @unchecked Sendable {
             }
         }
 
+    }
+
+    private func completeRenderFrame() {
         lastFrameTime = CFAbsoluteTimeGetCurrent() - frameStartTime
         frameCount += 1
         // Use exponential moving average so recent frames have meaningful weight.

@@ -45,7 +45,7 @@ typedef struct
     uint debugFlags;
     uint renderMode;
     uint isOrthographic;
-    uint padding1;
+    uint totalSplatCount; // Source-buffer bound; splatCount may be a compacted draw count
     float3 lodThresholds;
     float covarianceBlur;       // Low-pass filter for 2D covariance (derived from render mode by default)
     float4 selectionTintColor;

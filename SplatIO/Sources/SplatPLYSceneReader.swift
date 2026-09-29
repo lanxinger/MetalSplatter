@@ -183,21 +183,23 @@ private struct ElementInputMapping {
            let sh0_gPropertyIndex = try headerElement.index(forOptionalFloat32PropertyNamed: SplatPLYConstants.PropertyName.sh0_g),
             let sh0_bPropertyIndex = try headerElement.index(forOptionalFloat32PropertyNamed: SplatPLYConstants.PropertyName.sh0_b) {
             let primaryColorPropertyIndices = SIMD3<Int>(x: sh0_rPropertyIndex, y: sh0_gPropertyIndex, z: sh0_bPropertyIndex)
-            if headerElement.hasProperty(forName: "\(SplatPLYConstants.PropertyName.sphericalHarmonicsPrefix)0") {
-                var individualSphericalHarmonicsPropertyIndices: [Int] = []
-                var shIndex = 0
-                while let propertyIndex = try headerElement.index(forOptionalFloat32PropertyNamed: [ "\(SplatPLYConstants.PropertyName.sphericalHarmonicsPrefix)\(shIndex)" ]) {
-                    individualSphericalHarmonicsPropertyIndices.append(propertyIndex)
-                    shIndex += 1
+            let prefix = SplatPLYConstants.PropertyName.sphericalHarmonicsPrefix
+            let restPropertyCount = headerElement.properties.filter { $0.name.hasPrefix(prefix) }.count
+            if restPropertyCount > 0 {
+                guard restPropertyCount.isMultiple(of: 3) else {
+                    throw SplatPLYSceneReader.Error.unsupportedFileContents("Incomplete spherical harmonic RGB channels")
+                }
+                let individualSphericalHarmonicsPropertyIndices = try (0..<restPropertyCount).map {
+                    try headerElement.index(forFloat32PropertyNamed: ["\(prefix)\($0)"])
                 }
 
-                // Spherical harmonics come in RGB triplets, so count must be divisible by 3
-                // Truncate to nearest multiple of 3 to prevent out-of-bounds access
-                let validCount = (individualSphericalHarmonicsPropertyIndices.count / 3) * 3
-                let sphericalHarmonicsPropertyIndices: [SIMD3<Int>] = stride(from: 0, to: validCount, by: 3).map {
+                // Standard Gaussian PLY stores all red coefficients, then green,
+                // then blue. In memory each coefficient is one RGB vector.
+                let coefficientsPerChannel = restPropertyCount / 3
+                let sphericalHarmonicsPropertyIndices: [SIMD3<Int>] = (0..<coefficientsPerChannel).map {
                     SIMD3<Int>(individualSphericalHarmonicsPropertyIndices[$0],
-                               individualSphericalHarmonicsPropertyIndices[$0 + 1],
-                               individualSphericalHarmonicsPropertyIndices[$0 + 2])
+                               individualSphericalHarmonicsPropertyIndices[coefficientsPerChannel + $0],
+                               individualSphericalHarmonicsPropertyIndices[2 * coefficientsPerChannel + $0])
                 }
                 color = .sphericalHarmonic([primaryColorPropertyIndices] + sphericalHarmonicsPropertyIndices)
             } else {

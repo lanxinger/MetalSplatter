@@ -25,7 +25,7 @@ struct FastSHParams {
     uint coeffsPerEntry;
     uint paletteSize;
     uint degree;
-    uint skipSHEvaluation; // When non-zero, skip SH evaluation and use base color only
+    uint skipSHEvaluation; // Explicit DC-only mode; evaluated colors are not cached
 };
 
 // Extended Splat structure for SH support
@@ -41,24 +41,24 @@ typedef struct {
     ushort padding;
 } SplatSH;
 
-// Convert SplatSH to regular Splat using pre-evaluated SH
-inline float3 cameraWorldPosition(matrix_float4x4 viewMatrix) {
-    float3x3 rotation = float3x3(viewMatrix[0].xyz,
-                                 viewMatrix[1].xyz,
-                                 viewMatrix[2].xyz);
-    float3 translation = viewMatrix[3].xyz;
-    return -(transpose(rotation) * translation);
-}
-
-inline float3 rotateVectorByQuaternion(float4 q, float3 v) {
-    float3 u = q.xyz;
-    float s = q.w;
-    float3 t = 2.0f * cross(u, v);
-    return v + s * t + cross(u, t);
+// SH is expressed in the scene frame, independently of the covariance quaternion.
+// A model/edit transform carries appearance with the object. Normalize its columns
+// to remove scale before taking the camera-to-surface direction back to that frame.
+inline float3 sphericalHarmonicsDirection(float3 position,
+                                         float4x4 appearanceViewMatrix,
+                                         bool isOrthographic) {
+    float3x3 rotation = float3x3(normalize(appearanceViewMatrix[0].xyz),
+                               normalize(appearanceViewMatrix[1].xyz),
+                               normalize(appearanceViewMatrix[2].xyz));
+    float3 viewDirection = isOrthographic
+        ? float3(0, 0, -1)
+        : (appearanceViewMatrix * float4(position, 1)).xyz;
+    return normalize(transpose(rotation) * viewDirection);
 }
 
 Splat evaluateSplatWithSH(SplatSH splatSH,
                          Uniforms uniforms,
+                         float4x4 appearanceViewMatrix,
                          device const half3* shPalette,
                          constant FastSHParams& params) {
     Splat splat;
@@ -66,8 +66,7 @@ Splat evaluateSplatWithSH(SplatSH splatSH,
     splat.covA = splatSH.covA;
     splat.covB = splatSH.covB;
 
-    // Skip SH evaluation if flag is set (camera hasn't moved enough to warrant update)
-    // This reuses cached base colors from previous evaluation
+    // Explicitly disabled SH uses the original base color, not a cached SH result.
     if (params.skipSHEvaluation != 0) {
         half4 baseColor = unpackSplatColor(splatSH.packedBaseColor);
         half4 tintColor = half4(splatSH.tintColor);
@@ -84,21 +83,17 @@ Splat evaluateSplatWithSH(SplatSH splatSH,
     if (hasSH) {
         device const half3* coeffs = shPalette + params.coeffsPerEntry * splatSH.shPaletteIndex;
 
-        float3 worldPosition = float3(splatSH.position);
-        float3 cameraPosition = cameraWorldPosition(uniforms.viewMatrix);
-        float3 viewDirection = normalize(cameraPosition - worldPosition);
-
-        // Rotate view direction into the Gaussian's local frame
-        float4 q = splatSH.rotation;
-        float4 qConjugate = float4(-q.xyz, q.w);
-
-        float3 localDirection = normalize(rotateVectorByQuaternion(qConjugate, viewDirection));
-
-        half4 shColor = evaluateSHHalf(localDirection, coeffs, params.degree);
+        float3 direction = sphericalHarmonicsDirection(float3(splatSH.position),
+                                                        appearanceViewMatrix,
+                                                        uniforms.isOrthographic != 0);
+        half4 shColor = evaluateSHHalf(direction, coeffs, params.degree);
+        // Match SplatRenderer.Splat's existing image-RGB to linear conversion.
+        // Keep its gamma, clamp and RGBA8 policy unchanged in this compatibility fix.
+        half3 linearColor = half3(pow(float3(shColor.rgb), float3(2.2f)));
         // Preserve original alpha from base color, combine with SH-evaluated RGB
         half baseAlpha = unpackSplatColor(splatSH.packedBaseColor).a;
         half4 tintColor = half4(splatSH.tintColor);
-        splat.packedColor = pack_half_to_unorm4x8(half4(shColor.rgb * tintColor.rgb, baseAlpha * tintColor.a));
+        splat.packedColor = pack_half_to_unorm4x8(half4(linearColor * tintColor.rgb, baseAlpha * tintColor.a));
     } else {
         half4 baseColor = unpackSplatColor(splatSH.packedBaseColor);
         half4 tintColor = half4(splatSH.tintColor);
@@ -108,7 +103,7 @@ Splat evaluateSplatWithSH(SplatSH splatSH,
     return splat;
 }
 
-// Fast SH vertex shader using pre-evaluated colors
+// Fast SH vertex shader evaluating view-dependent colors per splat
 // GPU-only sorted rendering: uses sorted indices buffer to access splats in depth order
 inline FragmentIn fastSHSplatVertex(uint vertexID,
                                     uint instanceID,
@@ -138,7 +133,7 @@ inline FragmentIn fastSHSplatVertex(uint vertexID,
     // Use sorted index to access splat in depth-sorted order
     uint actualSplatID = uint(sortedIndices[logicalSplatID]);
     // Defensive guard for transient stale/corrupt sorted indices
-    if (actualSplatID >= uniforms.splatCount) {
+    if (actualSplatID >= uniforms.totalSplatCount) {
         FragmentIn out;
         out.position = float4(1, 1, 0, 1);
         out.relativePosition = half2(0);
@@ -149,8 +144,14 @@ inline FragmentIn fastSHSplatVertex(uint vertexID,
         return out;
     }
     SplatSH splatSH = splatArray[actualSplatID];
-    // Evaluate in Gaussian local frame
-    Splat splat = evaluateSplatWithSH(splatSH, uniforms, shPalette, params);
+    float4x4 appearanceViewMatrix = uniforms.viewMatrix;
+    if (transformIndices != nullptr && transformPalette != nullptr) {
+        uint transformIndex = transformIndices[actualSplatID];
+        if (transformIndex != 0u) {
+            appearanceViewMatrix = appearanceViewMatrix * transformPalette[transformIndex];
+        }
+    }
+    Splat splat = evaluateSplatWithSH(splatSH, uniforms, appearanceViewMatrix, shPalette, params);
     uint editState = editStates != nullptr ? editStates[actualSplatID] : 0u;
 
     return splatVertex(splat,
@@ -225,41 +226,15 @@ vertex FragmentIn textureSHSplatVertexShader(uint vertexID [[vertex_id]],
                                             const device float4x4 *transformPalette [[ buffer(BufferIndexTransformPalette) ]],
                                             device const half3* shPalette [[ buffer(FastSHBufferIndexPalette) ]],
                                             constant FastSHParams& params [[ buffer(FastSHBufferIndexParams) ]]) {
-    Uniforms uniforms = uniformsArray.uniforms[min(int(amplificationID), kMaxViewCount - 1)];
-    
-    uint logicalSplatID = instanceID * uniforms.indexedSplatCount + (vertexID / 4);
-    if (logicalSplatID >= uniforms.splatCount) {
-        FragmentIn out;
-        out.position = float4(1, 1, 0, 1);
-        out.relativePosition = half2(0);
-        out.color = half4(0);
-        out.lodBand = 0;
-        out.debugFlags = 0;
-        out.splatID = 0;
-        return out;
-    }
-
-    // Use sorted index to access splat in depth-sorted order
-    uint actualSplatID = uint(sortedIndices[logicalSplatID]);
-    // Defensive guard for transient stale/corrupt sorted indices
-    if (actualSplatID >= uniforms.splatCount) {
-        FragmentIn out;
-        out.position = float4(1, 1, 0, 1);
-        out.relativePosition = half2(0);
-        out.color = half4(0);
-        out.lodBand = 0;
-        out.debugFlags = 0;
-        out.splatID = 0;
-        return out;
-    }
-    SplatSH splatSH = splatArray[actualSplatID];
-    Splat splat = evaluateSplatWithSH(splatSH, uniforms, shPalette, params);
-    uint editState = editStates != nullptr ? editStates[actualSplatID] : 0u;
-    return splatVertex(splat,
-                       uniforms,
-                       vertexID % 4,
-                       actualSplatID,
-                       editState,
-                       transformIndices,
-                       transformPalette);
+    return fastSHSplatVertex(vertexID,
+                             instanceID,
+                             amplificationID,
+                             splatArray,
+                             uniformsArray,
+                             sortedIndices,
+                             editStates,
+                             transformIndices,
+                             transformPalette,
+                             shPalette,
+                             params);
 }

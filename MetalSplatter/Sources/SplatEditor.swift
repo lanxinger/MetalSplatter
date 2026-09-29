@@ -151,9 +151,12 @@ public enum SplatEditorError: LocalizedError, Sendable {
     case previewTransformNotActive
     case invalidMaskSize
     case selectionEngineUnavailable
+    case unsupportedSphericalHarmonicCoefficientCount(Int)
 
     public var errorDescription: String? {
         switch self {
+        case let .unsupportedSphericalHarmonicCoefficientCount(count):
+            return "Cannot rotate spherical harmonics with \(count) coefficients; supported degrees are zero through four"
         case let .rendererPointCountMismatch(renderer, editor):
             return "Renderer/editor point count mismatch: renderer has \(renderer), editor has \(editor)"
         case .previewTransformNotActive:
@@ -466,19 +469,27 @@ struct EditableSplatStore: Sendable {
     }
 
     mutating func applyCommittedTransform(_ transform: SplatEditTransform,
-                                          pivot: SIMD3<Float>) -> [EditableSplatPointChange] {
-        applyCommittedTransform(transform, pivot: pivot, indices: selectedIndices)
+                                          pivot: SIMD3<Float>) throws -> [EditableSplatPointChange] {
+        try applyCommittedTransform(transform, pivot: pivot, indices: selectedIndices)
     }
 
     mutating func applyCommittedTransform(_ transform: SplatEditTransform,
                                           pivot: SIMD3<Float>,
-                                          indices: [Int]) -> [EditableSplatPointChange] {
+                                          indices: [Int]) throws -> [EditableSplatPointChange] {
         guard !indices.isEmpty else { return [] }
 
+        let shRotation = SphericalHarmonicRotation(rotation: transform.rotation)
+        if !shRotation.isIdentity {
+            for index in indices {
+                if case let .sphericalHarmonic(coefficients) = points[index].color, coefficients.count > 25 {
+                    throw SplatEditorError.unsupportedSphericalHarmonicCoefficientCount(coefficients.count)
+                }
+            }
+        }
         var changes: [EditableSplatPointChange] = []
         for index in indices {
             let oldPoint = points[index]
-            let newPoint = oldPoint.applying(transform: transform, around: pivot)
+            let newPoint = oldPoint.applying(transform: transform, around: pivot, shRotation: shRotation)
             points[index] = newPoint
             changes.append(EditableSplatPointChange(index: index, oldPoint: oldPoint, newPoint: newPoint))
         }
@@ -1021,7 +1032,7 @@ public actor SplatEditor {
             throw SplatEditorError.previewTransformNotActive
         }
 
-        let changes = store.applyCommittedTransform(
+        let changes = try store.applyCommittedTransform(
             current.transform,
             pivot: current.pivot,
             indices: previewTransformTouchedIndices
@@ -1033,7 +1044,7 @@ public actor SplatEditor {
     public func applyTransform(_ transform: SplatEditTransform,
                                pivot: SIMD3<Float>) async throws {
         try clearPreviewTransformState()
-        let changes = store.applyCommittedTransform(transform, pivot: pivot)
+        let changes = try store.applyCommittedTransform(transform, pivot: pivot)
         try applyPointHistory(changes)
     }
 
@@ -1046,7 +1057,7 @@ public actor SplatEditor {
                                         pivot: SIMD3<Float>) async throws {
         try clearPreviewTransformState()
         let indices = store.selectedIndices.isEmpty ? store.selectableIndices : store.selectedIndices
-        let changes = store.applyCommittedTransform(transform, pivot: pivot, indices: indices)
+        let changes = try store.applyCommittedTransform(transform, pivot: pivot, indices: indices)
         try applyPointHistory(changes)
     }
 
@@ -1270,7 +1281,8 @@ public actor SplatEditor {
 }
 
 private extension SplatScenePoint {
-    func applying(transform: SplatEditTransform, around pivot: SIMD3<Float>) -> SplatScenePoint {
+    func applying(transform: SplatEditTransform, around pivot: SIMD3<Float>,
+                  shRotation: SphericalHarmonicRotation) -> SplatScenePoint {
         let scaledOffset = (position - pivot) * transform.scale
         let rotatedOffset = transform.rotation.act(scaledOffset)
         let transformedPosition = pivot + rotatedOffset + transform.translation
@@ -1280,28 +1292,11 @@ private extension SplatScenePoint {
 
         return SplatScenePoint(
             position: transformedPosition,
-            color: color.rotated(by: transform.rotation),
+            color: shRotation.applying(to: color),
             opacity: opacity,
             scale: .linearFloat(transformedScale),
             rotation: transformedRotation
         )
-    }
-}
-
-private extension SplatScenePoint.Color {
-    func rotated(by rotation: simd_quatf) -> SplatScenePoint.Color {
-        guard case let .sphericalHarmonic(coefficients) = self, coefficients.count > 1 else {
-            return self
-        }
-
-        var rotated = coefficients
-        let firstOrderEnd = min(rotated.count, 4)
-        if firstOrderEnd > 1 {
-            for index in 1..<firstOrderEnd {
-                rotated[index] = rotation.act(rotated[index])
-            }
-        }
-        return .sphericalHarmonic(rotated)
     }
 }
 
