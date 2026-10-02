@@ -1101,11 +1101,31 @@ public class SplatRenderer: @unchecked Sendable {
         return sortDataRevision
     }
 
-    /// Thread-safe access to the current sorted indices buffer for rendering
+    /// CPU snapshot; GPU bindings must register their command buffer below.
     internal func getCurrentSortedIndicesBuffer() -> MetalBuffer<Int32>? {
         sortStateLock.lock()
         defer { sortStateLock.unlock() }
         return sortedIndicesBuffer
+    }
+
+    /// Register the encoded reader before a sort can retire its buffer.
+    internal func getCurrentSortedIndicesBuffer(for commandBuffer: MTLCommandBuffer) -> MetalBuffer<Int32>? {
+        sortStateLock.lock()
+        guard let buffer = sortedIndicesBuffer else {
+            sortStateLock.unlock()
+            return nil
+        }
+        let id = ObjectIdentifier(buffer)
+        sortedIndexReaders[id, default: 0] += 1
+        sortStateLock.unlock()
+        commandBuffer.addCompletedHandler { [self, buffer] _ in
+            completeSortedIndexRead(buffer)
+        }
+        return buffer
+    }
+
+    internal var sortedIndexPoolStatistics: MetalBufferPool<Int32>.PoolStatistics {
+        sortIndexBufferPool.getStatistics()
     }
 
     /// Thread-safe check if currently sorting
@@ -1115,42 +1135,36 @@ public class SplatRenderer: @unchecked Sendable {
         return sorting
     }
 
-    // Deferred buffer release - wait for GPU to finish before releasing
-    private var pendingReleaseBuffers: [MetalBuffer<Int32>] = []
-    private var pendingReleaseLock = os_unfair_lock()
-    // Warn when pending releases build up (helps detect long GPU stalls)
-    private static let maxPendingReleaseBuffers = 16
+    // Protected by sortStateLock, together with published buffer ownership.
+    private var sortedIndexReaders: [ObjectIdentifier: Int] = [:]
+    private var retiredSortedIndexBuffers: [ObjectIdentifier: MetalBuffer<Int32>] = [:]
 
-    /// Queue a buffer for deferred release (call when swapping sorted indices)
+    /// Retire a published slot, retaining it only while encoded readers remain.
     private func deferredBufferRelease(_ buffer: MetalBuffer<Int32>) {
-        os_unfair_lock_lock(&pendingReleaseLock)
-        if pendingReleaseBuffers.count >= Self.maxPendingReleaseBuffers {
-            Self.log.warning("Pending sorted-index releases reached \(self.pendingReleaseBuffers.count + 1); waiting for GPU completion")
+        sortStateLock.lock()
+        let id = ObjectIdentifier(buffer)
+        let hasReaders = sortedIndexReaders[id, default: 0] > 0
+        if hasReaders {
+            retiredSortedIndexBuffers[id] = buffer
         }
-        pendingReleaseBuffers.append(buffer)
-        os_unfair_lock_unlock(&pendingReleaseLock)
+        sortStateLock.unlock()
+        if !hasReaders { sortIndexBufferPool.release(buffer) }
     }
 
-    /// Drain any queued buffers that need release once GPU work completes.
-    private func drainPendingReleaseBuffers() -> [MetalBuffer<Int32>] {
-        os_unfair_lock_lock(&pendingReleaseLock)
-        let toRelease = pendingReleaseBuffers
-        pendingReleaseBuffers.removeAll()
-        os_unfair_lock_unlock(&pendingReleaseLock)
-        return toRelease
-    }
-
-    /// Schedule pending sorted-index buffer releases on command buffer completion.
-    private func schedulePendingBufferRelease(on commandBuffer: MTLCommandBuffer) {
-        let toRelease = drainPendingReleaseBuffers()
-        guard !toRelease.isEmpty else { return }
-
-        commandBuffer.addCompletedHandler { [weak self] _ in
-            guard let self else { return }
-            for buffer in toRelease {
-                self.sortIndexBufferPool.release(buffer)
-            }
+    private func completeSortedIndexRead(_ buffer: MetalBuffer<Int32>) {
+        sortStateLock.lock()
+        let id = ObjectIdentifier(buffer)
+        let remaining = sortedIndexReaders[id, default: 0] - 1
+        let retired: MetalBuffer<Int32>?
+        if remaining == 0 {
+            sortedIndexReaders[id] = nil
+            retired = retiredSortedIndexBuffers.removeValue(forKey: id)
+        } else {
+            sortedIndexReaders[id] = remaining
+            retired = nil
         }
+        sortStateLock.unlock()
+        if let retired { sortIndexBufferPool.release(retired) }
     }
 
     /// Thread-safe buffer swap for double-buffered sorting
@@ -1161,11 +1175,11 @@ public class SplatRenderer: @unchecked Sendable {
 
         let oldBuffer: MetalBuffer<Int32>?
         if usingSortedBufferA {
-            // Currently rendering with A, so B is safe to replace
+            // B can be replaced, but earlier frames may still be reading it.
             oldBuffer = sortedIndicesBufferB
             sortedIndicesBufferB = newBuffer
         } else {
-            // Currently rendering with B, so A is safe to replace
+            // A can be replaced, but earlier frames may still be reading it.
             oldBuffer = sortedIndicesBufferA
             sortedIndicesBufferA = newBuffer
         }
@@ -1185,14 +1199,9 @@ public class SplatRenderer: @unchecked Sendable {
     }
 
     private func acquireSortOutputBuffer(minimumCapacity: Int) throws -> (buffer: MetalBuffer<Int32>, releaseOnFailure: Bool) {
-        sortStateLock.lock()
-        let reusableBuffer = usingSortedBufferA ? sortedIndicesBufferB : sortedIndicesBufferA
-        sortStateLock.unlock()
-
-        if let reusableBuffer, reusableBuffer.capacity >= minimumCapacity {
-            return (reusableBuffer, false)
-        }
-
+        // Both published slots may still be used by in-flight render commands.
+        // The pool receives a retired buffer only after all its readers complete.
+        // A fresh pool lease is safe for the independent sort queue to write.
         return (try sortIndexBufferPool.acquire(minimumCapacity: minimumCapacity), true)
     }
 
@@ -2347,41 +2356,50 @@ public class SplatRenderer: @unchecked Sendable {
 
     @discardableResult
     private func compactCurrentSortedIndicesForReducedRenderableSet() -> Bool {
-        guard let editStateBuffer,
-              let sortedIndicesBuffer = getCurrentSortedIndicesBuffer() else {
+        // Reserve the sort gate before taking a CPU snapshot. A running sort
+        // can publish and retire that snapshot. If busy, the caller marks the
+        // renderable set dirty for the next sort.
+        guard let editStateBuffer, tryStartSort() else {
+            return false
+        }
+        defer { finishSort() }
+        guard let sortedIndicesBuffer = getCurrentSortedIndicesBuffer(),
+              sortedIndicesBuffer.count > 0 else { return false }
+
+        // Published indices may already belong to an encoded GPU reader.
+        // Compact into a new lease rather than modifying its input in place.
+        let compactedBuffer: MetalBuffer<Int32>
+        do {
+            compactedBuffer = try sortIndexBufferPool.acquire(minimumCapacity: sortedIndicesBuffer.count)
+        } catch {
             return false
         }
 
         let statePointer = editStateBuffer.contents().bindMemory(to: EditStateStorage.self, capacity: max(splatCount, 1))
-        var didCompact = false
-        var compactedCount: Int?
+        let compactedValues = compactedBuffer.values
+        var compactedCount = 0
+        var originalCount = 0
 
         sortedIndicesBuffer.withLockedValues { values, count in
-            guard count > 0 else { return }
-
-            var writeIndex = 0
+            originalCount = count
             for readIndex in 0..<count {
                 let splatIndex = Int(values[readIndex])
                 guard splatIndex >= 0 && splatIndex < splatCount else { continue }
-                guard !isHiddenOrDeleted(UInt32(statePointer[splatIndex])) else {
-                    didCompact = true
-                    continue
-                }
-                values[writeIndex] = values[readIndex]
-                writeIndex += 1
-            }
-
-            if writeIndex != count {
-                compactedCount = writeIndex
-                didCompact = true
+                guard !isHiddenOrDeleted(UInt32(statePointer[splatIndex])) else { continue }
+                compactedValues[compactedCount] = values[readIndex]
+                compactedCount += 1
             }
         }
 
-        if let compactedCount {
-            sortedIndicesBuffer.count = compactedCount
+        guard compactedCount != originalCount else {
+            sortIndexBufferPool.release(compactedBuffer)
+            return false
         }
-
-        return didCompact
+        compactedBuffer.count = compactedCount
+        if let oldBuffer = swapSortedIndicesBuffer(newBuffer: compactedBuffer) {
+            deferredBufferRelease(oldBuffer)
+        }
+        return true
     }
 
     private func resetEditingTracking() {
@@ -3482,7 +3500,6 @@ public class SplatRenderer: @unchecked Sendable {
         // This prevents CPU/GPU data races on the shared splatBuffer.
         applyPendingColorUpdates()
         let animatedSplatsUpdated = updateAnimatedSplatsIfNeeded(to: commandBuffer)
-        schedulePendingBufferRelease(on: commandBuffer)
 
         let splatCount = splatBuffer.count
         let drawSplatCount = renderableSplatCountForCurrentEditState
@@ -3574,7 +3591,7 @@ public class SplatRenderer: @unchecked Sendable {
         if meshShaderEnabled && canUseMeshShadersSafely && !useCulledDitheredPath,
            let meshPipeline = meshShaderPipelineState,
            let meshDepth = meshShaderDepthState,
-           let sortedIndices = getCurrentSortedIndicesBuffer() {
+           let sortedIndices = getCurrentSortedIndicesBuffer(for: commandBuffer) {
             
             guard let renderEncoder = renderEncoder(multiStage: false,
                                               viewports: viewports,
@@ -3757,7 +3774,7 @@ public class SplatRenderer: @unchecked Sendable {
             )
         } else {
             // Standard path: use sorted indices for correct alpha blending
-            if let sortedIndices = getCurrentSortedIndicesBuffer() {
+            if let sortedIndices = getCurrentSortedIndicesBuffer(for: commandBuffer) {
                 renderEncoder.setVertexBuffer(sortedIndices.buffer, offset: 0, index: BufferIndex.sortedIndices.rawValue)
             }
 
@@ -3951,8 +3968,7 @@ public class SplatRenderer: @unchecked Sendable {
         // under the same lock used by render reads, so the next frame can consume
         // them without waiting for a main-queue turn.
         if let oldBuffer = swapSortedIndicesBuffer(newBuffer: indexOutputBuffer) {
-            // IMPORTANT: Defer release until a later render command buffer completes.
-            // The old buffer may still be referenced by in-flight GPU work.
+            // Only this buffer's encoded readers can release its lease.
             deferredBufferRelease(oldBuffer)
         }
 

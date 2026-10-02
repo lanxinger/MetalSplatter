@@ -10,6 +10,169 @@ import simd
 final class FastSHRendererRegressionTests: XCTestCase {
     private let outgoing = simd_normalize(SIMD3<Float>(0.3, 0.4, 0.8660254))
 
+    func testRepeatedSortsPreserveIndicesRetainedByEarlierGPUWork() async throws {
+        for useGPU in [false, true] {
+            try await assertEarlierIndicesSurviveSorts(useGPU: useGPU)
+        }
+    }
+
+    func testRepeatedSortsWithoutRenderingKeepPoolBounded() async throws {
+        let gpu = try GPU()
+        try await gpu.load([point([.zero])])
+        for useGPU in [false, true] {
+            for _ in 0..<40 { try await gpu.sort(useGPU: useGPU) }
+            let statistics = gpu.renderer.sortedIndexPoolStatistics
+            XCTAssertEqual(statistics.leasedBuffers, 2)
+            XCTAssertLessThanOrEqual(statistics.availableBuffers, 1)
+        }
+    }
+
+    func testRetiredIndicesWaitForTheirOwnRenderReaders() async throws {
+        // Ordinary vertex, ordinary mesh, and FastSH bindings share retirement.
+        for variant in 0..<3 {
+            let gpu = try GPU()
+            gpu.renderer.fastSHConfig.enabled = variant == 2
+            gpu.renderer.meshShaderEnabled = variant == 1
+            var near = point([.zero])
+            near.position = SIMD3(0, 0, -1)
+            var far = near
+            far.position.z = -2
+            try await gpu.load([near, far])
+            let viewport = camera(eye: SIMD3(0, 0, 5))
+            _ = try await gpu.render(viewport, frameCount: 1)
+            try await gpu.sort()
+            let initial = try XCTUnwrap(gpu.renderer.getCurrentSortedIndicesBuffer())
+            let expected = Array(UnsafeBufferPointer(start: initial.values, count: 2))
+            let firstReader = try gpu.encodeRender(viewport)
+            let secondReader = try gpu.encodeRender(viewport)
+            let readback = try XCTUnwrap(initial.device.makeBuffer(length: 8, options: .storageModeShared))
+            let blit = try XCTUnwrap(secondReader.makeBlitCommandEncoder())
+            blit.copy(from: initial.buffer, sourceOffset: 0, to: readback, destinationOffset: 0, size: 8)
+            blit.endEncoding()
+
+            try await gpu.sort()
+            try await gpu.sort()
+            XCTAssertEqual(gpu.renderer.sortedIndexPoolStatistics.leasedBuffers, 3)
+            // A later frame can finish before either earlier reader is submitted.
+            try await gpu.complete(try gpu.encodeRender(viewport))
+            XCTAssertEqual(initial.count, 2, "An unrelated frame must not release this buffer")
+            try await gpu.complete(firstReader)
+            XCTAssertEqual(initial.count, 2, "The second reader still owns the buffer")
+            try await gpu.complete(secondReader)
+            let values = readback.contents().bindMemory(to: Int32.self, capacity: 2)
+            XCTAssertEqual(Array(UnsafeBufferPointer(start: values, count: 2)), expected)
+            XCTAssertEqual(initial.count, 0, "The last reader must return the retired lease")
+            XCTAssertEqual(gpu.renderer.sortedIndexPoolStatistics.leasedBuffers, 2)
+        }
+    }
+
+    func testVisibilityCompactionPreservesIndicesHeldByRenderReaders() async throws {
+        for variant in 0..<3 {
+            let gpu = try GPU()
+            gpu.renderer.fastSHConfig.enabled = variant == 2
+            gpu.renderer.meshShaderEnabled = variant == 1
+            var near = point([.zero])
+            near.position = SIMD3(0, 0, -1)
+            var far = near
+            far.position.z = -2
+            try await gpu.load([near, far])
+            let viewport = camera(eye: SIMD3(0, 0, 5))
+            _ = try await gpu.render(viewport, frameCount: 1)
+            try await gpu.sort()
+            let initial = try XCTUnwrap(gpu.renderer.getCurrentSortedIndicesBuffer())
+            let expected = Array(UnsafeBufferPointer(start: initial.values, count: 2))
+            let reader = try gpu.encodeRender(viewport)
+            let readback = try XCTUnwrap(initial.device.makeBuffer(length: 8, options: .storageModeShared))
+            let blit = try XCTUnwrap(reader.makeBlitCommandEncoder())
+            blit.copy(from: initial.buffer, sourceOffset: 0, to: readback, destinationOffset: 0, size: 8)
+            blit.endEncoding()
+
+            try gpu.renderer.updateEditStates(at: [1], values: [EditableSplatState.hidden.rawValue])
+            let compacted = try XCTUnwrap(gpu.renderer.getCurrentSortedIndicesBuffer())
+            XCTAssertFalse(compacted === initial)
+            XCTAssertEqual(compacted.count, 1)
+            XCTAssertEqual(compacted.values[0], 0)
+            // A second reduction retires the slot held by the encoded reader.
+            try gpu.renderer.updateEditStates(at: [0], values: [EditableSplatState.hidden.rawValue])
+            XCTAssertEqual(gpu.renderer.getCurrentSortedIndicesBuffer()?.count, 0)
+            XCTAssertEqual(initial.count, 2)
+            XCTAssertEqual(gpu.renderer.sortedIndexPoolStatistics.leasedBuffers, 3)
+            try await gpu.complete(reader)
+            let values = readback.contents().bindMemory(to: Int32.self, capacity: 2)
+            XCTAssertEqual(Array(UnsafeBufferPointer(start: values, count: 2)), expected)
+            XCTAssertEqual(initial.count, 0)
+            XCTAssertEqual(gpu.renderer.sortedIndexPoolStatistics.leasedBuffers, 2)
+        }
+    }
+
+    func testVisibilityCompactionDuringSortDefersToNextSort() async throws {
+        let gpu = try GPU()
+        var near = point([.zero])
+        near.position = SIMD3(0, 0, -1)
+        var far = near
+        far.position.z = -2
+        try await gpu.load([near, far])
+        let initial = try XCTUnwrap(gpu.renderer.getCurrentSortedIndicesBuffer())
+        var editError: Error?
+        var observedIndices: MetalBuffer<Int32>?
+        var observedCount: Int?
+        // This callback runs after the sort gate is acquired and before its
+        // worker starts, giving the edit a deterministic busy-sort interleaving.
+        gpu.renderer.onSortStart = {
+            do {
+                try gpu.renderer.updateEditStates(at: [1], values: [EditableSplatState.hidden.rawValue])
+                observedIndices = gpu.renderer.getCurrentSortedIndicesBuffer()
+                observedCount = observedIndices?.count
+            } catch {
+                editError = error
+            }
+        }
+        try await gpu.sort()
+        gpu.renderer.onSortStart = nil
+        XCTAssertNil(editError)
+        XCTAssertTrue(observedIndices === initial, "A busy sort must leave the published input intact")
+        XCTAssertEqual(observedCount, 2, "The edit must not compact a snapshot while a sort can retire it")
+        try await gpu.sort(useGPU: true)
+        let filtered = try XCTUnwrap(gpu.renderer.getCurrentSortedIndicesBuffer())
+        XCTAssertEqual(filtered.count, 1)
+        XCTAssertEqual(filtered.values[0], 0)
+    }
+
+    private func assertEarlierIndicesSurviveSorts(useGPU: Bool) async throws {
+        let gpu = try GPU()
+        let renderer = gpu.renderer
+        renderer.mortonOrderingEnabled = false
+        var near = point([.zero])
+        near.position = SIMD3(0, 0, -1)
+        var far = near
+        far.position.z = -2
+        try renderer.add([near, far])
+        let byteCount = 2 * MemoryLayout<Int32>.stride
+        let device = try XCTUnwrap(MTLCreateSystemDefaultDevice())
+        let queue = try XCTUnwrap(device.makeCommandQueue())
+        let command = try XCTUnwrap(queue.makeCommandBuffer())
+        let initialIndices = try XCTUnwrap(renderer.getCurrentSortedIndicesBuffer(for: command))
+        let readback = try XCTUnwrap(device.makeBuffer(length: byteCount, options: .storageModeShared))
+        let blit = try XCTUnwrap(command.makeBlitCommandEncoder())
+        blit.copy(from: initialIndices.buffer, sourceOffset: 0,
+                  to: readback, destinationOffset: 0, size: byteCount)
+        blit.endEncoding()
+
+        // Hold an earlier GPU reader while two sorts rotate the published slots.
+        // Cover both writers; the held reader makes premature reuse deterministic.
+        try await gpu.sort(useGPU: useGPU)
+        try await gpu.sort(useGPU: useGPU)
+        let currentIndices = try XCTUnwrap(renderer.getCurrentSortedIndicesBuffer())
+        XCTAssertEqual(Array(UnsafeBufferPointer(start: currentIndices.values, count: 2)), [1, 0])
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            command.addCompletedHandler { _ in continuation.resume() }
+            command.commit()
+        }
+        XCTAssertEqual(command.status, .completed, "\(String(describing: command.error))")
+        let values = readback.contents().bindMemory(to: Int32.self, capacity: 2)
+        XCTAssertEqual(Array(UnsafeBufferPointer(start: values, count: 2)), [0, 1], "GPU sort: \(useGPU)")
+    }
+
     func testAllSHDegreesBasisFunctionsAndRGBChannelsThroughBaseDispatch() async throws {
         let gpu = try GPU()
         let viewport = camera(eye: outgoing * 5)
@@ -411,15 +574,35 @@ private final class GPU {
         try await sort()
     }
 
-    func sort() async throws {
+    func sort(useGPU: Bool = false) async throws {
         let start = completedSorts.value
-        renderer.resort(useGPU: false)
+        renderer.resort(useGPU: useGPU)
         for _ in 0..<500 {
             if completedSorts.value > start { return }
             try await Task.sleep(for: .milliseconds(10))
         }
-        XCTFail("CPU sort timed out")
+        XCTFail("Sort timed out (GPU: \(useGPU))")
         throw RegressionError.sortTimeout
+    }
+
+    func encodeRender(_ viewport: SplatRenderer.ViewportDescriptor) throws -> MTLCommandBuffer {
+        let descriptor = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rgba16Float, width: 65, height: 65, mipmapped: false)
+        descriptor.usage = [.renderTarget, .shaderRead]
+        descriptor.storageMode = .shared
+        let texture = try XCTUnwrap(device.makeTexture(descriptor: descriptor))
+        let command = try XCTUnwrap(queue.makeCommandBuffer())
+        try renderer.render(viewports: [viewport], colorTexture: texture, colorStoreAction: .store,
+                            depthTexture: nil, rasterizationRateMap: nil, renderTargetArrayLength: 1, to: command)
+        return command
+    }
+
+    func complete(_ command: MTLCommandBuffer) async throws {
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            command.addCompletedHandler { _ in continuation.resume() }
+            command.commit()
+        }
+        XCTAssertEqual(command.status, .completed, "\(String(describing: command.error))")
+        if command.status != .completed { throw RegressionError.commandFailed }
     }
 
     func render(_ viewport: SplatRenderer.ViewportDescriptor, loadAction: MTLLoadAction = .clear,

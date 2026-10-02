@@ -557,7 +557,7 @@ extension FastSHSplatRenderer {
         }
 
         // GPU-only sorting: pass sorted indices buffer to shader
-        if let sortedIndices = getCurrentSortedIndicesBuffer() {
+        if let sortedIndices = getCurrentSortedIndicesBuffer(for: commandBuffer) {
             renderEncoder.setVertexBuffer(sortedIndices.buffer, offset: 0, index: BufferIndex.sortedIndices.rawValue)
         }
 
