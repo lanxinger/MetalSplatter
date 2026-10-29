@@ -1,5 +1,6 @@
 import Foundation
 import PLYIO
+import simd
 
 public class SplatPLYSceneReader: SplatSceneReader {
     enum Error: LocalizedError {
@@ -159,14 +160,25 @@ private struct ElementInputMapping {
     let positionYPropertyIndex: Int
     let positionZPropertyIndex: Int
     let colorPropertyIndices: Color
-    let scaleXPropertyIndex: Int
-    let scaleYPropertyIndex: Int
-    let scaleZPropertyIndex: Int
-    let opacityPropertyIndex: Int
-    let rotation0PropertyIndex: Int
-    let rotation1PropertyIndex: Int
-    let rotation2PropertyIndex: Int
-    let rotation3PropertyIndex: Int
+    /// Gaussian shape properties; nil for a plain point cloud (position and color only).
+    let shape: Shape?
+
+    struct Shape {
+        let scaleXPropertyIndex: Int
+        let scaleYPropertyIndex: Int
+        /// Nil for 2DGS scenes, which leave out the flat axis (splat-transform, Brush).
+        let scaleZPropertyIndex: Int?
+        let opacityPropertyIndex: Int
+        let rotation0PropertyIndex: Int
+        let rotation1PropertyIndex: Int
+        let rotation2PropertyIndex: Int
+        let rotation3PropertyIndex: Int
+    }
+
+    /// A 2DGS splat's missing third axis: the most negative finite log scale, so exp() gives 0.
+    static let flatLogScale = -Float.greatestFiniteMagnitude
+    /// Point cloud points are drawn as opaque spheres 0.01 wide, like gsbox v4.8.4.
+    static let pointCloudScale = SIMD3<Float>(repeating: 0.01)
 
     static func elementMapping(for header: PLYHeader) throws -> ElementInputMapping {
         guard let elementTypeIndex = header.index(forElementNamed: SplatPLYConstants.ElementName.point.rawValue) else {
@@ -224,29 +236,26 @@ private struct ElementInputMapping {
             throw SplatPLYSceneReader.Error.unsupportedFileContents("No color property elements found with the expected types")
         }
 
-        let scaleXPropertyIndex = try headerElement.index(forFloat32PropertyNamed: SplatPLYConstants.PropertyName.scaleX)
-        let scaleYPropertyIndex = try headerElement.index(forFloat32PropertyNamed: SplatPLYConstants.PropertyName.scaleY)
-        let scaleZPropertyIndex = try headerElement.index(forFloat32PropertyNamed: SplatPLYConstants.PropertyName.scaleZ)
-        let opacityPropertyIndex = try headerElement.index(forFloat32PropertyNamed: SplatPLYConstants.PropertyName.opacity)
-
-        let rotation0PropertyIndex = try headerElement.index(forFloat32PropertyNamed: SplatPLYConstants.PropertyName.rotation0)
-        let rotation1PropertyIndex = try headerElement.index(forFloat32PropertyNamed: SplatPLYConstants.PropertyName.rotation1)
-        let rotation2PropertyIndex = try headerElement.index(forFloat32PropertyNamed: SplatPLYConstants.PropertyName.rotation2)
-        let rotation3PropertyIndex = try headerElement.index(forFloat32PropertyNamed: SplatPLYConstants.PropertyName.rotation3)
+        let shapePropertyNames = [SplatPLYConstants.PropertyName.scaleX, SplatPLYConstants.PropertyName.scaleY,
+                                  SplatPLYConstants.PropertyName.scaleZ, SplatPLYConstants.PropertyName.opacity,
+                                  SplatPLYConstants.PropertyName.rotation0, SplatPLYConstants.PropertyName.rotation1,
+                                  SplatPLYConstants.PropertyName.rotation2, SplatPLYConstants.PropertyName.rotation3]
+        let shape: Shape?
+        if case .sphericalHarmonic = color {
+            shape = try Shape(headerElement)
+        } else if shapePropertyNames.allSatisfy({ !headerElement.hasProperty(forName: $0) }) {
+            // An RGB point cloud: position and color only.
+            shape = nil
+        } else {
+            shape = try Shape(headerElement)
+        }
 
         return ElementInputMapping(elementTypeIndex: elementTypeIndex,
                                    positionXPropertyIndex: positionXPropertyIndex,
                                    positionYPropertyIndex: positionYPropertyIndex,
                                    positionZPropertyIndex: positionZPropertyIndex,
                                    colorPropertyIndices: color,
-                                   scaleXPropertyIndex: scaleXPropertyIndex,
-                                   scaleYPropertyIndex: scaleYPropertyIndex,
-                                   scaleZPropertyIndex: scaleZPropertyIndex,
-                                   opacityPropertyIndex: opacityPropertyIndex,
-                                   rotation0PropertyIndex: rotation0PropertyIndex,
-                                   rotation1PropertyIndex: rotation1PropertyIndex,
-                                   rotation2PropertyIndex: rotation2PropertyIndex,
-                                   rotation3PropertyIndex: rotation3PropertyIndex)
+                                   shape: shape)
     }
 
     func apply(from element: PLYElement, to result: inout SplatScenePoint) throws {
@@ -271,15 +280,35 @@ private struct ElementInputMapping {
                                               try element.uint8Value(forPropertyIndex: propertyIndices.z)))
         }
 
+        guard let shape else {
+            result.scale = .linearFloat(Self.pointCloudScale)
+            result.opacity = .linearFloat(1)
+            result.rotation = simd_quatf(ix: 0, iy: 0, iz: 0, r: 1)
+            return
+        }
+
         result.scale =
-            .exponent(SIMD3(try element.float32Value(forPropertyIndex: scaleXPropertyIndex),
-                            try element.float32Value(forPropertyIndex: scaleYPropertyIndex),
-                            try element.float32Value(forPropertyIndex: scaleZPropertyIndex)))
-        result.opacity = .logitFloat(try element.float32Value(forPropertyIndex: opacityPropertyIndex))
-        result.rotation.real   = try element.float32Value(forPropertyIndex: rotation0PropertyIndex)
-        result.rotation.imag.x = try element.float32Value(forPropertyIndex: rotation1PropertyIndex)
-        result.rotation.imag.y = try element.float32Value(forPropertyIndex: rotation2PropertyIndex)
-        result.rotation.imag.z = try element.float32Value(forPropertyIndex: rotation3PropertyIndex)
+            .exponent(SIMD3(try element.float32Value(forPropertyIndex: shape.scaleXPropertyIndex),
+                            try element.float32Value(forPropertyIndex: shape.scaleYPropertyIndex),
+                            try shape.scaleZPropertyIndex.map { try element.float32Value(forPropertyIndex: $0) } ?? Self.flatLogScale))
+        result.opacity = .logitFloat(try element.float32Value(forPropertyIndex: shape.opacityPropertyIndex))
+        result.rotation.real   = try element.float32Value(forPropertyIndex: shape.rotation0PropertyIndex)
+        result.rotation.imag.x = try element.float32Value(forPropertyIndex: shape.rotation1PropertyIndex)
+        result.rotation.imag.y = try element.float32Value(forPropertyIndex: shape.rotation2PropertyIndex)
+        result.rotation.imag.z = try element.float32Value(forPropertyIndex: shape.rotation3PropertyIndex)
+    }
+}
+
+private extension ElementInputMapping.Shape {
+    init(_ element: PLYHeader.Element) throws {
+        scaleXPropertyIndex = try element.index(forFloat32PropertyNamed: SplatPLYConstants.PropertyName.scaleX)
+        scaleYPropertyIndex = try element.index(forFloat32PropertyNamed: SplatPLYConstants.PropertyName.scaleY)
+        scaleZPropertyIndex = try element.index(forOptionalFloat32PropertyNamed: SplatPLYConstants.PropertyName.scaleZ)
+        opacityPropertyIndex = try element.index(forFloat32PropertyNamed: SplatPLYConstants.PropertyName.opacity)
+        rotation0PropertyIndex = try element.index(forFloat32PropertyNamed: SplatPLYConstants.PropertyName.rotation0)
+        rotation1PropertyIndex = try element.index(forFloat32PropertyNamed: SplatPLYConstants.PropertyName.rotation1)
+        rotation2PropertyIndex = try element.index(forFloat32PropertyNamed: SplatPLYConstants.PropertyName.rotation2)
+        rotation3PropertyIndex = try element.index(forFloat32PropertyNamed: SplatPLYConstants.PropertyName.rotation3)
     }
 }
 

@@ -1,14 +1,13 @@
 import Foundation
 import simd
-import SplatIO
 
 /// Rotates a world-space Gaussian SH function independently in each RGB channel.
 /// Construct once per edit, then reuse the small per-band matrices for every point.
-struct SphericalHarmonicRotation {
+public struct SphericalHarmonicRotation: Sendable {
     private let bands: [[Double]]
-    var isIdentity: Bool { bands.isEmpty }
+    public var isIdentity: Bool { bands.isEmpty }
 
-    init(rotation: simd_quatf) {
+    public init(rotation: simd_quatf) {
         guard rotation.imag != .zero else {
             bands = []
             return
@@ -43,11 +42,12 @@ struct SphericalHarmonicRotation {
         bands = matrices
     }
 
-    func applying(to color: SplatScenePoint.Color) -> SplatScenePoint.Color {
+    public func applying(to color: SplatScenePoint.Color) -> SplatScenePoint.Color {
         guard !isIdentity, case let .sphericalHarmonic(coefficients) = color, coefficients.count > 1 else {
             return color
         }
-        // The editor validates this before mutating any selected point.
+        // Readers produce at most degree 4, and the editor validates this before mutating any
+        // selected point.
         precondition(coefficients.count <= 25)
         var degree = 1
         while (degree + 1) * (degree + 1) < coefficients.count { degree += 1 }

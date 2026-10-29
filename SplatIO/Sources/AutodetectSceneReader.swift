@@ -10,7 +10,9 @@ public class AutodetectSceneReader: SplatSceneReader {
         case mip
     }
 
-    /// Brush metadata-derived render mode.
+    /// Render mode from the file's metadata: PLY `SplatRenderMode` (Brush) and `antialiased`
+    /// (Postshot) comments, the SPZ antialiased flag, SOG `model`/`antialias`, and the glTF root
+    /// `extras.SplatRenderMode`.
     public private(set) var renderMode: RenderMode = .standard
 
     /// Whether the loaded asset should use Brush MIP rendering semantics.
@@ -32,13 +34,14 @@ public class AutodetectSceneReader: SplatSceneReader {
         print("AutodetectSceneReader: File extension: \(url.pathExtension)")
         
         let format = SplatFileFormat(for: url)
-        var detectedRenderMode: RenderMode = .standard
+        var detectedRenderMode: RenderMode?
         print("AutodetectSceneReader: Detected format: \(String(describing: format))")
         
         switch format {
         case .ply:
             print("AutodetectSceneReader: Loading as PLY")
             reader = try SplatPLYSceneReader(url)
+            detectedRenderMode = Self.plyRenderMode(url: url)
         case .dotSplat:
             print("AutodetectSceneReader: Loading as dotSplat")
             reader = try DotSplatSceneReader(url)
@@ -60,15 +63,21 @@ public class AutodetectSceneReader: SplatSceneReader {
                 let fileExtension = url.pathExtension.lowercased()
                 if fileExtension == "sog" {
                     // SOGS v2 bundled format - use the v2 reader directly
-                    reader = try SplatSOGSSceneReaderV2(url)
+                    let sogReader = try SplatSOGSSceneReaderV2(url)
+                    reader = sogReader
+                    detectedRenderMode = sogReader.isAntialiased ? .mip : .standard
                     print("AutodetectSceneReader: Successfully created SplatSOGSSceneReaderV2 for .sog file")
                 } else if fileExtension == "zip" {
                     // Legacy ZIP format - use ZIP reader
-                    reader = try SplatSOGSZipReader(url)
+                    let zipReader = try SplatSOGSZipReader(url)
+                    reader = zipReader
+                    detectedRenderMode = zipReader.isAntialiased ? .mip : .standard
                     print("AutodetectSceneReader: Successfully created SplatSOGSZipReader")
                 } else {
                     // Standard SOGS format (folder/meta.json) - use main reader with auto-detection
-                    reader = try SplatSOGSSceneReader(url)
+                    let folderReader = try SplatSOGSSceneReader(url)
+                    reader = folderReader
+                    detectedRenderMode = folderReader.isAntialiased ? .mip : .standard
                     print("AutodetectSceneReader: Successfully created SplatSOGSSceneReader")
                 }
             } catch {
@@ -87,7 +96,9 @@ public class AutodetectSceneReader: SplatSceneReader {
         case .gltf, .glb:
             print("AutodetectSceneReader: Loading as glTF Gaussian splats")
             do {
-                reader = try GltfGaussianSplatSceneReader(url)
+                let gltfReader = try GltfGaussianSplatSceneReader(url)
+                reader = gltfReader
+                detectedRenderMode = gltfReader.isAntialiased ? .mip : .standard
                 print("AutodetectSceneReader: Successfully created GltfGaussianSplatSceneReader")
             } catch {
                 print("AutodetectSceneReader: Failed to create GltfGaussianSplatSceneReader: \(error)")
@@ -98,44 +109,59 @@ public class AutodetectSceneReader: SplatSceneReader {
             throw Error.cannotDetermineFormat
         }
 
-        // Detect Brush render mode from file metadata.
-        // Scans the first 8 KB for the marker string since conversion tools may preserve
-        // the original PLY comment/metadata across container formats.
-        if detectedRenderMode == .mip {
-            renderMode = .mip
-        } else {
-            renderMode = Self.detectRenderMode(url: url)
-        }
+        // Formats without their own render mode metadata (SPX, .splat) may still carry a
+        // converted PLY comment in their header bytes.
+        renderMode = detectedRenderMode ?? Self.scannedRenderMode(url: url)
     }
 
-    /// Scan for Brush's `SplatRenderMode: ...` marker.
-    /// For binary PLYs, only decode the ASCII header bytes up to `end_header` so
-    /// binary payload data cannot break UTF-8/ASCII decoding.
-    private static func detectRenderMode(url: URL) -> RenderMode {
-        let scanSize = 8192
-        guard let handle = try? FileHandle(forReadingFrom: url) else { return .standard }
+    /// The render mode set by PLY header comments: Brush's `SplatRenderMode: default | mip | 2dgs`
+    /// and Postshot's `antialiased 0 | 1`, case-insensitive. The last recognized comment wins.
+    static func renderMode(plyHeader text: String) -> RenderMode {
+        var mode = RenderMode.standard
+        text.enumerateLines { line, _ in
+            var words = line.split(whereSeparator: \.isWhitespace).map { $0.lowercased() }
+            if words.first == "comment" { words.removeFirst() }
+            guard words.count >= 2 else { return }
+            switch (words[0], words[1]) {
+            case ("splatrendermode:", "mip"), ("splatrendermode", "mip"), ("antialiased", "1"):
+                mode = .mip
+            case ("splatrendermode:", "default"), ("splatrendermode", "default"),
+                 ("splatrendermode:", "2dgs"), ("splatrendermode", "2dgs"), ("antialiased", "0"):
+                mode = .standard
+            default:
+                break
+            }
+        }
+        return mode
+    }
+
+    /// Reads the PLY header (up to `end_header`) for its render mode comments.
+    private static func plyRenderMode(url: URL) -> RenderMode {
+        guard let text = headerText(url: url, maxBytes: 1024 * 1024) else { return .standard }
+        return renderMode(plyHeader: text)
+    }
+
+    private static func scannedRenderMode(url: URL) -> RenderMode {
+        guard let text = headerText(url: url, maxBytes: 8192) else { return .standard }
+        return renderMode(plyHeader: text)
+    }
+
+    /// The file's leading bytes up to `end_header`, if present, decoded leniently so binary data
+    /// or non-UTF-8 comments can't hide the text around them.
+    private static func headerText(url: URL, maxBytes: Int) -> String? {
+        guard let handle = try? FileHandle(forReadingFrom: url) else { return nil }
         defer { try? handle.close() }
-        guard let data = try? handle.read(upToCount: scanSize), !data.isEmpty else { return .standard }
-
-        let headerData: Data
-        if let range = data.range(of: Data("end_header".utf8)) {
-            let upperBound = min(data.count, range.upperBound + 1)
-            headerData = data.subdata(in: 0..<upperBound)
-        } else {
-            headerData = data
+        var data = Data()
+        while data.count < maxBytes {
+            guard let chunk = try? handle.read(upToCount: min(65536, maxBytes - data.count)), !chunk.isEmpty else { break }
+            data.append(chunk)
+            if let range = data.range(of: Data("end_header".utf8)) {
+                data = data.subdata(in: data.startIndex..<range.upperBound)
+                break
+            }
         }
-
-        guard let text = String(data: headerData, encoding: .ascii) ?? String(data: headerData, encoding: .utf8) else {
-            return .standard
-        }
-
-        // Brush currently exports `SplatRenderMode: mip`; accept the legacy marker
-        // without the colon as well to remain permissive with converted assets.
-        if text.contains("SplatRenderMode: mip") || text.contains("SplatRenderMode mip") {
-            print("AutodetectSceneReader: Detected Brush mip render mode")
-            return .mip
-        }
-        return .standard
+        guard !data.isEmpty else { return nil }
+        return String(decoding: data, as: UTF8.self)
     }
 
     public func readScene() throws -> [SplatScenePoint] {

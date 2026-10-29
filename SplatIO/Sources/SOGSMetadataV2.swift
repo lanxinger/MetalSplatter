@@ -1,6 +1,19 @@
 import Foundation
 import simd
 
+/// Render mode hints in a SOG `meta.json`, for any version.
+enum SOGSRenderModeHint {
+    /// Whether the scene asks for antialiased (mip) rendering: splat-transform's
+    /// `"model": "antialiased"`, or the older `"antialias": true`.
+    static func isAntialiased(metaJSON: Data) -> Bool {
+        guard let root = (try? JSONSerialization.jsonObject(with: metaJSON)) as? [String: Any] else { return false }
+        if let model = root["model"] as? String {
+            return model.lowercased() == "antialiased"
+        }
+        return root["antialias"] as? Bool ?? false
+    }
+}
+
 // MARK: - SOGS v2 Metadata Structures
 
 public struct SOGSMetadataV2: Codable, Sendable {
@@ -74,7 +87,9 @@ public struct SOGSScalesInfoV2: Codable, Sendable {
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         files = try container.decode([String].self, forKey: .files)
-        codebook = try decodeFloatArrayIfPresent(in: container, forKey: .codebook) ?? []
+        // splat-transform 3.0–3.1.2 wrote −∞ log scales (flat 2DGS axes) as JSON null. Read them
+        // as the most negative finite value, so exp() gives 0 rather than the 1 that 0 would.
+        codebook = try decodeFloatArrayIfPresent(in: container, forKey: .codebook, null: -Float.greatestFiniteMagnitude) ?? []
         mins = try decodeFloatArrayIfPresent(in: container, forKey: .mins)
         maxs = try decodeFloatArrayIfPresent(in: container, forKey: .maxs)
     }
@@ -348,7 +363,9 @@ public struct SOGSIteratorV2 {
         case 1: return simd_quatf(ix: d, iy: b, iz: c, r: a)
         case 2: return simd_quatf(ix: b, iy: d, iz: c, r: a)
         case 3: return simd_quatf(ix: b, iy: c, iz: d, r: a)
-        default: return simd_quatf(ix: a, iy: b, iz: c, r: d)
+        // Alpha 252–255 names the omitted component; anything else is invalid, read as identity
+        // like splat-transform's reader.
+        default: return simd_quatf(ix: 0, iy: 0, iz: 0, r: 1)
         }
     }
     
@@ -439,19 +456,14 @@ public struct SOGSIteratorV2 {
         let labelPixel = WebPDecoder.getPixelUInt8(from: sh_labels, x: x, y: y)
         let paletteIndex = Int(labelPixel.x) + (Int(labelPixel.y) << 8)
 
-        // Texture stores 64 entries per row
-        guard sh_centroids.width % 64 == 0,
+        guard let coefficientsPerEntry = Self.shNCoefficientsPerEntry(centroidsWidth: sh_centroids.width,
+                                                                       bandsHint: shNCoefficientCountHint),
               sh_centroids.height > 0 else {
             return []
         }
 
-        let coefficientsPerEntry = sh_centroids.width / 64
-        guard coefficientsPerEntry > 0 else {
-            return []
-        }
-
-        // Derive palette count: prefer metadata when valid, otherwise fall back to texture rows
-        let inferredPaletteCount = sh_centroids.height * 64
+        // Derive palette count: prefer metadata when valid, otherwise fall back to texture size
+        let inferredPaletteCount = sh_centroids.width * sh_centroids.height / coefficientsPerEntry
         let paletteCountHint = shNPaletteCountHint ?? 0
         let paletteCount = paletteCountHint > 0 ? min(paletteCountHint, inferredPaletteCount) : inferredPaletteCount
         guard paletteCount > 0 else { return [] }
@@ -459,17 +471,18 @@ public struct SOGSIteratorV2 {
             return []
         }
 
-        // Calculate centroid texture coordinates
-        let u = (paletteIndex % 64) * coefficientsPerEntry
-        let v = paletteIndex / 64
-        guard v < sh_centroids.height else { return [] }
+        // Entries are stored back to back in row-major order, `coefficientsPerEntry` pixels each.
+        // splat-transform's 64 entries per row is the same layout; gsbox writes narrower rows.
+        let firstPixel = paletteIndex * coefficientsPerEntry
 
         var shCoeffs: [SIMD3<Float>] = []
         shCoeffs.reserveCapacity(coefficientsPerEntry)
 
         for i in 0..<coefficientsPerEntry {
-            let sampleX = u + i
-            guard sampleX < sh_centroids.width else { break }
+            let pixel = firstPixel + i
+            let sampleX = pixel % sh_centroids.width
+            let v = pixel / sh_centroids.width
+            guard v < sh_centroids.height else { break }
             let centroidPixel = WebPDecoder.getPixelUInt8(from: sh_centroids, x: sampleX, y: v)
 
             let normalized = SIMD3<Float>(
@@ -509,6 +522,16 @@ public struct SOGSIteratorV2 {
         return shCoeffs
     }
     
+    /// Pixels per SH palette entry: the texture layout for splat-transform's 64-entry rows,
+    /// else the `bands` hint (gsbox writes 96-pixel rows for degree 1).
+    static func shNCoefficientsPerEntry(centroidsWidth: Int, bandsHint: Int?) -> Int? {
+        if centroidsWidth > 0, centroidsWidth % 64 == 0 {
+            return centroidsWidth / 64
+        }
+        guard let bandsHint, bandsHint > 0 else { return nil }
+        return bandsHint
+    }
+
     private func lerp(_ a: Float, _ b: Float, _ t: Float) -> Float {
         return a * (1 - t) + b * t
     }
@@ -546,16 +569,18 @@ public struct SOGSBatchIteratorV2 {
     }
 }
 
+/// Decodes a number array whose entries may be JSON null (splat-transform writes non-finite
+/// values that way), substituting `null`. Any other non-number fails the decode.
 @inline(__always)
-fileprivate func decodeFloatArrayIfPresent<T: CodingKey>(in container: KeyedDecodingContainer<T>, forKey key: T) throws -> [Float]? {
+fileprivate func decodeFloatArrayIfPresent<T: CodingKey>(in container: KeyedDecodingContainer<T>, forKey key: T, null: Float = 0) throws -> [Float]? {
     guard container.contains(key) else { return nil }
     var nested = try container.nestedUnkeyedContainer(forKey: key)
     var values: [Float] = []
     while !nested.isAtEnd {
-        if let value = try? nested.decode(Float.self) {
-            values.append(value)
-        } else if (try? nested.decodeNil()) == true {
-            values.append(0.0)
+        if try nested.decodeNil() {
+            values.append(null)
+        } else {
+            values.append(try nested.decode(Float.self))
         }
     }
     return values

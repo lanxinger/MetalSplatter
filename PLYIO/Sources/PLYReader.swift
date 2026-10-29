@@ -48,6 +48,7 @@ public class PLYReader {
         static let cr = UInt8(ascii: "\r")
         static let lf = UInt8(ascii: "\n")
         static let space = UInt8(ascii: " ")
+        static let tab = UInt8(ascii: "\t")
     }
 
     private enum Phase {
@@ -215,8 +216,9 @@ public class PLYReader {
         let contentSearchEnd = lineFeedIndex
         let lineStart = data[..<contentSearchEnd].lastIndex(of: Constants.lf).map { data.index(after: $0) } ?? data.startIndex
 
+        // Ignore trailing whitespace (including the CR of CRLF), as some writers emit "end_header ".
         var lineEnd = contentSearchEnd
-        if lineEnd > lineStart && data[data.index(before: lineEnd)] == Constants.cr {
+        while lineEnd > lineStart && [Constants.cr, Constants.space, Constants.tab].contains(data[data.index(before: lineEnd)]) {
             lineEnd = data.index(before: lineEnd)
         }
 

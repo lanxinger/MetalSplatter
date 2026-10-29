@@ -16,21 +16,36 @@ extension Data {
         }
 
         // Check for gzip signature
-        guard self[0] == 0x1F && self[1] == 0x8B else {
+        guard self[startIndex] == 0x1F && self[startIndex + 1] == 0x8B else {
             throw SplatFileFormatError.decompressionFailed
         }
 
-        // Prepare for zlib inflation
+        return try inflated(windowBits: Data.gzipOrZlibWindowBits, maxOutputSize: maxOutputSize)
+    }
+
+    /// zlib `windowBits` that accept a gzip or zlib header.
+    static let gzipOrZlibWindowBits: Int32 = MAX_WBITS + 32
+    /// zlib `windowBits` for a raw deflate stream without any header.
+    static let rawDeflateWindowBits: Int32 = -MAX_WBITS
+
+    /// Inflates a deflate stream, never producing more than `maxOutputSize` bytes.
+    /// - Parameters:
+    ///   - windowBits: `gzipOrZlibWindowBits` or `rawDeflateWindowBits`.
+    ///   - truncating: Return the first `maxOutputSize` bytes instead of throwing when the stream
+    ///     holds more, for reading a header.
+    /// - Throws: `SplatFileFormatError.decompressionOutputTooLarge` past the limit, or
+    ///   `decompressionFailed` for invalid data. A truncated stream returns what it holds.
+    func inflated(windowBits: Int32, maxOutputSize: Int, truncating: Bool = false) throws -> Data {
+        guard !isEmpty, maxOutputSize > 0 else {
+            throw SplatFileFormatError.decompressionFailed
+        }
+
         var stream = z_stream()
-        var status: Int32
-
-        // Initialize zlib
-        status = inflateInit2_(&stream, MAX_WBITS + 32, ZLIB_VERSION, Int32(MemoryLayout<z_stream>.size))
-        guard status == Z_OK else {
+        guard inflateInit2_(&stream, windowBits, ZLIB_VERSION, Int32(MemoryLayout<z_stream>.size)) == Z_OK else {
             throw SplatFileFormatError.decompressionFailed
         }
+        defer { _ = inflateEnd(&stream) }
 
-        // Setup the source buffer
         return try self.withUnsafeBytes { (inputPointer: UnsafeRawBufferPointer) -> Data in
             guard let baseAddress = inputPointer.bindMemory(to: Bytef.self).baseAddress else {
                 throw SplatFileFormatError.decompressionFailed
@@ -38,44 +53,36 @@ extension Data {
             stream.next_in = UnsafeMutablePointer<Bytef>(mutating: baseAddress)
             stream.avail_in = uInt(self.count)
 
-            // Prepare for output
-            // Increased from 16KB to 128KB for better decompression performance
-            let bufferSize = self.count > (10 * 1024 * 1024) ? (256 * 1024) : (128 * 1024)
+            let bufferSize = Swift.min(self.count > (10 * 1024 * 1024) ? (256 * 1024) : (128 * 1024), maxOutputSize + 1)
             let buffer = UnsafeMutablePointer<Bytef>.allocate(capacity: bufferSize)
             defer { buffer.deallocate() }
 
-            // Setup the destination buffer
             var result = Data()
+            var status: Int32
             repeat {
                 stream.next_out = buffer
                 stream.avail_out = uInt(bufferSize)
 
-                // Inflate and check for errors
                 status = inflate(&stream, Z_NO_FLUSH)
-
                 guard status != Z_NEED_DICT &&
                       status != Z_DATA_ERROR &&
                       status != Z_MEM_ERROR else {
-                    _ = inflateEnd(&stream)
                     throw SplatFileFormatError.decompressionFailed
                 }
 
-                // Calculate how much data we got
                 let bytesDecompressed = bufferSize - Int(stream.avail_out)
+                if bytesDecompressed > maxOutputSize - result.count {
+                    guard truncating else {
+                        throw SplatFileFormatError.decompressionOutputTooLarge
+                    }
+                    result.append(buffer, count: maxOutputSize - result.count)
+                    return result
+                }
                 if bytesDecompressed > 0 {
                     result.append(buffer, count: bytesDecompressed)
                 }
-
-                // Check for decompression bomb (output exceeds limit)
-                if result.count > maxOutputSize {
-                    _ = inflateEnd(&stream)
-                    throw SplatFileFormatError.decompressionOutputTooLarge
-                }
-
             } while status != Z_STREAM_END && stream.avail_out == 0
 
-            // Clean up and return
-            _ = inflateEnd(&stream)
             return result
         }
     }

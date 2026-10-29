@@ -149,7 +149,8 @@ public final class GltfGaussianSplatSceneWriter: SplatSceneWriter {
         var payloads: [AttributePayload] = []
         payloads.append(AttributePayload(name: "POSITION", componentCount: 3, type: "VEC3", data: encodeVec3(points.map(\.position))))
         payloads.append(AttributePayload(name: "KHR_gaussian_splatting:ROTATION", componentCount: 4, type: "VEC4", data: encodeVec4(points.map { $0.rotation.normalized.vector })))
-        payloads.append(AttributePayload(name: "KHR_gaussian_splatting:SCALE", componentCount: 3, type: "VEC3", data: encodeVec3(points.map { $0.scale.asExponent })))
+        // KHR_gaussian_splatting stores linear scale; this writer used to store log-space scale.
+        payloads.append(AttributePayload(name: "KHR_gaussian_splatting:SCALE", componentCount: 3, type: "VEC3", data: encodeVec3(points.map { $0.scale.asLinearFloat })))
         payloads.append(AttributePayload(name: "KHR_gaussian_splatting:OPACITY", componentCount: 1, type: "SCALAR", data: encodeScalar(points.map { $0.opacity.asLinearFloat })))
 
         let pointsWithSH = points.filter {

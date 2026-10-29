@@ -546,7 +546,8 @@ final class SplatIOTests: XCTestCase {
         XCTAssertEqual(points.count, 1)
         let point = try XCTUnwrap(points.first)
         XCTAssertTrue((point.position - SIMD3<Float>(1, 2, 3)).isWithin(tolerance: 1e-6))
-        XCTAssertTrue((point.scale.asLinearFloat - exp(SIMD3<Float>(0.1, 0.2, 0.3))).isWithin(tolerance: 1e-6))
+        // KHR_gaussian_splatting SCALE is linear.
+        XCTAssertTrue((point.scale.asLinearFloat - SIMD3<Float>(0.1, 0.2, 0.3)).isWithin(tolerance: 1e-6))
         XCTAssertEqual(point.opacity.asLinearFloat, Float(UInt16.max / 2) / Float(UInt16.max), accuracy: 1e-6)
         let expectedColor = SIMD3<Float>(
             Float(UInt16.max / 4) / Float(UInt16.max),
@@ -641,7 +642,7 @@ final class SplatIOTests: XCTestCase {
         XCTAssertEqual(points.count, 2)
         XCTAssertTrue((points[0].position - SIMD3<Float>(1, 2, 3)).isWithin(tolerance: 1e-6))
         XCTAssertTrue((points[1].position - SIMD3<Float>(4, 5, 6)).isWithin(tolerance: 1e-6))
-        XCTAssertTrue((points[1].scale.asLinearFloat - exp(SIMD3<Float>(0.4, 0.5, 0.6))).isWithin(tolerance: 1e-6))
+        XCTAssertTrue((points[1].scale.asLinearFloat - SIMD3<Float>(0.4, 0.5, 0.6)).isWithin(tolerance: 1e-6))
     }
 
     func testGLBReaderRejectsAccessorReadingPastBufferViewLength() throws {
