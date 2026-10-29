@@ -69,6 +69,17 @@ public class SplatSOGSSceneReaderV2: SplatSceneReader, @unchecked Sendable {
         }
     }
     
+    /// Whether `meta.json` asks for antialiased (mip) rendering.
+    public var isAntialiased: Bool {
+        let metaData: Data?
+        if let zipArchive {
+            metaData = try? zipArchive.extractFile("meta.json")
+        } else {
+            metaData = try? loadStandaloneFile(sourceURL)
+        }
+        return metaData.map(SOGSRenderModeHint.isAntialiased) ?? false
+    }
+
     public func readScene() throws -> [SplatScenePoint] {
         traceSOGSV2("Loading SOGS v2 metadata")
         
@@ -479,21 +490,17 @@ public class SplatSOGSSceneReaderV2: SplatSceneReader, @unchecked Sendable {
                 sogsV2Log.warning("Validation warning: SH labels texture padded to \(labels.width)x\(labels.height); expected \(baseWidth)x\(baseHeight)")
             }
 
-            guard centroids.width % 64 == 0 else {
-                throw SOGSV2Error.invalidMetadata
-            }
-
-            let coefficientsFromTexture = centroids.width / 64
-            guard coefficientsFromTexture > 0 else {
+            guard let coefficientsPerEntry = SOGSIteratorV2.shNCoefficientsPerEntry(centroidsWidth: centroids.width,
+                                                                                    bandsHint: shN.coefficientsPerEntry) else {
                 throw SOGSV2Error.invalidMetadata
             }
 
             if let coefficientsFromMetadata = shN.coefficientsPerEntry,
-               coefficientsFromMetadata != coefficientsFromTexture {
-                sogsV2Log.warning("Validation warning: shN bands hint \(coefficientsFromMetadata) does not match texture layout \(coefficientsFromTexture); using texture data")
+               coefficientsFromMetadata != coefficientsPerEntry {
+                sogsV2Log.warning("Validation warning: shN bands hint \(coefficientsFromMetadata) does not match texture layout \(coefficientsPerEntry); using texture data")
             }
 
-            let paletteCapacity = centroids.height * 64
+            let paletteCapacity = centroids.width * centroids.height / coefficientsPerEntry
             guard paletteCapacity > 0 else {
                 throw SOGSV2Error.invalidMetadata
             }

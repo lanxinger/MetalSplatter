@@ -82,14 +82,22 @@ public enum MortonOrder {
             let normalized = (pos - minBounds) * invSize
 
             // Quantize to 10-bit integers (0-1023)
-            let qx = UInt32(min(max(normalized.x * 1023, 0), 1023))
-            let qy = UInt32(min(max(normalized.y * 1023, 0), 1023))
-            let qz = UInt32(min(max(normalized.z * 1023, 0), 1023))
+            let qx = quantize10Bit(normalized.x)
+            let qy = quantize10Bit(normalized.y)
+            let qz = quantize10Bit(normalized.z)
 
             codes[i] = encode(qx, qy, qz)
         }
 
         return codes
+    }
+
+    /// Maps 0…1 to 0…1023. NaN (a NaN position, or bounds made non-finite by one) maps to 0
+    /// instead of trapping in the integer conversion.
+    @inline(__always)
+    private static func quantize10Bit(_ value: Float) -> UInt32 {
+        let scaled = value * 1023
+        return scaled > 0 ? UInt32(min(scaled, 1023)) : 0
     }
 
     /// Computes the reordering indices that would sort points by Morton code.

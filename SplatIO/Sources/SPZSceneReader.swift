@@ -1,5 +1,4 @@
 import Foundation
-import Compression
 import simd
 import os
 
@@ -21,9 +20,23 @@ public class SPZSceneReader: SplatSceneReader {
     private var data: Data
     public private(set) var isAntialiased = false
     
+    /// Reads SPZ from memory: a raw (v4) stream, or a gzip-compressed (v1–v3) one.
     public init(data: Data) {
-        self.data = data
+        if Self.isGzipped(data), let decompressed = Self.decompressGzipped(data) {
+            self.data = decompressed
+        } else {
+            self.data = data
+        }
         refreshMetadata()
+    }
+
+    /// The antialiased flag of an SPZ stream, read from its header without decoding the splats.
+    static func headerIsAntialiased(_ data: Data) -> Bool {
+        let headerBytes = Self.isGzipped(data)
+            ? Self.gzipPrefix(data, count: PackedGaussiansHeader.size)
+            : data.prefix(PackedGaussiansHeader.size)
+        guard let headerBytes, let header = try? PackedGaussiansHeader(data: Data(headerBytes)) else { return false }
+        return (header.flags & PackedGaussiansHeader.FlagAntialiased) != 0
     }
     
     public convenience init(contentsOf url: URL) throws {
@@ -39,10 +52,13 @@ public class SPZSceneReader: SplatSceneReader {
         do {
             let fileData = try Data(contentsOf: url)
             spzLog.debug(" Successfully read data, size: \(fileData.count) bytes")
-            
-            // Initialize with original data first
+
+            // init(data:) already gunzips v1–v3 files, with a size limit.
             self.init(data: fileData)
             defer { self.refreshMetadata() }
+            if Self.isGzipped(fileData) {
+                return
+            }
             
             // Special handling for iOS files from Downloads folder (they're often gzipped)
             if url.path.contains("/Containers/Shared/AppGroup/") && url.path.contains("/File Provider Storage/Downloads/") {
@@ -65,14 +81,6 @@ public class SPZSceneReader: SplatSceneReader {
                 spzLog.debug(" No SPZ magic number found at start: 0x\(String(format: "%08X", magic))")
             }
             
-            // Check if the file is gzipped
-            if Self.isGzipped(fileData) {
-                spzLog.debug(" Is gzipped: true")
-                if let decompressedData = Self.decompressGzipped(fileData) {
-                    spzLog.debug(" Successfully decompressed data: \(decompressedData.count) bytes")
-                    self.data = decompressedData
-                }
-            }
         } catch {
             spzLog.debug(" Error reading file: \(error)")
             throw error
@@ -82,13 +90,6 @@ public class SPZSceneReader: SplatSceneReader {
     // Special function to handle iOS downloaded files (often problematic gzipped files)
     private func processIOSDownloadFile(_ fileData: Data) -> Bool {
         spzLog.debug(" Trying iOS-specific handling for downloaded file")
-        
-        // Try the GZipArchive approach (used by many iOS apps)
-        if let decompressed = Self.decompressIOSGzippedFile(fileData) {
-            spzLog.debug(" Successfully decompressed iOS file: \(decompressed.count) bytes")
-            self.data = decompressed
-            return true
-        }
         
         // Try to find a magic number in the file and extract from there
         if fileData.count > 100 {
@@ -197,15 +198,12 @@ public class SPZSceneReader: SplatSceneReader {
         // Implementation based on the original C++ code with SIMD optimizations
         var results = [SplatScenePoint]()
         
-        // Safety checks matching C++ reference implementation  
-        let maxPointsToRead = 10000000  // C++ constant: constexpr int32_t maxPointsToRead = 10000000;
-        if packedGaussians.numPoints > maxPointsToRead {
-            spzLog.debug(" Too many points: \(packedGaussians.numPoints), capping at \(maxPointsToRead)")
-        }
+        // The point count is bounded by the data actually decoded (deserialize trims it to the
+        // bytes present), so every point is unpacked rather than truncating at a fixed limit.
         if packedGaussians.shDegree > 4 {
             spzLog.debug(" Unsupported SH degree: \(packedGaussians.shDegree), SPZ spec allows 0-4")
         }
-        let safeNumPoints = min(packedGaussians.numPoints, maxPointsToRead)
+        let safeNumPoints = packedGaussians.numPoints
         spzLog.debug(" Unpacking \(safeNumPoints) points with SH degree \(packedGaussians.shDegree)")
         
         // Determine data layout based on format
@@ -288,15 +286,18 @@ public class SPZSceneReader: SplatSceneReader {
         var chunkResults = [SplatScenePoint]()
         chunkResults.reserveCapacity(range.count)
 
-        // Match Niantic's default loadSpz behavior: preserve SPZ coordinates unless
-        // a caller explicitly requests conversion. SplatIO has no conversion option yet.
-        let coordinateConverter = CoordinateConverter.converter(from: .rub, to: .rub)
+        // Data tagged with the Adobe coordinate_system extension is converted to PLY axes (RDF),
+        // which the other readers produce. Untagged data is kept as stored: gsbox, SplatKit and
+        // earlier versions of this reader treat SPZ as PLY axes, although nianticlabs/spz
+        // assumes RUB.
+        let conversion = SPZCoordinateConversion(from: packedGaussians.coordinateSystem)
+        let coordinateConverter = conversion.flips
 
         // Color scale factor from original C++ implementation
         let colorScale: Float = 0.15
 
         // Fixed-point scale for non-float16 positions
-        let fixedPointScale = 1.0 / Float(1 << packedGaussians.fractionalBits)
+        let fixedPointScale = spzFixedPointScale(fractionalBits: packedGaussians.fractionalBits)
 
         // PERF: Hoist withUnsafeBytes outside the loop to avoid per-point closure overhead.
         // Get raw pointers once, use them for all points in the chunk.
@@ -439,13 +440,14 @@ public class SPZSceneReader: SplatSceneReader {
                     }
 
                     // Create the point with properly decoded values
-                    let point = SplatScenePoint(
+                    var point = SplatScenePoint(
                         position: position,
                         color: .sphericalHarmonic(sphericalHarmonics),
                         opacity: .logitFloat(alpha),
                         scale: .exponent(scale),
                         rotation: rotation
                     )
+                    conversion.rotate(&point)
 
                     // Add to results
                     chunkResults.append(point)
@@ -463,164 +465,59 @@ public class SPZSceneReader: SplatSceneReader {
     }
     
     private static func isGzipped(_ data: Data) -> Bool {
-        return data.count >= 2 && data[0] == 0x1F && data[1] == 0x8B
+        return data.count >= 2 && data[data.startIndex] == 0x1F && data[data.startIndex + 1] == 0x8B
     }
 
-    // Special method for iOS files that don't decompress with standard methods
-    private static func decompressIOSGzippedFile(_ data: Data) -> Data? {
-        guard data.count > 10 else { return nil } // Need at least the gzip header
-
-        spzLog.debug(" Attempting iOS-specific gzip decompression")
-
-        let maxDecompressedSize = Data.maxDecompressedSize
-
-        // First try to use the Compression framework directly
-        do {
-            var decompressed = Data()
-            var tooLarge = false
-            // Skip the first 10 bytes (gzip header)
-            let compressedData = data.subdata(in: 10..<data.count)
-
-            // Initialize a decoder for zlib with size limit check
-            let outputFilter = try OutputFilter(.decompress, using: .zlib) { (chunk: Data?) -> Void in
-                if let chunk = chunk, !tooLarge {
-                    decompressed.append(chunk)
-                    if decompressed.count > maxDecompressedSize {
-                        tooLarge = true
-                        decompressed.removeAll()  // Free memory
-                    }
-                }
-            }
-
-            // Process the data
-            try outputFilter.write(compressedData)
-            try outputFilter.finalize()
-
-            // Check if decompression was aborted due to size
-            if tooLarge {
-                spzLog.debug(" iOS-specific decompression aborted - output too large")
-                return nil
-            }
-
-            // If we got something reasonable, return it
-            if decompressed.count > 1000 {
-                spzLog.debug(" iOS-specific decompression succeeded with \(decompressed.count) bytes")
-                return decompressed
-            }
-        } catch {
-            spzLog.debug(" iOS-specific decompression failed: \(error)")
-        }
-
-        // Second approach: try several offsets into the file
-        let possibleOffsets = [0, 10, 16, 18, 20, 24, 32]
-
-        for offset in possibleOffsets {
-            guard offset < data.count else { continue }
-
-            let compressedData = data.subdata(in: offset..<data.count)
-            do {
-                let decompressed = try (compressedData as NSData).decompressed(using: .zlib) as Data
-                // Post-check size (limited protection - NSData already allocated)
-                guard decompressed.count <= maxDecompressedSize else {
-                    spzLog.debug(" iOS decompression at offset \(offset) exceeded size limit")
-                    continue
-                }
-                if decompressed.count > 1000 {
-                    spzLog.debug(" iOS decompression succeeded at offset \(offset) with \(decompressed.count) bytes")
-                    return decompressed
-                }
-            } catch {
-                // Just try the next offset
-            }
-        }
-
-        return nil
-    }
-    
+    /// Gunzips a legacy (v1–v3) SPZ file, never producing more than its header allows.
+    /// A gzip header zlib can't parse (such as a compression method other than deflate) is
+    /// retried as raw deflate after the fixed 10-byte gzip header, with the same limit.
     private static func decompressGzipped(_ data: Data) -> Data? {
-        // Simple check for gzip header
-        guard data.count >= 2, data[0] == 0x1F, data[1] == 0x8B else {
+        guard isGzipped(data) else {
             spzLog.debug(" Not a gzip file (wrong magic bytes)")
             return nil
         }
 
-        spzLog.debug(" Attempting to decompress gzipped data")
-
-        let maxDecompressedSize = Data.maxDecompressedSize
-
-        // First try our streaming gunzipped() which has built-in size limits
-        do {
-            let decompressed = try data.gunzipped(maxOutputSize: maxDecompressedSize)
-            spzLog.debug(" Successfully decompressed with streaming gunzipped: \(decompressed.count) bytes")
-            return decompressed
-        } catch SplatFileFormatError.decompressionOutputTooLarge {
-            spzLog.debug(" Decompression aborted - output too large")
-            return nil
-        } catch {
-            spzLog.debug(" Streaming gunzipped failed: \(error)")
-        }
-
-        // Fall back to built-in methods with post-check size limits
-        spzLog.debug(" Trying built-in decompression methods")
-
-        // Try each compression algorithm with size check
-        do {
-            let decompressed = try (data as NSData).decompressed(using: .zlib) as Data
-            guard decompressed.count <= maxDecompressedSize else {
-                spzLog.debug(" .zlib decompression exceeded size limit")
-                return nil
-            }
-            spzLog.debug(" Successfully decompressed with .zlib algorithm")
-            return decompressed
-        } catch {
-            spzLog.debug(" Decompression with .zlib failed")
-        }
-
-        do {
-            let decompressed = try (data as NSData).decompressed(using: .lzfse) as Data
-            guard decompressed.count <= maxDecompressedSize else {
-                spzLog.debug(" .lzfse decompression exceeded size limit")
-                return nil
-            }
-            spzLog.debug(" Successfully decompressed with .lzfse algorithm")
-            return decompressed
-        } catch {
-            spzLog.debug(" Decompression with .lzfse failed")
-        }
-
-        if #available(iOS 13.0, macOS 10.15, *) {
+        let attempts: [(windowBits: Int32, input: Data)] = [
+            (Data.gzipOrZlibWindowBits, data),
+            (Data.rawDeflateWindowBits, data.count > 10 ? data.subdata(in: (data.startIndex + 10)..<data.endIndex) : Data()),
+        ]
+        for attempt in attempts where !attempt.input.isEmpty {
+            guard let prefix = try? attempt.input.inflated(windowBits: attempt.windowBits,
+                                                            maxOutputSize: PackedGaussiansHeader.size,
+                                                            truncating: true) else { continue }
+            let limit = legacyDecompressedSizeLimit(header: prefix, compressedSize: data.count)
             do {
-                let decompressed = try (data as NSData).decompressed(using: .lz4) as Data
-                guard decompressed.count <= maxDecompressedSize else {
-                    spzLog.debug(" .lz4 decompression exceeded size limit")
-                    return nil
-                }
-                spzLog.debug(" Successfully decompressed with .lz4 algorithm")
+                let decompressed = try attempt.input.inflated(windowBits: attempt.windowBits, maxOutputSize: limit)
+                spzLog.debug(" Decompressed \(decompressed.count) bytes (limit \(limit))")
                 return decompressed
             } catch {
-                spzLog.debug(" Decompression with .lz4 failed")
+                spzLog.debug(" Gzip decompression failed: \(error)")
             }
         }
-
-        // Try to decompress with gzip header skipped as a last resort
-        spzLog.debug(" Attempting gzip payload decoder")
-        do {
-            // Skip the gzip header (10 bytes) and try to decompress the payload
-            if data.count > 10 {
-                let payloadData = data.subdata(in: 10..<data.count)
-                let decompressed = try (payloadData as NSData).decompressed(using: .zlib) as Data
-                guard decompressed.count <= maxDecompressedSize else {
-                    spzLog.debug(" Gzip payload decompression exceeded size limit")
-                    return nil
-                }
-                spzLog.debug(" Successfully decompressed gzip payload: \(decompressed.count) bytes")
-                return decompressed
-            }
-        } catch {
-            spzLog.debug(" Gzip payload decoder failed: \(error)")
-        }
-
-        spzLog.debug(" All decompression attempts failed")
         return nil
+    }
+
+    /// The first `count` decompressed bytes of a gzip stream.
+    private static func gzipPrefix(_ data: Data, count: Int) -> Data? {
+        try? data.inflated(windowBits: Data.gzipOrZlibWindowBits, maxOutputSize: count, truncating: true)
+    }
+
+    /// Upper bound on a legacy SPZ stream's decompressed size, from its header: the payload the
+    /// header describes plus room for extension records. Like nianticlabs/spz, a header claiming
+    /// more points than the compressed file could hold (positions take 9 bytes per point and
+    /// deflate stays under 1032:1) gets no more than that. Data without an SPZ header keeps the
+    /// general limit.
+    static func legacyDecompressedSizeLimit(header: Data, compressedSize: Int) -> Int {
+        guard let header = try? PackedGaussiansHeader(data: header), (1...3).contains(header.version) else {
+            return Data.maxDecompressedSize
+        }
+        let maximumPoints = compressedSize.multipliedReportingOverflow(by: 1024).partialValue / 9
+        let points = min(Int(header.numPoints), maximumPoints)
+        let bytesPerPoint = (header.version == 1 ? 6 : 9) + 1 + 3 + 3 + (header.version >= 3 ? 4 : 3)
+            + shDimForDegree(Int(header.shDegree)) * 3
+        let extensionBytes = (header.flags & PackedGaussiansHeader.FlagHasExtensions) != 0 ? 16 * 1024 * 1024 : 0
+        let (payload, overflow) = points.multipliedReportingOverflow(by: bytesPerPoint)
+        guard !overflow else { return Data.maxDecompressedSize }
+        return PackedGaussiansHeader.size + payload + extensionBytes
     }
 }

@@ -58,9 +58,13 @@ private class PointCollector: SplatSceneReaderDelegate {
     private let semaphore = DispatchSemaphore(value: 0)
     private var completed = false
 
+    /// The count comes from a file header, before any data backs it, so a corrupt one could ask
+    /// for an impossible allocation. Reserve at most this many points; larger scenes grow.
+    private static let maximumReservation = 1 << 22
+
     func didStartReading(withPointCount pointCount: UInt32?) {
         if let count = pointCount {
-            points.reserveCapacity(Int(count))
+            points.reserveCapacity(min(Int(count), Self.maximumReservation))
         }
     }
 

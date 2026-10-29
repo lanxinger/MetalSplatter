@@ -28,12 +28,15 @@ struct PackedGaussiansHeader {
     
     // Constants for flag bits (matching C++ implementation)
     static let FlagAntialiased: UInt8 = 0x01
-    static let FlagUsesFloat16: UInt8 = 0x02
     static let FlagHasExtensions: UInt8 = 0x02
-    
+
+    /// Adobe coordinate_system extension record: a little-endian UInt32 `CoordinateSystem`.
+    static let coordinateSystemExtensionType: UInt32 = 0xADBE_0003
+
     // Flags bit meanings (matching C++ implementation):
     // bit 0: antialiased (whether gaussians should be rendered with mip-splat antialiasing)
-    // bit 1: usesFloat16 (whether positions are stored as float16 or fixed-point)
+    // bit 1: extension records follow the SH data (v2/v3) or the header (v4)
+    // Positions are float16 in version 1 only; the flags never select it.
     // Note: Version 3+ uses smallest-three quaternion encoding (4 bytes) instead of first-three (3 bytes)
     
     init() {}
@@ -79,10 +82,6 @@ struct PackedGaussiansHeader {
         
         // Validate reasonable values
         guard shDegree <= 4 else {
-            throw SplatFileFormatError.invalidData
-        }
-        
-        guard fractionalBits <= 16 else {
             throw SplatFileFormatError.invalidData
         }
     }
@@ -134,10 +133,6 @@ private struct NgspV4Header {
         tocByteOffset = try data.readLittleEndianUInt32(at: 16)
 
         guard shDegree <= 4 else {
-            throw SplatFileFormatError.invalidData
-        }
-
-        guard fractionalBits <= 16 else {
             throw SplatFileFormatError.invalidData
         }
 
@@ -217,7 +212,7 @@ struct PackedGaussian {
                 }
             }
         } else {
-            let scale = 1.0 / Float(1 << fractionalBits)
+            let scale = spzFixedPointScale(fractionalBits: fractionalBits)
             for i in 0..<3 {
                 let idx = i * 3
                 if idx + 2 < position.count {
@@ -315,10 +310,12 @@ struct PackedGaussians {
     var colors: [UInt8] = []
     var sh: [UInt8] = []
     
+    /// Storage coordinate system from the Adobe coordinate_system extension, if the file has one.
+    var coordinateSystem: CoordinateSystem?
+
     var usesFloat16: Bool {
         // C++ reference: version 1 uses float16, version 2+ uses fixed-point
-        // For compatibility, also check data size as fallback
-        return positions.count == numPoints * 3 * 2
+        return version == 1
     }
     
     // Helper to calculate SH coefficient count (matching Niantic reference)
@@ -440,14 +437,10 @@ struct PackedGaussians {
         header.numPoints = UInt32(numPoints)
         header.shDegree = UInt8(shDegree)
         header.fractionalBits = UInt8(fractionalBits)
-        // Set the antialiased flag if needed
+        // Set the antialiased flag if needed. Float16 positions follow from version 1 alone;
+        // flag bit 1 means extension records, which this writer doesn't emit.
         header.flags = (antialiased ? PackedGaussiansHeader.FlagAntialiased : 0x0)
-        
-        // Set the usesFloat16 flag if positions are stored in float16 format
-        if positions.count == numPoints * 3 * 2 {
-            header.flags |= PackedGaussiansHeader.FlagUsesFloat16
-        }
-        
+
         var data = header.serialize()
         
         // Append data in non-interleaved order
@@ -600,9 +593,10 @@ struct PackedGaussians {
         // Extract header fields with C++ reference validation
         let numPoints = Int(header.numPoints)
         spzTypesLog.debug("deserialize: Number of points: \(numPoints)")
-        // C++ check: maxPointsToRead = 10000000
-        if numPoints <= 0 || numPoints > 10000000 {
-            spzTypesLog.debug("deserialize: Invalid point count: \(numPoints), must be 1-10M")
+        // Every component below is cut to the bytes actually present, so the point count needs
+        // no fixed cap (nianticlabs/spz bounds it by file size instead of its old 10M limit).
+        if numPoints <= 0 {
+            spzTypesLog.debug("deserialize: Invalid point count: \(numPoints)")
             throw SplatFileFormatError.invalidData
         }
         
@@ -614,8 +608,9 @@ struct PackedGaussians {
         }
         
         let shDim = shDimForDegree(shDegree)
-        // C++ reference: version 1 uses float16, version 2+ uses fixed-point with flags
-        let usesFloat16 = (header.version == 1) || (header.flags & PackedGaussiansHeader.FlagUsesFloat16) != 0
+        // C++ reference: version 1 uses float16, version 2+ uses fixed-point. Flag bit 1 marks
+        // extension records, not float16.
+        let usesFloat16 = header.version == 1
         let usesQuaternionSmallestThree = header.version >= 3
         spzTypesLog.debug("deserialize: Uses Float16: \(usesFloat16) (version: \(header.version), flags: 0x\(String(format: "%02X", header.flags)))")
         spzTypesLog.debug("deserialize: Uses Smallest-Three Quaternions: \(usesQuaternionSmallestThree)")
@@ -695,7 +690,10 @@ struct PackedGaussians {
         result.fractionalBits = Int(header.fractionalBits)
         result.antialiased = (header.flags & PackedGaussiansHeader.FlagAntialiased) != 0
         result.usesQuaternionSmallestThree = usesQuaternionSmallestThree
-        
+        if header.version >= 2, (header.flags & PackedGaussiansHeader.FlagHasExtensions) != 0, expectedSize < data.count {
+            result.coordinateSystem = spzCoordinateSystem(inExtensionRecordsOf: data, from: expectedSize, to: data.count)
+        }
+
         // Extract component data (safely handling truncated files)
         // For each component, check if we have enough data and adjust if needed
         let safePositionBytes = positionOffset < data.count ? min(positionBytes, data.count - positionOffset) : 0
@@ -799,7 +797,9 @@ struct PackedGaussians {
     private static func deserializeNgspV4(_ data: Data) throws -> PackedGaussians {
         let header = try NgspV4Header(data: data)
         let numPoints = Int(header.numPoints)
-        guard numPoints > 0 else {
+        // nianticlabs/spz bound: positions take 9 bytes per point and no stream compresses past
+        // 1024:1, so a larger count can't be genuine. Checked before sizing any stream.
+        guard numPoints > 0, numPoints <= data.count.multipliedReportingOverflow(by: 1024).partialValue / 9 else {
             throw SplatFileFormatError.invalidData
         }
 
@@ -827,12 +827,11 @@ struct PackedGaussians {
 
         for streamIndex in 0..<Int(header.numStreams) {
             let tocEntryOffset = tocStart + streamIndex * 16
-            let compressedSize = Int(try data.readLittleEndianUInt64(at: tocEntryOffset))
-            let uncompressedSize = Int(try data.readLittleEndianUInt64(at: tocEntryOffset + 8))
-
-            guard uncompressedSize == expectedSizes[streamIndex],
+            guard let compressedSize = Int(exactly: try data.readLittleEndianUInt64(at: tocEntryOffset)),
+                  let uncompressedSize = Int(exactly: try data.readLittleEndianUInt64(at: tocEntryOffset + 8)),
+                  uncompressedSize == expectedSizes[streamIndex],
                   compressedSize > 0,
-                  compressedOffset + compressedSize <= data.count else {
+                  compressedSize <= data.count - compressedOffset else {
                 throw SplatFileFormatError.invalidData
             }
 
@@ -854,6 +853,10 @@ struct PackedGaussians {
         result.fractionalBits = Int(header.fractionalBits)
         result.antialiased = (header.flags & PackedGaussiansHeader.FlagAntialiased) != 0
         result.usesQuaternionSmallestThree = true
+        if (header.flags & PackedGaussiansHeader.FlagHasExtensions) != 0 {
+            // Version 4 keeps extension records between the header and the TOC.
+            result.coordinateSystem = spzCoordinateSystem(inExtensionRecordsOf: data, from: NgspV4Header.size, to: tocStart)
+        }
         result.positions = streamIterator.next() ?? []
         result.alphas = streamIterator.next() ?? []
         result.colors = streamIterator.next() ?? []
@@ -864,8 +867,48 @@ struct PackedGaussians {
     }
 }
 
+/// The coordinate system named by the first Adobe coordinate_system record among the
+/// `[UInt32 type][UInt32 byteLength][payload]` extension records in `data[start..<end]`. Like
+/// nianticlabs/spz, a truncated record ends the list instead of failing the file.
+private func spzCoordinateSystem(inExtensionRecordsOf data: Data, from start: Int, to end: Int) -> CoordinateSystem? {
+    func uint32(at offset: Int) -> UInt32 {
+        (0..<4).reduce(0) { $0 | UInt32(data[data.startIndex + offset + $1]) << (8 * $1) }
+    }
+    guard start >= 0, end <= data.count else { return nil }
+    var offset = start
+    while end - offset >= 8 {
+        let type = uint32(at: offset)
+        let length = Int(uint32(at: offset + 4))
+        let payload = offset + 8
+        guard length <= end - payload else { return nil }
+        if type == PackedGaussiansHeader.coordinateSystemExtensionType {
+            guard length >= 4 else { return nil }
+            return CoordinateSystem(rawValue: Int(uint32(at: payload)))
+        }
+        offset = payload + length
+    }
+    return nil
+}
+
+/// 2^-fractionalBits, for any value the header byte can hold.
+func spzFixedPointScale(fractionalBits: Int) -> Float {
+    Float(sign: .plus, exponent: -fractionalBits, significand: 1)
+}
+
 func zstdDecompressed(_ data: Data, expectedSize: Int) throws -> [UInt8] {
     guard expectedSize > 0 else { return [] }
+
+    // Check the size the frame records before allocating for it. A frame without one (written
+    // by a streaming compressor) must still be plausible for its compressed size.
+    let frameContentSize = data.withUnsafeBytes { zstdGetFrameContentSizeRaw($0.baseAddress, data.count) }
+    switch frameContentSize {
+    case zstdContentSizeUnknown:
+        guard expectedSize / 1024 <= data.count else { throw SplatFileFormatError.decompressionError }
+    case zstdContentSizeError:
+        throw SplatFileFormatError.decompressionError
+    default:
+        guard frameContentSize == UInt64(expectedSize) else { throw SplatFileFormatError.decompressionError }
+    }
 
     var output = [UInt8](repeating: 0, count: expectedSize)
     let result = output.withUnsafeMutableBytes { outputBuffer in
@@ -934,6 +977,12 @@ private func zstdCompressBoundRaw(_ srcSize: Int) -> Int
 @_silgen_name("ZSTD_isError")
 private func zstdIsErrorRaw(_ code: Int) -> UInt32
 
+@_silgen_name("ZSTD_getFrameContentSize")
+private func zstdGetFrameContentSizeRaw(_ src: UnsafeRawPointer?, _ srcSize: Int) -> UInt64
+
+private let zstdContentSizeUnknown = UInt64.max
+private let zstdContentSizeError = UInt64.max - 1
+
 private extension Data {
     func readLittleEndianUInt32(at offset: Int) throws -> UInt32 {
         guard offset >= 0, offset + 4 <= count else {
@@ -1001,6 +1050,55 @@ public enum CoordinateSystem: Int {
     case rdf = 6  // Right Down Front, PLY coordinate system
     case luf = 7  // Left Up Front, GLB coordinate system
     case ruf = 8  // Right Up Front, Unity coordinate system
+    // Z-up systems (Adobe coordinate_system extension): systems 1–8 rotated about X.
+    case lfd = 9  // Left Front Down
+    case rfd = 10 // Right Front Down
+    case lfu = 11 // Left Front Up
+    case rfu = 12 // Right Front Up, Blender coordinate system
+    case lbd = 13 // Left Back Down
+    case rbd = 14 // Right Back Down
+    case lbu = 15 // Left Back Up
+    case rbu = 16 // Right Back Up
+
+    /// Whether this is one of the Z-up systems 9–16.
+    var isZUp: Bool { rawValue > 8 }
+}
+
+/// Converts splats stored in an SPZ file's tagged coordinate system to PLY axes (RDF), as
+/// nianticlabs/spz `coordinateConverter(from:to: RDF)` does: axis flips within the Y-up family,
+/// then for a Z-up system (stored as its Y-up counterpart rotated about X) R_x(−π/2) applied to
+/// positions, rotations and spherical harmonics.
+struct SPZCoordinateConversion {
+    let flips: CoordinateConverter
+    private let rotation: simd_quatf?
+    private let shRotation: SphericalHarmonicRotation?
+
+    init(from system: CoordinateSystem?) {
+        guard let system, system != .unspecified else {
+            flips = CoordinateConverter.converter(from: .rdf, to: .rdf)
+            rotation = nil
+            shRotation = nil
+            return
+        }
+        let family = system.isZUp ? CoordinateSystem(rawValue: system.rawValue - 8)! : system
+        flips = CoordinateConverter.converter(from: family, to: .rdf)
+        if system.isZUp {
+            let rotation = simd_quatf(angle: -.pi / 2, axis: SIMD3<Float>(1, 0, 0))
+            self.rotation = rotation
+            shRotation = SphericalHarmonicRotation(rotation: rotation)
+        } else {
+            rotation = nil
+            shRotation = nil
+        }
+    }
+
+    /// Applies the rotation of a Z-up system to a point the flips were already applied to.
+    func rotate(_ point: inout SplatScenePoint) {
+        guard let rotation, let shRotation else { return }
+        point.position = rotation.act(point.position)
+        point.rotation = (rotation * point.rotation).normalized
+        point.color = shRotation.applying(to: point.color)
+    }
 }
 
 public struct CoordinateConverter {
@@ -1008,6 +1106,8 @@ public struct CoordinateConverter {
     let flipQ: SIMD3<Float>  // x, y, z flips for quaternions (w is never flipped)
     let flipSh: [Float]      // Flips for the 15 spherical harmonics coefficients
     
+    /// Axis flips between two systems of the same family (both Y-up or both Z-up). Converting
+    /// between the families also needs a rotation about X; see `SPZCoordinateConversion`.
     public static func converter(from: CoordinateSystem, to: CoordinateSystem) -> CoordinateConverter {
         let (xMatch, yMatch, zMatch) = axesMatch(from, to)
         let x: Float = xMatch ? 1.0 : -1.0

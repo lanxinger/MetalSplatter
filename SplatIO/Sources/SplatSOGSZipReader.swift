@@ -141,6 +141,11 @@ public class SplatSOGSZipReader: SplatSceneReader {
         }
     }
     
+    /// Whether `meta.json` asks for antialiased (mip) rendering.
+    public var isAntialiased: Bool {
+        actualReader?.isAntialiased ?? false
+    }
+
     public func readScene() throws -> [SplatScenePoint] {
         guard let reader = actualReader else {
             throw SOGSZipError.invalidSOGSStructure

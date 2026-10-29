@@ -29,6 +29,21 @@ public class SplatSOGSSceneReader: SplatSceneReader, @unchecked Sendable {
         }
     }
     
+    /// Whether `meta.json` asks for antialiased (mip) rendering.
+    public var isAntialiased: Bool {
+        if metaURL.lastPathComponent.lowercased().hasSuffix(".sog") {
+            return (try? SplatSOGSSceneReaderV2(metaURL))?.isAntialiased ?? false
+        }
+        let shouldStopAccessing = metaURL.startAccessingSecurityScopedResource()
+        defer {
+            if shouldStopAccessing {
+                metaURL.stopAccessingSecurityScopedResource()
+            }
+        }
+        guard let metaData = try? Data(contentsOf: metaURL) else { return false }
+        return SOGSRenderModeHint.isAntialiased(metaJSON: metaData)
+    }
+
     public func readScene() throws -> [SplatScenePoint] {
         print("SplatSOGSSceneReader: Loading SOGS metadata from \(metaURL.path)")
         

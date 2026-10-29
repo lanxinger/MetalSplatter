@@ -84,7 +84,9 @@ public class SPZSceneWriter: SplatSceneWriter {
         result.fractionalBits = fractionalBits
         result.antialiased = antialiased
         result.usesQuaternionSmallestThree = outputVersion >= 3
-        let writesFloat16 = useFloat16 && outputVersion == 1
+        // Version 1 positions are always float16 and later versions always fixed-point, so
+        // `useFloat16` can't change the layout (a fixed-point v1 file would be unreadable).
+        let writesFloat16 = outputVersion == 1
         
         // Pre-allocate arrays
         let positionComponents = writesFloat16 ? 6 : 9 // 2 bytes per component for float16, 3 bytes for fixed-point

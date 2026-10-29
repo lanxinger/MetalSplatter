@@ -34,12 +34,15 @@ extension PLYHeader {
     }
 
     static func decodeASCII(from headerData: Data) throws -> PLYHeader {
-        guard let headerString = String(data: headerData, encoding: .utf8) else {
-            throw ASCIIDecodeError.headerInvalidCharacters
-        }
+        // Comments may be in any encoding (Latin-1 names, for one). Invalid UTF-8 becomes U+FFFD,
+        // which can only appear in comments: keywords and names are matched as ASCII below.
+        let headerString = String(decoding: headerData, as: UTF8.self)
         var parseError: Swift.Error?
         var header: PLYHeader?
-        headerString.enumerateLines { (headerLine, stop: inout Bool) in
+        headerString.enumerateLines { (rawHeaderLine, stop: inout Bool) in
+            // Trailing whitespace ("end_header ", "format ... 1.0 ") doesn't change a line.
+            var headerLine = rawHeaderLine
+            while headerLine.last?.isWhitespace == true { headerLine.removeLast() }
             do {
                 guard let keywordString = headerLine.components(separatedBy: .whitespaces).filter({ !$0.isEmpty }).first else {
                     return
