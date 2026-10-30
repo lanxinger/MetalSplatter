@@ -114,6 +114,22 @@ final class PLYIOTests: XCTestCase {
         XCTAssertNotNil(content.header)
     }
 
+    func testNegativeListCountFailsInsteadOfTrapping() {
+        let header = "ply\nformat binary_little_endian 1.0\nelement face 1\nproperty list char float x\nend_header\n"
+        for body in [Data([0xFF]), Data([0x80, 0, 0, 0, 0])] {
+            let reader = PLYReader(InputStream(data: Data(header.utf8) + body))
+            let content = ContentCounter()
+            reader.read(to: content)
+            XCTAssertTrue(content.didFail)
+        }
+
+        let asciiHeader = "ply\nformat ascii 1.0\nelement face 1\nproperty list int float x\nend_header\n"
+        let reader = PLYReader(InputStream(data: Data((asciiHeader + "-1 1.0\n").utf8)))
+        let content = ContentCounter()
+        reader.read(to: content)
+        XCTAssertTrue(content.didFail)
+    }
+
     func testASCIIBinaryEqual() throws {
         try testEqual(asciiURL, binaryURL)
     }

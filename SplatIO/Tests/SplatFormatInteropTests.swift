@@ -224,6 +224,31 @@ final class SplatFormatInteropTests: XCTestCase {
         }
     }
 
+    // MARK: - SPX
+
+    func testSPXPositionsAreWorldUnitsRegardlessOfBoundingBox() throws {
+        // gsbox stores positions as 24-bit fixed point / 4096; the header bbox is metadata.
+        let reader = try SPXSceneReader(data: spxFile(blocks: [(1, 20, splat20Payload(position: SIMD3(2, -1, 0.5)))]))
+        let point = try XCTUnwrap(reader.readScene().first)
+        XCTAssertEqual(point.position, SIMD3(2, -1, 0.5))
+    }
+
+    func testSPXUnknownBlockFormatFailsInsteadOfLoadingNothing() throws {
+        let reader = try SPXSceneReader(data: spxFile(blocks: [(1, 23, Data(count: 32))]))
+        XCTAssertThrowsError(try reader.readScene())
+    }
+
+    func testSPXMinimumInt32BlockLengthDoesNotTrap() {
+        var data = spxFile(blocks: [])
+        data.appendLittleEndian(Int32.min)
+        XCTAssertThrowsError(try SPXSceneReader(data: data))
+    }
+
+    func testSPXHugeGaussianCountFailsBeforeAllocating() throws {
+        let reader = try SPXSceneReader(data: spxFile(blocks: [(UInt32.max, 20, Data(count: 20))]))
+        XCTAssertThrowsError(try reader.readScene())
+    }
+
     // MARK: - SPZ
 
     func testSPZVersion3WithExtensionRecordsIsNotReadAsFloat16() throws {
@@ -243,6 +268,38 @@ final class SplatFormatInteropTests: XCTestCase {
         let source = splat(position: SIMD3(1.5, -2.25, 3))
         let point = try XCTUnwrap(SPZSceneReader(data: try spzData([source], writer: SPZSceneWriter())).readScene().first)
         XCTAssertTrue((point.position - source.position).isWithin(tolerance: 1e-3))
+    }
+
+    func testSPZWriterEncodesColorAsReferenceDCCoefficient() throws {
+        let source = splat(sh: [SIMD3(1, -1, 0.5)])
+        let data = try spzData([source], writer: SPZSceneWriter(compress: false, outputVersion: 3))
+        // Colors follow the 16-byte header, positions (9), alphas (1); byte = (sh0 * 0.15 + 0.5) * 255.
+        XCTAssertEqual(Array(data[(16 + 9 + 1)..<(16 + 9 + 1 + 3)]), [166, 89, 147])
+
+        let point = try XCTUnwrap(SPZSceneReader(data: try spzData([source], writer: SPZSceneWriter())).readScene().first)
+        let sh0 = try XCTUnwrap(point.color.asSphericalHarmonic.first)
+        XCTAssertTrue((sh0 - SIMD3(1, -1, 0.5)).isWithin(tolerance: 0.03), "\(sh0)")
+    }
+
+    func testSPZGzipOutputRoundTrips() throws {
+        let source = splat(position: SIMD3(1.5, -2.25, 3))
+        for version: UInt32 in 1...3 {
+            let data = try spzData([source], writer: SPZSceneWriter(compress: true, outputVersion: version))
+            XCTAssertEqual(Array(data.prefix(2)), [0x1F, 0x8B])
+            let point = try XCTUnwrap(SPZSceneReader(data: data).readScene().first, "v\(version)")
+            XCTAssertTrue((point.position - source.position).isWithin(tolerance: 1e-2), "v\(version): \(point.position)")
+        }
+    }
+
+    func testSPZWriterToleratesZeroScaleAndDegenerateRotation() throws {
+        // Validation only rejects data where most sampled points are bad, so a few
+        // degenerate points still reach the writer.
+        let points = [splat(scale: .zero, rotation: simd_quatf(vector: .zero))]
+            + (1...9).map { splat(position: SIMD3(Float($0), 0, 0)) }
+        for version: UInt32 in [2, 3, 4] {
+            let data = try spzData(points, writer: SPZSceneWriter(compress: false, outputVersion: version))
+            XCTAssertEqual(try SPZSceneReader(data: data).readScene().count, points.count, "v\(version)")
+        }
     }
 
     func testSPZVersion4ZUpCoordinateSystemConvertsToRDF() throws {
@@ -370,6 +427,23 @@ final class SplatFormatInteropTests: XCTestCase {
     }
 
     // MARK: - SOG
+
+    func testWebPDecodeKeepsDataChannelsUnderLowAlpha() throws {
+        // sh0.webp stores codebook indices in RGB and opacity in A; premultiplying would
+        // quantize the indices of translucent splats to alpha + 1 levels.
+        let pixels: [UInt8] = [
+            37, 201, 254, 26,
+            255, 1, 128, 1,
+            12, 34, 56, 2,
+            90, 180, 3, 255
+        ]
+        let webp = try WebPEncoder.encodeLosslessRGBA(Data(pixels), width: 2, height: 2)
+        let decoded = try WebPDecoder.decode(webp)
+        XCTAssertEqual(decoded.width, 2)
+        XCTAssertEqual(decoded.height, 2)
+        XCTAssertEqual(Array(decoded.pixels), pixels)
+        XCTAssertEqual(WebPDecoder.getPixelUInt8(from: decoded, x: 0, y: 0), SIMD4(37, 201, 254, 26))
+    }
 
     func testSOGNullScaleCodebookEntryMeansZeroScale() throws {
         let json = #"{ "codebook": [null, -1.5, 0.5], "files": ["scales.webp"] }"#
@@ -537,6 +611,35 @@ private func matricesClose(_ a: simd_float3x3, _ b: simd_float3x3, tolerance: Fl
 
 private func temporaryURL(_ pathExtension: String) -> URL {
     FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString).appendingPathExtension(pathExtension)
+}
+
+private func spxFile(blocks: [(count: UInt32, format: UInt32, payload: Data)]) -> Data {
+    var data = Data([0x73, 0x70, 0x78, 1]) // "spx", version 1
+    data.appendLittleEndian(blocks.reduce(UInt32(0)) { $0 &+ $1.count })
+    for bound: Float in [-5, 5, -5, 5, -5, 5, 0, 0] { data.appendLittleEndian(bound.bitPattern) }
+    data.append(Data(count: 128 - data.count))
+    for block in blocks {
+        var body = Data()
+        body.appendLittleEndian(block.count)
+        body.appendLittleEndian(block.format)
+        body.append(block.payload)
+        data.appendLittleEndian(Int32(body.count))
+        data.append(body)
+    }
+    return data
+}
+
+/// One format-20 splat: per-axis 24-bit positions, then scale, RGBA and rotation bytes.
+private func splat20Payload(position: SIMD3<Float>) -> Data {
+    var data = Data()
+    for axis in 0..<3 {
+        let fixed = Int32(position[axis] * 4096)
+        data.append(contentsOf: [UInt8(truncatingIfNeeded: fixed), UInt8(truncatingIfNeeded: fixed >> 8), UInt8(truncatingIfNeeded: fixed >> 16)])
+    }
+    data.append(contentsOf: [160, 160, 160]) // log scale 0
+    data.append(contentsOf: [128, 128, 128, 255])
+    data.append(contentsOf: [255, 128, 128, 128]) // identity rotation
+    return data
 }
 
 private func spzData(_ points: [SplatScenePoint], writer: SPZSceneWriter) throws -> Data {

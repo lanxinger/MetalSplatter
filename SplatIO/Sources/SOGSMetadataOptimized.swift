@@ -145,7 +145,6 @@ public struct SOGSBatchIterator {
     
     @inline(__always)
     private func readColorAndOpacityDirect(x: Int, y: Int, pixelOffset: Int, mins: [Float], maxs: [Float]) -> (SplatScenePoint.Color, SplatScenePoint.Opacity) {
-        // Use WebPDecoder to properly handle premultiplied alpha (matching original implementation)
         let sh0Pixel = WebPDecoder.getPixelFloat(from: data.sh0, x: x, y: y)
         
         let r = lerp(mins[0], maxs[0], sh0Pixel.x)

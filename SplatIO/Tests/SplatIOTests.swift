@@ -790,6 +790,37 @@ final class SplatIOTests: XCTestCase {
         }
     }
 
+    func testWritersTolerateZeroScaleAndDegenerateRotation() throws {
+        // A 2DGS PLY has a zero third scale (log scale -inf); a .splat rotation of
+        // 128,128,128,128 decodes to a zero quaternion. Writers used to trap on both.
+        // Validation only rejects data where most sampled points are bad, so a few
+        // degenerate points still reach the writers.
+        let degenerate = SplatScenePoint(position: SIMD3<Float>(0, 0, 0),
+                                         color: .linearFloat(SIMD3<Float>(0.5, 0.5, 0.5)),
+                                         opacity: .linearFloat(0.5),
+                                         scale: .linearFloat(SIMD3<Float>(0.1, 0.1, 0)),
+                                         rotation: simd_quatf(vector: .zero))
+        let points = [degenerate] + (1...9).map { index in
+            SplatScenePoint(position: SIMD3<Float>(Float(index), 1, 1),
+                            color: .linearFloat(SIMD3<Float>(0.2, 0.4, 0.6)),
+                            opacity: .linearFloat(1),
+                            scale: .linearFloat(SIMD3<Float>(0.1, 0.2, 0.3)),
+                            rotation: simd_quatf(ix: 0, iy: 0, iz: 0, r: 1))
+        }
+
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+            .appendingPathExtension("sog")
+        defer { try? FileManager.default.removeItem(at: url) }
+        try SOGSV2SceneWriter().writeScene(points, to: url)
+        XCTAssertEqual(try SplatSOGSSceneReaderV2(url).readScene().count, points.count)
+
+        let memoryOutput = DataOutputStream()
+        memoryOutput.open()
+        try DotSplatSceneWriter(memoryOutput).write(points)
+        XCTAssertEqual(memoryOutput.data.count, points.count * 32)
+    }
+
     func testSOGV2WriterRoundTripsSphericalHarmonicsWithPaletteReuse() throws {
         let sh0Tolerance: Float = (2.0 / (255.0 * 0.28209479177387814)) + 1e-6
         let shNTolerance: Float = (1.0 / 128.0) + 1e-6

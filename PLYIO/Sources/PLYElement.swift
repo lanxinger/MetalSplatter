@@ -19,13 +19,14 @@ public struct PLYElement: Sendable {
         case listFloat32([Float])
         case listFloat64([Double])
 
+        /// nil for non-integer values and negative counts (e.g. a `list char` count of 0xFF).
         var uint64Value: UInt64? {
             switch self {
-            case .int8(  let value): UInt64(value)
+            case .int8(  let value): UInt64(exactly: value)
             case .uint8( let value): UInt64(value)
-            case .int16( let value): UInt64(value)
+            case .int16( let value): UInt64(exactly: value)
             case .uint16(let value): UInt64(value)
-            case .int32( let value): UInt64(value)
+            case .int32( let value): UInt64(exactly: value)
             case .uint32(let value): UInt64(value)
             case .float32, .float64, .listInt8, .listUInt8, .listInt16, .listUInt16, .listInt32, .listUInt32, .listFloat32, .listFloat64: nil
             }

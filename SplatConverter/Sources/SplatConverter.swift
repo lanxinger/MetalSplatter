@@ -21,7 +21,7 @@ struct SplatConverter: ParsableCommand {
     @Option(name: .shortAndLong, help: "The output splat scene file")
     var outputFile: String?
 
-    @Option(name: [.customShort("f"), .long], help: "The format of the output file (dotSplat, ply, ply-ascii, gltf, glb, sog)")
+    @Option(name: [.customShort("f"), .long], help: "The format of the output file (dotSplat, ply, ply-ascii, gltf, glb, sog, spz)")
     var outputFormat: SplatOutputFileFormat?
 
     @Flag(name: [.long], help: "Describe each of the splats from first to first + count")
@@ -39,6 +39,18 @@ struct SplatConverter: ParsableCommand {
     @Flag(name: .shortAndLong, help: "Reorder splats by Morton code for improved spatial locality")
     var mortonOrder = false
 
+    func validate() throws {
+        guard start >= 0 else {
+            throw ValidationError("--start must not be negative")
+        }
+        if let count, count < 0 {
+            throw ValidationError("--count must not be negative")
+        }
+        if outputFormat != nil && outputFile == nil {
+            throw ValidationError("--output-format requires --output-file")
+        }
+    }
+
     func run() throws {
         let reader = try AutodetectSceneReader(URL(fileURLWithPath: inputFile))
 
@@ -46,7 +58,7 @@ struct SplatConverter: ParsableCommand {
         if let outputFile, outputFormat == nil {
             outputFormat = .init(defaultFor: SplatFileFormat(for: URL(fileURLWithPath: outputFile)))
             if outputFormat == nil {
-                throw ValidationError("No output format specified")
+                throw ValidationError("Can't infer a supported output format from \(outputFile); pass --output-format")
             }
         }
 
@@ -80,6 +92,10 @@ struct SplatConverter: ParsableCommand {
                 }
             }
 
+            // Cleanup after a failure may only remove output this run created, never a file
+            // or directory that was already at the output path.
+            let outputExisted = FileManager.default.fileExists(atPath: outputFile)
+
             let writeDuration = try ContinuousClock().measure {
                 let writer: (any SplatSceneWriter)
                 switch outputFormat {
@@ -105,13 +121,28 @@ struct SplatConverter: ParsableCommand {
                     let sogWriter = SOGSV2SceneWriter()
                     sogWriter.setOutputURL(URL(fileURLWithPath: outputFile))
                     writer = sogWriter
+                case .spz:
+                    let spzWriter = SPZSceneWriter()
+                    spzWriter.setOutputURL(URL(fileURLWithPath: outputFile))
+                    writer = spzWriter
                 }
 
-                defer {
-                    try? writer.close()
+                // Several writers (glTF, GLB, SOG, SPZ) do all their I/O in close(), so its
+                // errors must propagate; a failed conversion shouldn't leave a partial new file.
+                var wrotePoints = false
+                do {
+                    try writer.write(pointsToWrite)
+                    wrotePoints = true
+                    try writer.close()
+                } catch {
+                    if !wrotePoints {
+                        try? writer.close()
+                    }
+                    if !outputExisted {
+                        try? FileManager.default.removeItem(atPath: outputFile)
+                    }
+                    throw error
                 }
-
-                try writer.write(pointsToWrite)
             }
 
             if verbose {
@@ -209,6 +240,7 @@ enum SplatOutputFileFormat: ExpressibleByArgument {
     case gltf
     case glb
     case sog
+    case spz
 
     public init?(argument: String) {
         switch argument.lowercased() {
@@ -219,6 +251,7 @@ enum SplatOutputFileFormat: ExpressibleByArgument {
         case "gltf": self = .gltf
         case "glb": self = .glb
         case "sog": self = .sog
+        case "spz": self = .spz
         default: return nil
         }
     }
@@ -227,9 +260,9 @@ enum SplatOutputFileFormat: ExpressibleByArgument {
         switch format {
         case .dotSplat: self = .dotSplat
         case .ply: self = .binaryPLY
-        case .spz: self = .dotSplat  // Default to dotSplat when converting from SPZ
+        case .spz: self = .spz
         case .sogs: self = .sog
-        case .spx: self = .dotSplat  // Default to dotSplat when converting from SPX
+        case .spx: return nil  // SPX output isn't supported
         case .gltf: self = .gltf
         case .glb: self = .glb
         case .none: return nil

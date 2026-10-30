@@ -1252,7 +1252,10 @@ func unpackQuaternionSmallestThreeUnsafe(_ result: inout simd_quatf, _ base: Uns
 }
 
 func packQuaternionSmallestThree(_ rotation: simd_quatf) -> [UInt8] {
-    let normalized = rotation.normalized
+    let rotationLength = simd_length(rotation.vector)
+    let normalized = rotationLength.isFinite && rotationLength > 0
+        ? rotation.normalized
+        : simd_quatf(ix: 0, iy: 0, iz: 0, r: 1)
     var components = [normalized.imag.x, normalized.imag.y, normalized.imag.z, normalized.real]
 
     var largestIndex = 0

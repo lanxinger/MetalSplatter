@@ -269,6 +269,7 @@ public class SplatSOGSSceneReaderOptimized: SplatSceneReader, @unchecked Sendabl
     
     /// Batch decompression for better performance
     private func decompressBatchOptimized(_ compressedData: SOGSCompressedData) throws -> [SplatScenePoint] {
+        try compressedData.validateSplatCapacity()
         let startTime = Date()
         print("SplatSOGSSceneReaderOptimized: Decompressing \(compressedData.numSplats) splats in batches of \(batchSize)...")
         

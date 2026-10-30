@@ -74,10 +74,10 @@ extension DotSplatEncodedPoint {
         self.scales = splatScenePoint.scale.asLinearFloat
         let rotation = splatScenePoint.rotation.normalized
         self.rot = .init(
-            x: UInt8((rotation.real   * 128 + 128).clamped(to: 0...255)),
-            y: UInt8((rotation.imag.x * 128 + 128).clamped(to: 0...255)),
-            z: UInt8((rotation.imag.y * 128 + 128).clamped(to: 0...255)),
-            w: UInt8((rotation.imag.z * 128 + 128).clamped(to: 0...255))
+            x: (rotation.real   * 128 + 128).quantized(clampedTo: 0...255, rounding: .towardZero),
+            y: (rotation.imag.x * 128 + 128).quantized(clampedTo: 0...255, rounding: .towardZero),
+            z: (rotation.imag.y * 128 + 128).quantized(clampedTo: 0...255, rounding: .towardZero),
+            w: (rotation.imag.z * 128 + 128).quantized(clampedTo: 0...255, rounding: .towardZero)
         )
     }
 }

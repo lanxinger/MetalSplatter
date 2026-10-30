@@ -303,6 +303,7 @@ public class SplatSOGSSceneReader: SplatSceneReader, @unchecked Sendable {
     }
     
     private func decompressData(_ compressedData: SOGSCompressedData) throws -> [SplatScenePoint] {
+        try compressedData.validateSplatCapacity()
         print("SplatSOGSSceneReader: Decompressing \(compressedData.numSplats) splats...")
         print("SplatSOGSSceneReader: Texture dimensions: \(compressedData.textureWidth)x\(compressedData.textureHeight)")
         print("SplatSOGSSceneReader: SH bands: \(compressedData.shBands)")
@@ -327,6 +328,7 @@ public class SplatSOGSSceneReader: SplatSceneReader, @unchecked Sendable {
     
     /// Optimized decompression using batch processing
     private func decompressDataOptimized(_ compressedData: SOGSCompressedData) throws -> [SplatScenePoint] {
+        try compressedData.validateSplatCapacity()
         print("SplatSOGSSceneReader: Optimized decompression of \(compressedData.numSplats) splats...")
         print("SplatSOGSSceneReader: Texture dimensions: \(compressedData.textureWidth)x\(compressedData.textureHeight)")
         print("SplatSOGSSceneReader: SH bands: \(compressedData.shBands)")

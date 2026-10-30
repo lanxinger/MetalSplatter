@@ -909,6 +909,10 @@ final class SceneEditingController: ObservableObject {
     }
 
     func attach(renderer: MetalKitSceneRenderer?) {
+        // Called from every SwiftUI view update. Refreshing unconditionally publishes
+        // `snapshot`, which re-runs the update, so only refresh when the renderer changes.
+        // Model loads refresh the snapshot explicitly once they finish.
+        guard self.renderer !== renderer else { return }
         self.renderer = renderer
         Task {
             await refreshSnapshot()
@@ -1810,104 +1814,108 @@ private struct SplatEditingOverlay: View {
 
     var body: some View {
         GeometryReader { geometry in
-            Canvas { context, _ in
-                if let planeGuide = controller.projectedPlaneGuide(in: geometry.size) {
-                    var planePath = Path()
-                    planePath.addLines(planeGuide)
-                    planePath.closeSubpath()
-                    context.fill(planePath, with: .color(.pink.opacity(0.10)))
-                    context.stroke(planePath, with: .color(.pink), style: StrokeStyle(lineWidth: 2, dash: [8, 4]))
-                }
+            // Guides are projected with the live camera, which changes without publishing
+            // anything, so redraw every frame while a guide is visible.
+            TimelineView(.animation(paused: !controller.tool.showsSceneGuide)) { _ in
+                Canvas { context, _ in
+                    if let planeGuide = controller.projectedPlaneGuide(in: geometry.size) {
+                        var planePath = Path()
+                        planePath.addLines(planeGuide)
+                        planePath.closeSubpath()
+                        context.fill(planePath, with: .color(.pink.opacity(0.10)))
+                        context.stroke(planePath, with: .color(.pink), style: StrokeStyle(lineWidth: 2, dash: [8, 4]))
+                    }
 
-                if let normalGuide = controller.projectedPlaneNormalGuide(in: geometry.size) {
-                    var normalPath = Path()
-                    normalPath.move(to: normalGuide.start)
-                    normalPath.addLine(to: normalGuide.end)
-                    context.stroke(normalPath, with: .color(.pink), style: StrokeStyle(lineWidth: 2))
+                    if let normalGuide = controller.projectedPlaneNormalGuide(in: geometry.size) {
+                        var normalPath = Path()
+                        normalPath.move(to: normalGuide.start)
+                        normalPath.addLine(to: normalGuide.end)
+                        context.stroke(normalPath, with: .color(.pink), style: StrokeStyle(lineWidth: 2))
 
-                    let dx = normalGuide.end.x - normalGuide.start.x
-                    let dy = normalGuide.end.y - normalGuide.start.y
-                    let length = max(hypot(dx, dy), 0.001)
-                    let ux = dx / length
-                    let uy = dy / length
-                    let arrowLength: CGFloat = 12
-                    let arrowWidth: CGFloat = 6
-                    let arrowPointA = CGPoint(
-                        x: normalGuide.end.x - (ux * arrowLength) + (uy * arrowWidth),
-                        y: normalGuide.end.y - (uy * arrowLength) - (ux * arrowWidth)
-                    )
-                    let arrowPointB = CGPoint(
-                        x: normalGuide.end.x - (ux * arrowLength) - (uy * arrowWidth),
-                        y: normalGuide.end.y - (uy * arrowLength) + (ux * arrowWidth)
-                    )
-                    var arrowPath = Path()
-                    arrowPath.move(to: normalGuide.end)
-                    arrowPath.addLine(to: arrowPointA)
-                    arrowPath.addLine(to: arrowPointB)
-                    arrowPath.closeSubpath()
-                    context.fill(arrowPath, with: .color(.pink))
-                }
+                        let dx = normalGuide.end.x - normalGuide.start.x
+                        let dy = normalGuide.end.y - normalGuide.start.y
+                        let length = max(hypot(dx, dy), 0.001)
+                        let ux = dx / length
+                        let uy = dy / length
+                        let arrowLength: CGFloat = 12
+                        let arrowWidth: CGFloat = 6
+                        let arrowPointA = CGPoint(
+                            x: normalGuide.end.x - (ux * arrowLength) + (uy * arrowWidth),
+                            y: normalGuide.end.y - (uy * arrowLength) - (ux * arrowWidth)
+                        )
+                        let arrowPointB = CGPoint(
+                            x: normalGuide.end.x - (ux * arrowLength) - (uy * arrowWidth),
+                            y: normalGuide.end.y - (uy * arrowLength) + (ux * arrowWidth)
+                        )
+                        var arrowPath = Path()
+                        arrowPath.move(to: normalGuide.end)
+                        arrowPath.addLine(to: arrowPointA)
+                        arrowPath.addLine(to: arrowPointB)
+                        arrowPath.closeSubpath()
+                        context.fill(arrowPath, with: .color(.pink))
+                    }
 
-                for (start, end) in controller.projectedBoxGuideSegments(in: geometry.size) {
-                    var edgePath = Path()
-                    edgePath.move(to: start)
-                    edgePath.addLine(to: end)
-                    context.stroke(edgePath, with: .color(.yellow), style: StrokeStyle(lineWidth: 2, dash: [6, 4]))
-                }
+                    for (start, end) in controller.projectedBoxGuideSegments(in: geometry.size) {
+                        var edgePath = Path()
+                        edgePath.move(to: start)
+                        edgePath.addLine(to: end)
+                        context.stroke(edgePath, with: .color(.yellow), style: StrokeStyle(lineWidth: 2, dash: [6, 4]))
+                    }
 
-                switch controller.overlayPreview {
-                case let .rect(rect):
-                    context.stroke(Path(rect), with: .color(.cyan), style: StrokeStyle(lineWidth: 2, dash: [8, 4]))
-                    context.fill(Path(rect), with: .color(.cyan.opacity(0.12)))
-                case let .brush(points):
-                    var path = Path()
-                    if let first = points.first {
-                        path.move(to: first)
-                        for point in points.dropFirst() {
-                            path.addLine(to: point)
+                    switch controller.overlayPreview {
+                    case let .rect(rect):
+                        context.stroke(Path(rect), with: .color(.cyan), style: StrokeStyle(lineWidth: 2, dash: [8, 4]))
+                        context.fill(Path(rect), with: .color(.cyan.opacity(0.12)))
+                    case let .brush(points):
+                        var path = Path()
+                        if let first = points.first {
+                            path.move(to: first)
+                            for point in points.dropFirst() {
+                                path.addLine(to: point)
+                            }
+                        }
+                        context.stroke(path, with: .color(.cyan), style: StrokeStyle(lineWidth: 24, lineCap: .round, lineJoin: .round))
+                    case let .lasso(points):
+                        var path = Path()
+                        if let first = points.first {
+                            path.move(to: first)
+                            for point in points.dropFirst() {
+                                path.addLine(to: point)
+                            }
+                        }
+                        context.stroke(path, with: .color(.cyan), style: StrokeStyle(lineWidth: 2, dash: [6, 4]))
+                    case .none:
+                        break
+                    }
+
+                    if controller.tool == .polygon, !controller.polygonPoints.isEmpty {
+                        var polygonPath = Path()
+                        if let first = controller.polygonPoints.first {
+                            polygonPath.move(to: first)
+                            for point in controller.polygonPoints.dropFirst() {
+                                polygonPath.addLine(to: point)
+                            }
+                        }
+                        context.stroke(polygonPath, with: .color(.orange), style: StrokeStyle(lineWidth: 2, dash: [6, 4]))
+                        for point in controller.polygonPoints {
+                            let marker = Path(ellipseIn: CGRect(x: point.x - 5, y: point.y - 5, width: 10, height: 10))
+                            context.fill(marker, with: .color(.orange))
                         }
                     }
-                    context.stroke(path, with: .color(.cyan), style: StrokeStyle(lineWidth: 24, lineCap: .round, lineJoin: .round))
-                case let .lasso(points):
-                    var path = Path()
-                    if let first = points.first {
-                        path.move(to: first)
-                        for point in points.dropFirst() {
-                            path.addLine(to: point)
-                        }
-                    }
-                    context.stroke(path, with: .color(.cyan), style: StrokeStyle(lineWidth: 2, dash: [6, 4]))
-                case .none:
-                    break
-                }
 
-                if controller.tool == .polygon, !controller.polygonPoints.isEmpty {
-                    var polygonPath = Path()
-                    if let first = controller.polygonPoints.first {
-                        polygonPath.move(to: first)
-                        for point in controller.polygonPoints.dropFirst() {
-                            polygonPath.addLine(to: point)
+                    if controller.tool == .measure, !controller.measurePoints.isEmpty {
+                        var measurePath = Path()
+                        if let first = controller.measurePoints.first {
+                            measurePath.move(to: first.screenPoint)
+                            for point in controller.measurePoints.dropFirst() {
+                                measurePath.addLine(to: point.screenPoint)
+                            }
                         }
-                    }
-                    context.stroke(polygonPath, with: .color(.orange), style: StrokeStyle(lineWidth: 2, dash: [6, 4]))
-                    for point in controller.polygonPoints {
-                        let marker = Path(ellipseIn: CGRect(x: point.x - 5, y: point.y - 5, width: 10, height: 10))
-                        context.fill(marker, with: .color(.orange))
-                    }
-                }
-
-                if controller.tool == .measure, !controller.measurePoints.isEmpty {
-                    var measurePath = Path()
-                    if let first = controller.measurePoints.first {
-                        measurePath.move(to: first.screenPoint)
-                        for point in controller.measurePoints.dropFirst() {
-                            measurePath.addLine(to: point.screenPoint)
+                        context.stroke(measurePath, with: .color(.green), style: StrokeStyle(lineWidth: 2))
+                        for point in controller.measurePoints {
+                            let marker = Path(ellipseIn: CGRect(x: point.screenPoint.x - 6, y: point.screenPoint.y - 6, width: 12, height: 12))
+                            context.fill(marker, with: .color(.green))
                         }
-                    }
-                    context.stroke(measurePath, with: .color(.green), style: StrokeStyle(lineWidth: 2))
-                    for point in controller.measurePoints {
-                        let marker = Path(ellipseIn: CGRect(x: point.screenPoint.x - 6, y: point.screenPoint.y - 6, width: 12, height: 12))
-                        context.fill(marker, with: .color(.green))
                     }
                 }
             }
