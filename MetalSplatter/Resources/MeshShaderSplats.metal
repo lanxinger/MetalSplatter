@@ -176,7 +176,7 @@ void splatObjectShader(
     
     if (isValid) {
         uint actualSplatIndex = uint(sortedIndices[globalSortedIndex]);
-        if (actualSplatIndex < uniforms.splatCount) {
+        if (actualSplatIndex < uniforms.totalSplatCount) {
             Splat splat = splatArray[actualSplatIndex];
 
             float3 splatPos = float3(splat.position);
@@ -303,7 +303,7 @@ void splatMeshShader(
         return;
     }
     uint actualSplatIndex = uint(sortedIndices[globalSortedIndex]);
-    if (actualSplatIndex >= uniforms.splatCount) {
+    if (actualSplatIndex >= uniforms.totalSplatCount) {
         return;
     }
 
@@ -507,7 +507,7 @@ void splatMeshShaderPrecomputed(
         return;
     }
     uint actualSplatIndex = uint(sortedIndices[globalSortedIndex]);
-    if (actualSplatIndex >= uniforms.splatCount) {
+    if (actualSplatIndex >= uniforms.totalSplatCount) {
         return;
     }
 

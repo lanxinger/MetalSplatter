@@ -947,13 +947,6 @@ public actor SplatEditor {
     public init(points: [SplatScenePoint], renderer: SplatRenderer) async throws {
         self.renderer = renderer
         self.selectionEngine = try SplatSelectionEngine(device: renderer.device)
-        let initialSceneIndices = renderer.animationSceneIndices.count == points.count
-            ? renderer.animationSceneIndices
-            : Array(repeating: 0, count: points.count)
-        self.store = EditableSplatStore(points: points, sceneIndices: initialSceneIndices)
-        self.previewTransformIndices = Array(repeating: 0, count: points.count)
-        self.previewTransformTouchedIndices = []
-        self.transformPalette = [matrix_identity_float4x4, matrix_identity_float4x4]
 
         if renderer.splatCount == 0 {
             try renderer.add(points)
@@ -961,7 +954,20 @@ public actor SplatEditor {
             throw SplatEditorError.rendererPointCountMismatch(renderer: renderer.splatCount, editor: points.count)
         }
 
-        try renderer.ensureEditingResources(pointCount: points.count)
+        // add() may reorder points (Morton ordering), and selection/edit indices are
+        // GPU buffer indices, so the store must mirror the renderer's order.
+        let orderedPoints = renderer.sourceScenePoints.count == points.count
+            ? renderer.sourceScenePoints
+            : points
+        let initialSceneIndices = renderer.animationSceneIndices.count == orderedPoints.count
+            ? renderer.animationSceneIndices
+            : Array(repeating: 0, count: orderedPoints.count)
+        self.store = EditableSplatStore(points: orderedPoints, sceneIndices: initialSceneIndices)
+        self.previewTransformIndices = Array(repeating: 0, count: orderedPoints.count)
+        self.previewTransformTouchedIndices = []
+        self.transformPalette = [matrix_identity_float4x4, matrix_identity_float4x4]
+
+        try renderer.ensureEditingResources(pointCount: orderedPoints.count)
         try replaceRendererState()
     }
 

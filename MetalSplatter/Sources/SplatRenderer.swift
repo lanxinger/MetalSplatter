@@ -3588,7 +3588,9 @@ public class SplatRenderer: @unchecked Sendable {
         // (would need indirect dispatch with visible count)
         // =========================================================================
         let useCulledDitheredPath = useDitheredTransparency && frustumCullingEnabled
-        if meshShaderEnabled && canUseMeshShadersSafely && !useCulledDitheredPath,
+        // The mesh path binds no edit-state/transform buffers, so selection tint,
+        // preview transforms and the outline pass require the vertex path.
+        if meshShaderEnabled && canUseMeshShadersSafely && !useCulledDitheredPath && !shouldBindEditingResources,
            let meshPipeline = meshShaderPipelineState,
            let meshDepth = meshShaderDepthState,
            let sortedIndices = getCurrentSortedIndicesBuffer(for: commandBuffer) {

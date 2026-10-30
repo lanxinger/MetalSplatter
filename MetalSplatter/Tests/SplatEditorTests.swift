@@ -234,6 +234,26 @@ final class SplatEditorTests: XCTestCase {
         XCTAssertEqual(renderer.sourceScenePoints.map(\.position), points.map(\.position))
     }
 
+    func testEditorIndicesMatchMortonReorderedRendererBuffer() async throws {
+        let renderer = try makeRenderer()
+        let points = Array(makePoints().reversed())
+        try renderer.add(points)
+        XCTAssertNotEqual(renderer.sourceScenePoints.map(\.position), points.map(\.position),
+                          "Precondition: Morton ordering should reorder these points")
+
+        let editor = try await SplatEditor(points: points, renderer: renderer)
+        try await editor.select(
+            .box(center: SIMD3<Float>(0.75, 0.75, -2), extents: SIMD3<Float>(0.1, 0.1, 0.1)),
+            mode: .replace,
+            viewport: makeViewport()
+        )
+        try await editor.deleteSelection()
+
+        let remaining = try await editor.exportVisiblePoints()
+        XCTAssertEqual(remaining.count, 3)
+        XCTAssertFalse(remaining.contains { $0.position == SIMD3<Float>(0.75, 0.75, -2) })
+    }
+
     func testRendererManualRenderInvalidationSetsNeedsRender() throws {
         let renderer = try makeRenderer()
 
