@@ -92,6 +92,10 @@ struct SplatConverter: ParsableCommand {
                 }
             }
 
+            // Cleanup after a failure may only remove output this run created, never a file
+            // or directory that was already at the output path.
+            let outputExisted = FileManager.default.fileExists(atPath: outputFile)
+
             let writeDuration = try ContinuousClock().measure {
                 let writer: (any SplatSceneWriter)
                 switch outputFormat {
@@ -124,7 +128,7 @@ struct SplatConverter: ParsableCommand {
                 }
 
                 // Several writers (glTF, GLB, SOG, SPZ) do all their I/O in close(), so its
-                // errors must propagate; a failed conversion shouldn't leave a partial file.
+                // errors must propagate; a failed conversion shouldn't leave a partial new file.
                 var wrotePoints = false
                 do {
                     try writer.write(pointsToWrite)
@@ -134,7 +138,9 @@ struct SplatConverter: ParsableCommand {
                     if !wrotePoints {
                         try? writer.close()
                     }
-                    try? FileManager.default.removeItem(atPath: outputFile)
+                    if !outputExisted {
+                        try? FileManager.default.removeItem(atPath: outputFile)
+                    }
                     throw error
                 }
             }
