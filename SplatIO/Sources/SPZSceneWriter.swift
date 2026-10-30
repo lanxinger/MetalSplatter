@@ -121,7 +121,8 @@ public class SPZSceneWriter: SplatSceneWriter {
             let baseIdx = index * 9
             let scale = Float(1 << fractionalBits)
             for j in 0..<3 {
-                let fixed = Int32(position[j] * scale)
+                // 24-bit signed fixed point
+                let fixed: Int32 = (position[j] * scale).quantized(clampedTo: -0x80_0000...0x7F_FFFF)
                 packed.positions[baseIdx + j*3] = UInt8(fixed & 0xFF)
                 packed.positions[baseIdx + j*3 + 1] = UInt8((fixed >> 8) & 0xFF)
                 packed.positions[baseIdx + j*3 + 2] = UInt8((fixed >> 16) & 0xFF)
@@ -133,8 +134,7 @@ public class SPZSceneWriter: SplatSceneWriter {
         let scaleBaseIdx = index * 3
         for j in 0..<3 {
             // Scale from [-10, 6] to [0, 255]
-            let packedScale = UInt8(min(255, max(0, Int((scale[j] + 10.0) * 16.0))))
-            packed.scales[scaleBaseIdx + j] = packedScale
+            packed.scales[scaleBaseIdx + j] = ((scale[j] + 10.0) * 16.0).quantized(clampedTo: 0...255)
         }
         
         // Pack rotation using C++ reference algorithm (load-spz.cc:251-263)
@@ -155,25 +155,31 @@ public class SPZSceneWriter: SplatSceneWriter {
             }
 
             let xyz = q.imag * 127.5 + SIMD3<Float>(127.5, 127.5, 127.5)
-            packed.rotations[rotationBaseIdx + 0] = UInt8(min(255, max(0, Int(xyz.x))))
-            packed.rotations[rotationBaseIdx + 1] = UInt8(min(255, max(0, Int(xyz.y))))
-            packed.rotations[rotationBaseIdx + 2] = UInt8(min(255, max(0, Int(xyz.z))))
+            packed.rotations[rotationBaseIdx + 0] = xyz.x.quantized(clampedTo: 0...255)
+            packed.rotations[rotationBaseIdx + 1] = xyz.y.quantized(clampedTo: 0...255)
+            packed.rotations[rotationBaseIdx + 2] = xyz.z.quantized(clampedTo: 0...255)
         }
-        
+
         // Pack alpha (opacity)
         let alpha = normalizedPoint.opacity.asLinearFloat
-        packed.alphas[index] = UInt8(min(255, max(0, Int(alpha * 255.0))))
-        
-        // Pack color
-        let color = normalizedPoint.color.asLinearUInt8
+        packed.alphas[index] = (alpha * 255.0).quantized(clampedTo: 0...255)
+
+        // Pack color as SPZ-encoded DC coefficient: byte = (sh0 * colorScale + 0.5) * 255,
+        // the inverse of the reader's (byte / 255 - 0.5) / colorScale.
+        let sh0 = point.color.asSphericalHarmonic.first ?? .zero
+        let encodedColor = (sh0 * Self.colorScale + 0.5) * 255.0
         let colorBaseIdx = index * 3
-        packed.colors[colorBaseIdx] = color.x
-        packed.colors[colorBaseIdx + 1] = color.y
-        packed.colors[colorBaseIdx + 2] = color.z
+        packed.colors[colorBaseIdx] = encodedColor.x.quantized(clampedTo: 0...255)
+        packed.colors[colorBaseIdx + 1] = encodedColor.y.quantized(clampedTo: 0...255)
+        packed.colors[colorBaseIdx + 2] = encodedColor.z.quantized(clampedTo: 0...255)
     }
+
+    /// Matches the SPZ reference implementation and `SPZSceneReader`.
+    private static let colorScale: Float = 0.15
     
     private func compressToGzip(_ data: Data) throws -> Data {
-        // Using Foundation's built-in compression
+        // NSData's .zlib algorithm emits a raw DEFLATE stream (no zlib header), which is
+        // exactly what the gzip body needs.
         guard let compressed = try (data as NSData).compressed(using: .zlib) as Data? else {
             throw SplatFileFormatError.compressionFailed
         }
@@ -187,8 +193,7 @@ public class SPZSceneWriter: SplatSceneWriter {
         gzippedData.append(0x00)                      // Extra flags
         gzippedData.append(0x00)                      // OS (unknown)
         
-        // Add the compressed data (without zlib header)
-        gzippedData.append(compressed.dropFirst(2))
+        gzippedData.append(compressed)
         
         // Add CRC32 and original size (CRC of uncompressed data)
         let crc = computeCRC32(data)

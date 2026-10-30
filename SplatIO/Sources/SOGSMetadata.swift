@@ -17,6 +17,24 @@ public struct SOGSMetadata: Codable, Sendable {
         quats = try container.decode(SOGSAttributeInfo.self, forKey: .quats)
         sh0 = try container.decode(SOGSAttributeInfo.self, forKey: .sh0)
         shN = try container.decodeIfPresent(SOGSAttributeInfo.self, forKey: .shN)
+
+        // The decoders index these arrays directly, so reject metadata that would trap.
+        func require(_ condition: Bool, _ key: CodingKeys, _ message: String) throws {
+            guard condition else {
+                throw DecodingError.dataCorruptedError(forKey: key, in: container, debugDescription: message)
+            }
+        }
+        try require((means.shape.first ?? -1) >= 0, .means, "means.shape[0] must be a non-negative splat count")
+        try require(means.files.count >= 2, .means, "means needs low and high byte files")
+        try require(quats.files.count >= 1, .quats, "quats needs a file")
+        try require(scales.files.count >= 1, .scales, "scales needs a file")
+        try require(sh0.files.count >= 1, .sh0, "sh0 needs a file")
+        try require(means.hasRange(components: 3), .means, "means needs 3 mins and maxs")
+        try require(scales.hasRange(components: 3), .scales, "scales needs 3 mins and maxs")
+        try require(sh0.hasRange(components: 4), .sh0, "sh0 needs 4 mins and maxs")
+        if let shN {
+            try require(shN.hasRange(components: 1), .shN, "shN mins and maxs must not be empty")
+        }
     }
 }
 
@@ -56,6 +74,11 @@ public struct SOGSAttributeInfo: Codable, Sendable {
             maxs = nil
         }
     }
+
+    /// Absent ranges are handled by the decoders; present ones must cover every component.
+    func hasRange(components: Int) -> Bool {
+        (mins?.count ?? components) >= components && (maxs?.count ?? components) >= components
+    }
 }
 
 // MARK: - SOGS Data Structures
@@ -72,6 +95,16 @@ public struct SOGSCompressedData: Sendable {
     
     public var numSplats: Int {
         metadata.means.shape[0]
+    }
+
+    /// `numSplats` comes from meta.json; reject counts the textures can't hold before
+    /// reserving storage for them.
+    func validateSplatCapacity() throws {
+        let textures = [means_l, means_u, quats, scales, sh0]
+        let capacity = textures.map { $0.width * $0.height }.min() ?? 0
+        guard numSplats <= capacity else {
+            throw SplatSOGSSceneReader.SOGSError.invalidMetadata
+        }
     }
     
     public var shBands: Int {

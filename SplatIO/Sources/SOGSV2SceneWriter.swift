@@ -388,7 +388,7 @@ public final class SOGSV2SceneWriter: SplatSceneWriter {
         guard abs(range) > .ulpOfOne else { return 0 }
         let normalized = (value - minValue) / range
         let clamped = min(max(normalized, 0), 1)
-        return UInt16((clamped * 65_535).rounded())
+        return (clamped * 65_535).quantized(clampedTo: 0...65_535)
     }
 
     private static func encodeScale(_ value: Float) -> UInt8 {
@@ -454,7 +454,8 @@ public final class SOGSV2SceneWriter: SplatSceneWriter {
         return remainder == 0 ? value : value + (4 - remainder)
     }
 
+    /// Truncates like `Int(value)` but maps NaN/±inf (e.g. the log of a zero scale) instead of trapping.
     private static func clipToUInt8(_ value: Float) -> UInt8 {
-        UInt8(min(max(Int(value), 0), 255))
+        value.quantized(clampedTo: 0...255, rounding: .towardZero)
     }
 }

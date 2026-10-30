@@ -1,15 +1,7 @@
 import Foundation
-import CoreImage
 import CoreGraphics
 import ImageIO
-
-#if canImport(UIKit)
-import UIKit
-#endif
-
-#if canImport(AppKit)
-import AppKit
-#endif
+import libwebp
 
 public struct WebPDecoder {
     public enum WebPError: Error {
@@ -41,60 +33,39 @@ public struct WebPDecoder {
         }
     }
     
-    /// Decode WebP data to RGBA pixel data using Core Image
-    /// This requires iOS 14+/macOS 11+ for WebP support
+    /// Decodes WebP data to straight (non-premultiplied) RGBA8 pixels with libwebp.
+    ///
+    /// SOG/SOGS textures store data, not colour: indices in RGB and an unrelated value
+    /// (opacity, a quaternion tag) in A. Core Graphics can only draw into premultiplied
+    /// contexts and may colour-manage the image, both of which corrupt those values.
     public static func decode(_ webpData: Data) throws -> DecodedImage {
-        guard let ciImage = CIImage(data: webpData) else {
+        var decodedWidth: Int32 = 0
+        var decodedHeight: Int32 = 0
+        let hasInfo = webpData.withUnsafeBytes { input -> Bool in
+            guard let base = input.bindMemory(to: UInt8.self).baseAddress else { return false }
+            return WebPGetInfo(base, input.count, &decodedWidth, &decodedHeight) != 0
+        }
+        guard hasInfo else {
             throw WebPError.decodingFailed
         }
 
-        let context = CIContext()
-        let width = Int(ciImage.extent.width)
-        let height = Int(ciImage.extent.height)
-
-        // Validate image dimensions to prevent excessive memory allocation
-        guard width > 0 && height > 0 else {
-            throw WebPError.invalidImageData
-        }
-        guard width <= 16384 && height <= 16384 else {
-            throw WebPError.invalidImageData  // Reject unreasonably large images
-        }
-
-        // Create a bitmap context for RGBA8 pixel data
+        let width = Int(decodedWidth)
+        let height = Int(decodedHeight)
         let bytesPerPixel = 4
-        let bytesPerRow = width * bytesPerPixel
-        let totalBytes = height * bytesPerRow
-
-        // Check total allocation size against platform limit
-        guard totalBytes <= Self.maxDecodedBytes else {
-            throw WebPError.imageTooLarge
-        }
+        let totalBytes = try validatedByteCount(width: width, height: height, bytesPerPixel: bytesPerPixel)
 
         var pixels = Data(count: totalBytes)
-        var decodingSucceeded = false
-
-        pixels.withUnsafeMutableBytes { ptr in
-            guard let baseAddress = ptr.baseAddress else { return }
-
-            let colorSpace = CGColorSpaceCreateDeviceRGB()
-            let bitmapInfo = CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedLast.rawValue)
-
-            guard let cgContext = CGContext(
-                data: baseAddress,
-                width: width,
-                height: height,
-                bitsPerComponent: 8,
-                bytesPerRow: bytesPerRow,
-                space: colorSpace,
-                bitmapInfo: bitmapInfo.rawValue
-            ) else { return }
-
-            // Render the CIImage to a CGImage first, then draw to the context
-            guard let cgImage = context.createCGImage(ciImage, from: ciImage.extent) else { return }
-            cgContext.draw(cgImage, in: CGRect(x: 0, y: 0, width: width, height: height))
-            decodingSucceeded = true
+        let decodingSucceeded = pixels.withUnsafeMutableBytes { output -> Bool in
+            webpData.withUnsafeBytes { input -> Bool in
+                guard let inputBase = input.bindMemory(to: UInt8.self).baseAddress,
+                      let outputBase = output.bindMemory(to: UInt8.self).baseAddress else {
+                    return false
+                }
+                return WebPDecodeRGBAInto(inputBase, input.count,
+                                          outputBase, output.count,
+                                          Int32(width * bytesPerPixel)) != nil
+            }
         }
-
         guard decodingSucceeded else {
             throw WebPError.decodingFailed
         }
@@ -106,8 +77,23 @@ public struct WebPDecoder {
             bytesPerPixel: bytesPerPixel
         )
     }
+
+    private static func validatedByteCount(width: Int, height: Int, bytesPerPixel: Int) throws -> Int {
+        guard width > 0 && height > 0 else {
+            throw WebPError.invalidImageData
+        }
+        guard width <= 16384 && height <= 16384 else {
+            throw WebPError.invalidImageData  // Reject unreasonably large images
+        }
+        let totalBytes = width * height * bytesPerPixel
+        guard totalBytes <= Self.maxDecodedBytes else {
+            throw WebPError.imageTooLarge
+        }
+        return totalBytes
+    }
     
-    /// Alternative decoder using ImageIO (fallback method)
+    /// Alternative decoder using ImageIO (fallback method). Lossy for data textures: pixels
+    /// pass through a premultiplied context, so RGB precision drops as alpha decreases.
     public static func decodeWithImageIO(_ webpData: Data) throws -> DecodedImage {
         guard let source = CGImageSourceCreateWithData(webpData as CFData, nil) else {
             throw WebPError.decodingFailed
@@ -161,6 +147,17 @@ public struct WebPDecoder {
             ) else { return }
 
             context.draw(cgImage, in: CGRect(x: 0, y: 0, width: width, height: height))
+
+            // Core Graphics only draws premultiplied; DecodedImage holds straight alpha.
+            let bytes = ptr.bindMemory(to: UInt8.self)
+            for offset in stride(from: 0, to: totalBytes, by: bytesPerPixel) {
+                let alpha = bytes[offset + 3]
+                guard alpha > 0, alpha < 255 else { continue }
+                let scale = 255.0 / Float(alpha)
+                for channel in 0..<3 {
+                    bytes[offset + channel] = (Float(bytes[offset + channel]) * scale).quantized(clampedTo: 0...255)
+                }
+            }
             decodingSucceeded = true
         }
 
@@ -197,22 +194,11 @@ public struct WebPDecoder {
             return SIMD4<UInt8>(0, 0, 0, 0)
         }
 
-        let r = image.pixels[index.partialValue]
-        let g = image.pixels[index.partialValue + 1]
-        let b = image.pixels[index.partialValue + 2]
-        let a = image.pixels[index.partialValue + 3]
-
-        // Un-premultiply alpha to get original color values
-        // Since CGContext uses premultiplied alpha, we need to divide by alpha to get original colors
-        if a > 0 {
-            let alpha = Float(a) / 255.0
-            let unpremultipliedR = UInt8(min(255.0, Float(r) / alpha))
-            let unpremultipliedG = UInt8(min(255.0, Float(g) / alpha))
-            let unpremultipliedB = UInt8(min(255.0, Float(b) / alpha))
-            return SIMD4<UInt8>(unpremultipliedR, unpremultipliedG, unpremultipliedB, a)
-        } else {
-            return SIMD4<UInt8>(r, g, b, a)
-        }
+        let base = image.pixels.startIndex + index.partialValue
+        return SIMD4<UInt8>(image.pixels[base],
+                            image.pixels[base + 1],
+                            image.pixels[base + 2],
+                            image.pixels[base + 3])
     }
     
     /// Get normalized float pixel value at specific coordinates

@@ -111,7 +111,8 @@ public class SPXSceneReader: SplatSceneReader {
         
         // Determine if compressed and actual block size
         let isCompressed = blockLength < 0
-        let actualBlockSize = isCompressed ? Int(-blockLength) : Int(blockLength)
+        // magnitude, not negation: -Int32.min overflows
+        let actualBlockSize = Int(blockLength.magnitude)
         
         print("SPXSceneReader: Raw block length: \(blockLength), actual size: \(actualBlockSize), compressed: \(isCompressed)")
         
@@ -216,7 +217,8 @@ public class SPXSceneReader: SplatSceneReader {
                     nextSHIndex.sh3 += Int(block.gaussianCount)
                     
                 default:
-                    print("SPXSceneReader: Unknown format \(block.formatID), skipping block")
+                    // Matches gsbox: silently skipping would load newer (v2/v3) files as 0 points.
+                    throw SPXFileFormatError.invalidBlockFormat
                 }
                 
             } catch {
@@ -300,22 +302,12 @@ public class SPXSceneReader: SplatSceneReader {
     }
     
     private func parseFormat20Points(_ data: Data, count: Int) throws -> [SplatScenePoint] {
-        var newPoints: [SplatScenePoint] = []
-        newPoints.reserveCapacity(count)
-
-        guard let header = header else {
-            throw SPXFileFormatError.invalidHeader
-        }
-        
-        // Validate expected data size
+        // Validate before reserving: `count` comes straight from the file.
         let expectedSize = count * 20
         try SplatDataValidator.validateDataBounds(data: data, offset: 0, size: expectedSize)
 
-        // Bounding box for coordinate transformation
-        let boundsMin = SIMD3<Float>(header.minX, header.minY, header.minZ)
-        let boundsMax = SIMD3<Float>(header.maxX, header.maxY, header.maxZ)
-        let boundsSize = boundsMax - boundsMin
-        let boundsCenter = (boundsMin + boundsMax) * 0.5
+        var newPoints: [SplatScenePoint] = []
+        newPoints.reserveCapacity(count)
         
         // SPX Format 20 data layout (based on Go reference implementation):
         // Positions: count * 3 bytes each for X, Y, Z (stored as arrays, not interleaved)
@@ -333,7 +325,9 @@ public class SPXSceneReader: SplatSceneReader {
             let posX = decodeSpxPosition(from: data, at: i * 3)
             let posY = decodeSpxPosition(from: data, at: count * 3 + i * 3)
             let posZ = decodeSpxPosition(from: data, at: count * 6 + i * 3)
-            var position = SIMD3<Float>(posX, posY, posZ)
+            // Positions decode straight to world units (fixed point / 4096); the header's
+            // bounding box is metadata only (see gsbox DecodeSpxPositionUint24).
+            let position = SIMD3<Float>(posX, posY, posZ)
             
             // Validate bounds for scale array access
             try SplatDataValidator.validateDataBounds(data: data, offset: count * 9 + i, size: 1)
@@ -377,32 +371,6 @@ public class SPXSceneReader: SplatSceneReader {
             let rotY = data[count * 18 + i]
             let rotZ = data[count * 19 + i]
             let rotation = normalizeRotations(rotW, rotX, rotY, rotZ)
-            
-            if i == 0 { // First point in the block
-                print("SPXSceneReader: Header bounds - X:[\(header.minX), \(header.maxX)], Y:[\(header.minY), \(header.maxY)], Z:[\(header.minZ), \(header.maxZ)]")
-                print("SPXSceneReader: Raw position 0: (\(posX), \(posY), \(posZ))")
-            }
-            
-            // Bounding box transformation logic
-            let boundsSizeValid = boundsSize.x.isFinite && boundsSize.y.isFinite && boundsSize.z.isFinite &&
-                                  abs(boundsSize.x) > 1e-6 && abs(boundsSize.y) > 1e-6 && abs(boundsSize.z) > 1e-6
-            let boundsCenterValid = boundsCenter.x.isFinite && boundsCenter.y.isFinite && boundsCenter.z.isFinite
-            
-            if boundsSizeValid && boundsCenterValid {
-                position = position * boundsSize * 0.5 + boundsCenter
-                if i == 0 {
-                    print("SPXSceneReader: Applied bounding box transformation")
-                }
-            } else if i == 0 {
-                let defaultScale: Float = 1.0
-                position *= defaultScale
-                print("SPXSceneReader: Invalid bounding box (NaN or zero size), applying default scale factor \(defaultScale)")
-                print("SPXSceneReader: Bounds size: \(boundsSize)")
-                print("SPXSceneReader: Bounds center: \(boundsCenter)")
-                print("SPXSceneReader: BoundsSize finite: (\(boundsSize.x.isFinite), \(boundsSize.y.isFinite), \(boundsSize.z.isFinite))")
-                print("SPXSceneReader: BoundsCenter finite: (\(boundsCenter.x.isFinite), \(boundsCenter.y.isFinite), \(boundsCenter.z.isFinite))")
-                print("SPXSceneReader: BoundsSize > minSize: (\(abs(boundsSize.x) > 1e-6), \(abs(boundsSize.y) > 1e-6), \(abs(boundsSize.z) > 1e-6))")
-            }
             
             if i == 0 {
                 print("SPXSceneReader: Final position 0: \(position)")

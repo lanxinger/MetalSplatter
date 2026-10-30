@@ -211,6 +211,6 @@ fileprivate extension SIMD3 where Scalar == UInt8 {
 
 fileprivate extension Float {
     var asUInt8: UInt8 {
-        UInt8(clamped(to: 0.0...255.0))
+        quantized(clampedTo: 0...255, rounding: .towardZero)
     }
 }
