@@ -109,6 +109,15 @@ static inline FragmentIn culledFragment(uint splatID) {
     return out;
 }
 
+// SplatRenderer.colorGrade. A splat's stored colour is its display colour through gamma 2.2, so the
+// grade goes back to the display colour, where it's defined, and then forward again.
+inline half4 gradedSplatColor(half4 color, Uniforms uniforms) {
+    float3 display = pow(float3(color.rgb), float3(1.0f / 2.2f));
+    float3 graded = saturate(uniforms.colorGradeMatrix * display + uniforms.colorGradeOffset);
+    return half4(half3(pow(graded, float3(2.2f))),
+                 min(color.a * half(uniforms.colorGradeOpacityScale), half(1.0)));
+}
+
 static FragmentIn splatVertexInternal(Splat splat,
                                       Uniforms uniforms,
                                       uint relativeVertexIndex,
@@ -285,6 +294,9 @@ static FragmentIn splatVertexInternal(Splat splat,
                           projectedCenter.w);
     out.relativePosition = half(axisScale) * kBoundsRadius * relativeCoordinates;
     out.color = unpackSplatColor(splat.packedColor);
+    if (uniforms.colorGradeEnabled != 0u) {
+        out.color = gradedSplatColor(out.color, uniforms);
+    }
     out.color.a = min(out.color.a * half(opacityScale), half(1.0));
     if ((editState & (1u << 2)) != 0u) {
         constexpr half4 lockedTint = half4(1.0h, 0.72h, 0.22h, 0.65h);

@@ -352,9 +352,11 @@ public class SplatRenderer: @unchecked Sendable {
         var covarianceBlur: Float
         var selectionTintColor: SIMD4<Float>
         var editingEnabled: UInt32
-        var padding2: UInt32
-        var padding3: UInt32
+        var colorGradeEnabled: UInt32
+        var colorGradeOpacityScale: Float
         var padding4: UInt32
+        var colorGradeMatrix: matrix_float3x3
+        var colorGradeOffset: SIMD3<Float>
     }
 
     // Keep in sync with Shaders.metal : UniformsArray
@@ -908,6 +910,32 @@ public class SplatRenderer: @unchecked Sendable {
     private var activeTransformIndexCount = 0
     private var previewTransformActive = false
     private var savedOptimizedEditSettings: (meshShaderEnabled: Bool, batchPrecomputeEnabled: Bool)?
+
+    /// A colour grade applied to each splat as it's drawn, leaving the splats themselves alone, so it
+    /// can change on every frame.
+    ///
+    /// It looks the same as the grade written into the scene's points: `matrix * color + offset` on
+    /// the colour a scene file stores, clamped to 0...1, and opacity times `opacityScale`, clamped to 1.
+    public struct ColorGrade: Equatable, Sendable {
+        public var matrix: simd_float3x3
+        public var offset: SIMD3<Float>
+        public var opacityScale: Float
+
+        public init(matrix: simd_float3x3 = matrix_identity_float3x3,
+                    offset: SIMD3<Float> = .zero,
+                    opacityScale: Float = 1) {
+            self.matrix = matrix
+            self.offset = offset
+            self.opacityScale = opacityScale
+        }
+    }
+
+    /// The grade to draw with, or nil for none. While there is one, the mesh shader path isn't used.
+    public var colorGrade: ColorGrade? {
+        didSet {
+            if colorGrade != oldValue { invalidateRender() }
+        }
+    }
 
     public var splatCount: Int { splatBuffer.count }
     internal var renderableSplatCountForCurrentEditState: Int {
@@ -2196,6 +2224,32 @@ public class SplatRenderer: @unchecked Sendable {
         }
     }
 
+    /// Deletes every splat whose byte in `kept` is 0, and brings back every other, by index in the
+    /// renderer's order. Keep that the same as the scene's with `preserveSourceOrderOnAdd`.
+    ///
+    /// For a caller that works out what to delete by itself, such as a crop. Anything else about the
+    /// splats' edit state stays as it was.
+    public func setDeletedSplats(keeping kept: [UInt8]) throws {
+        guard kept.count == splatCount else {
+            throw SplatEditorError.rendererPointCountMismatch(renderer: splatCount, editor: kept.count)
+        }
+        try ensureEditingResources(pointCount: splatCount)
+        guard let editStateBuffer else { return }
+        let states = editStateBuffer.contents().bindMemory(to: EditStateStorage.self, capacity: max(splatCount, 1))
+        let deleted = EditableSplatState.deleted.rawValue
+        var indices: [Int] = []
+        var values: [UInt32] = []
+        for index in 0..<splatCount {
+            let oldValue = UInt32(states[index])
+            let newValue = kept[index] != 0 ? oldValue & ~deleted : oldValue | deleted
+            if newValue != oldValue {
+                indices.append(index)
+                values.append(newValue)
+            }
+        }
+        try updateEditStates(at: indices, values: values)
+    }
+
     internal func updateTransformIndices(at indices: [Int], values: [UInt32]) throws {
         guard indices.count == values.count else { return }
         try ensureEditingResources(pointCount: splatCount)
@@ -2865,6 +2919,7 @@ public class SplatRenderer: @unchecked Sendable {
                           lodThresholds: lodThresholds,
                           selectionTintColor: selectionTintColor,
                           editingEnabled: editingEnabled,
+                          colorGrade: colorGrade,
                           totalSplatCount: UInt32(self.splatCount))
     }
 
@@ -2877,6 +2932,7 @@ public class SplatRenderer: @unchecked Sendable {
                              lodThresholds: SIMD3<Float>,
                              selectionTintColor: SIMD4<Float> = SIMD4<Float>(0.15, 0.55, 1.0, 0.45),
                              editingEnabled: Bool = false,
+                             colorGrade: ColorGrade? = nil,
                              totalSplatCount: UInt32? = nil) -> Uniforms {
         let proj00 = viewport.projectionMatrix[0][0]
         let proj11 = viewport.projectionMatrix[1][1]
@@ -2903,9 +2959,11 @@ public class SplatRenderer: @unchecked Sendable {
             covarianceBlur: covarianceBlur,
             selectionTintColor: selectionTintColor,
             editingEnabled: editingEnabled ? 1 : 0,
-            padding2: 0,
-            padding3: 0,
-            padding4: 0
+            colorGradeEnabled: colorGrade != nil ? 1 : 0,
+            colorGradeOpacityScale: colorGrade?.opacityScale ?? 1,
+            padding4: 0,
+            colorGradeMatrix: colorGrade?.matrix ?? matrix_identity_float3x3,
+            colorGradeOffset: colorGrade?.offset ?? .zero
         )
     }
 
@@ -3589,8 +3647,10 @@ public class SplatRenderer: @unchecked Sendable {
         // =========================================================================
         let useCulledDitheredPath = useDitheredTransparency && frustumCullingEnabled
         // The mesh path binds no edit-state/transform buffers, so selection tint,
-        // preview transforms and the outline pass require the vertex path.
-        if meshShaderEnabled && canUseMeshShadersSafely && !useCulledDitheredPath && !shouldBindEditingResources,
+        // preview transforms and the outline pass require the vertex path. So does a colour grade,
+        // which only the vertex path applies.
+        if meshShaderEnabled && canUseMeshShadersSafely && !useCulledDitheredPath && !shouldBindEditingResources
+            && colorGrade == nil,
            let meshPipeline = meshShaderPipelineState,
            let meshDepth = meshShaderDepthState,
            let sortedIndices = getCurrentSortedIndicesBuffer(for: commandBuffer) {
