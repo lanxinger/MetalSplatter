@@ -319,6 +319,80 @@ final class FastSHRendererRegressionTests: XCTestCase {
                     expected: expected, context: "selection cleared after undo")
     }
 
+    // A live grade has to look like the same grade written into the points, on every draw path.
+    func testColorGradeMatchesTheSameGradeInThePoints() async throws {
+        let matrix = simd_float3x3(columns: (SIMD3(0.7, 0.1, 0), SIMD3(0, 0.9, 0.2), SIMD3(0.1, 0, 0.6)))
+        let offset = SIMD3<Float>(0.08, -0.05, 0.03)
+        let grade = SplatRenderer.ColorGrade(matrix: matrix, offset: offset)
+        var coefficients = Array(repeating: SIMD3<Float>.zero, count: 4)
+        coefficients[0] = SIMD3(0.3, 0.2, -0.3)
+        coefficients[2] = SIMD3(0.1, -0.2, 0.3)
+        let viewport = camera(eye: SIMD3(0, 0, 5), orthographic: true)
+        let color = evaluate(coefficients, direction: SIMD3(0, 0, -1))
+
+        let fastSH = try GPU()
+        try await fastSH.load([point(coefficients)])
+        assertColor(try await fastSH.render(viewport), x: 32, y: 32, expected: color, context: "before the grade")
+        fastSH.renderer.colorGrade = grade
+        assertColor(try await fastSH.render(viewport), x: 32, y: 32, expected: matrix * color + offset,
+                    context: "SH", accuracy: 0.01)
+        fastSH.renderer.colorGrade = nil
+        assertColor(try await fastSH.render(viewport), x: 32, y: 32, expected: color, context: "after clearing it")
+
+        // The base renderer and the mesh path only have the DC term.
+        let dcOnly = evaluate([coefficients[0]], direction: SIMD3(0, 0, -1))
+        for mesh in [false, true] {
+            let gpu = try GPU()
+            gpu.renderer.fastSHConfig.enabled = false
+            gpu.renderer.meshShaderEnabled = mesh
+            try await gpu.load([point([coefficients[0]])])
+            gpu.renderer.colorGrade = grade
+            assertColor(try await gpu.render(viewport), x: 32, y: 32, expected: matrix * dcOnly + offset,
+                        context: "base, mesh enabled: \(mesh)", accuracy: 0.01)
+        }
+    }
+
+    func testColorGradeScalesOpacityAndClampsColor() async throws {
+        let gpu = try GPU()
+        var value = point([SIMD3(0.5, 0.5, 0.5)])
+        value.opacity = .linearFloat(0.8)
+        try await gpu.load([value])
+        let viewport = camera(eye: SIMD3(0, 0, 5), orthographic: true)
+        let plain = try await gpu.render(viewport)[32 * 65 + 32].w
+        gpu.renderer.colorGrade = SplatRenderer.ColorGrade(offset: SIMD3(repeating: 5), opacityScale: 0.5)
+        let graded = try await gpu.render(viewport)
+        XCTAssertEqual(graded[32 * 65 + 32].w, plain * 0.5, accuracy: 0.01)
+        assertColor(graded, x: 32, y: 32, expected: SIMD3(repeating: 1), context: "clamped", accuracy: 0.01)
+    }
+
+    func testDeletingSplatsByIndexHidesAndRestoresThem() async throws {
+        for fastSH in [true, false] {
+            let gpu = try GPU()
+            gpu.renderer.fastSHConfig.enabled = fastSH
+            let values = [-0.7 as Float, 0.7].map { x in
+                var value = point(Array(repeating: SIMD3<Float>.zero, count: 4))
+                value.position.x = x
+                value.scale = .linearFloat(SIMD3(0.15, 0.15, 0.03))
+                return value
+            }
+            try await gpu.load(values)
+            let viewport = camera(eye: SIMD3(0, 0, 5), orthographic: true)
+
+            try gpu.renderer.setDeletedSplats(keeping: [0, 1])
+            let cropped = try await gpu.render(viewport)
+            XCTAssertLessThan(cropped[32 * 65 + 21].w, 0.01)
+            XCTAssertGreaterThan(cropped[32 * 65 + 43].w, 0.8)
+
+            try gpu.renderer.setDeletedSplats(keeping: [1, 1])
+            try await gpu.sort() // A larger visible set is sorted again before it draws.
+            let restored = try await gpu.render(viewport)
+            XCTAssertGreaterThan(restored[32 * 65 + 21].w, 0.8)
+            XCTAssertGreaterThan(restored[32 * 65 + 43].w, 0.8)
+
+            XCTAssertThrowsError(try gpu.renderer.setDeletedSplats(keeping: [1]))
+        }
+    }
+
     func testNonzeroViewportAndLoadActionPreserveExistingBackground() async throws {
         let gpu = try GPU()
         var coefficients = Array(repeating: SIMD3<Float>.zero, count: 4)

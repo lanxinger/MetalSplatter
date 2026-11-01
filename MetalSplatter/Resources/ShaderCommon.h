@@ -50,9 +50,11 @@ typedef struct
     float covarianceBlur;       // Low-pass filter for 2D covariance (derived from render mode by default)
     float4 selectionTintColor;
     uint editingEnabled;
-    uint padding2;
-    uint padding3;
+    uint colorGradeEnabled;
+    float colorGradeOpacityScale;
     uint padding4;
+    float3x3 colorGradeMatrix;
+    float3 colorGradeOffset;
 } Uniforms;
 
 typedef struct
