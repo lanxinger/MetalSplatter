@@ -38,10 +38,10 @@ extension SplatRenderer {
         var covB: PackedHalf3
         var shPaletteIndex: UInt32         // Index into SH palette (for SOGS)
         var shDegree: UInt16               // SH degree (0-3)
-        var padding: UInt16 = 0            // Alignment padding
+        var shDC: PackedHalf3              // DC coefficient, which the palette doesn't hold
 
         /// Convert from regular Splat + SH info
-        init(splat: Splat, rotation: simd_quatf, shIndex: UInt32 = 0, shDegree: UInt16 = 0) {
+        init(splat: Splat, rotation: simd_quatf, shIndex: UInt32 = 0, shDegree: UInt16 = 0, shDC: PackedHalf3 = PackedHalf3(x: 0, y: 0, z: 0)) {
             self.position = splat.position
             self.baseColor = splat.packedColor
             self.tintColor = SIMD4<Float>(1, 1, 1, 1)
@@ -50,6 +50,80 @@ extension SplatRenderer {
             self.covB = splat.covB
             self.shPaletteIndex = shIndex
             self.shDegree = shDegree
+            self.shDC = shDC
+        }
+    }
+
+    /// The distinct sets of SH bands above DC among some points. DC isn't part of a set: it differs
+    /// for almost every splat, while a SOG file's splats share at most 65,536 sets of higher bands.
+    struct SHBandPalette {
+        static let noEntry = UInt32.max
+
+        /// The first point using each entry, whose bands stand for all of its points.
+        private(set) var firstPointOfEntry: [UInt32] = []
+        /// The entry each point uses, or `noEntry`.
+        private(set) var entryOfPoint: [UInt32]
+
+        init(points: [SplatScenePoint], bandCount: Int, maxEntries: Int) {
+            entryOfPoint = [UInt32](repeating: Self.noEntry, count: points.count)
+            guard bandCount > 0, maxEntries > 0 else { return }
+
+            // Open addressing, at most half full. Unlike a dictionary of arrays this allocates
+            // nothing per point, which matters at millions of them.
+            var capacity = 1024
+            while capacity < points.count * 2 { capacity <<= 1 }
+            var table = [UInt32](repeating: Self.noEntry, count: capacity)
+            let mask = capacity - 1
+
+            for (index, point) in points.enumerated() {
+                guard case let .sphericalHarmonic(coefficients) = point.color, !coefficients.isEmpty else { continue }
+                var slot = Int(truncatingIfNeeded: Self.hash(coefficients, bandCount: bandCount)) & mask
+                while true {
+                    let entry = table[slot]
+                    if entry == Self.noEntry {
+                        // Unmapped points retain their base color when the palette is full.
+                        if firstPointOfEntry.count < maxEntries {
+                            table[slot] = UInt32(firstPointOfEntry.count)
+                            entryOfPoint[index] = UInt32(firstPointOfEntry.count)
+                            firstPointOfEntry.append(UInt32(index))
+                        }
+                        break
+                    }
+                    if case let .sphericalHarmonic(other) = points[Int(firstPointOfEntry[Int(entry)])].color,
+                       Self.sameBands(coefficients, other, bandCount: bandCount) {
+                        entryOfPoint[index] = entry
+                        break
+                    }
+                    slot = (slot + 1) & mask
+                }
+            }
+        }
+
+        private static func hash(_ coefficients: [SIMD3<Float>], bandCount: Int) -> UInt64 {
+            let multiplier: UInt64 = 0x9E37_79B9_7F4A_7C15
+            var hash: UInt64 = 0xCBF2_9CE4_8422_2325
+            for band in 1..<max(1, min(coefficients.count, bandCount + 1)) {
+                let value = coefficients[band]
+                hash = (hash ^ (UInt64(value.x.bitPattern) | UInt64(value.y.bitPattern) << 32)) &* multiplier
+                hash ^= hash >> 32
+                hash = (hash ^ UInt64(value.z.bitPattern)) &* multiplier
+                hash ^= hash >> 32
+            }
+            return hash
+        }
+
+        /// By bits, like the hash. A band a point lacks counts as different from one it has, even a
+        /// zero one, which only costs an entry.
+        private static func sameBands(_ a: [SIMD3<Float>], _ b: [SIMD3<Float>], bandCount: Int) -> Bool {
+            let count = min(a.count, bandCount + 1)
+            guard count == min(b.count, bandCount + 1) else { return false }
+            for band in 1..<max(1, count) {
+                let x = a[band], y = b[band]
+                if x.x.bitPattern != y.x.bitPattern || x.y.bitPattern != y.y.bitPattern || x.z.bitPattern != y.z.bitPattern {
+                    return false
+                }
+            }
+            return true
         }
     }
 }
@@ -63,8 +137,9 @@ public class FastSHSplatRenderer: SplatRenderer, @unchecked Sendable {
         /// Enable fast SH evaluation (vs per-splat evaluation)
         public var enabled: Bool = true
 
-        /// Maximum number of unique SH coefficient sets (palette size)
-        public var maxPaletteSize: Int = 65536
+        /// Maximum number of distinct sets of SH bands above DC (palette size). Each takes 8 bytes
+        /// per coefficient on the GPU. Points past it show their base color.
+        public var maxPaletteSize: Int = .max
 
         /// Update SH evaluation every N frames (1 = every frame)
         /// Note: This is superseded by shDirectionEpsilon threshold-based updates.
@@ -93,10 +168,9 @@ public class FastSHSplatRenderer: SplatRenderer, @unchecked Sendable {
     private var fastSHEditingPipelineState: MTLRenderPipelineState?
     
     // SH data storage
-    public private(set) var shCoefficients: [[SIMD3<Float>]] = []
-    private var shPaletteMap: [Int: UInt32] = [:] // Maps from splat index to palette index
+    public private(set) var shPaletteEntryCount: Int = 0
     public private(set) var shDegree: Int = 0
-    private var shCoefficientsPerEntry: Int = 0
+    private var shBandsPerEntry: Int = 0
     
     // Extended splat buffer for SH
     private var splatSHBuffer: MetalBuffer<SplatSH>
@@ -116,13 +190,21 @@ public class FastSHSplatRenderer: SplatRenderer, @unchecked Sendable {
 
     private var shaderParameters = FastSHShaderParameters()
 
-    static func rendererSupportedSHCoefficients(_ coefficients: [SIMD3<Float>], degree: Int) -> [SIMD3<Float>] {
-        let supportedCount = SphericalHarmonicsEvaluator.coefficientCountForDegree(degree)
-        var result = Array(coefficients.prefix(supportedCount))
-        if result.count < supportedCount {
-            result.append(contentsOf: repeatElement(.zero, count: supportedCount - result.count))
+    /// Writes the bands above DC that the renderer supports: a band past `count` is dropped, and a
+    /// missing one is zero.
+    static func writeRendererSupportedSHBands(_ coefficients: [SIMD3<Float>], count: Int,
+                                              to destination: UnsafeMutablePointer<SIMD3<Float16>>) {
+        for band in 0..<count {
+            let value = band + 1 < coefficients.count ? coefficients[band + 1] : .zero
+            destination[band] = SIMD3<Float16>(Float16(value.x), Float16(value.y), Float16(value.z))
         }
-        return result
+    }
+
+    private static func storedDC(_ color: SplatScenePoint.Color) -> PackedHalf3 {
+        guard case let .sphericalHarmonic(coefficients) = color, let dc = coefficients.first else {
+            return PackedHalf3(x: 0, y: 0, z: 0)
+        }
+        return PackedHalf3(x: Float16(dc.x), y: Float16(dc.y), z: Float16(dc.z))
     }
 
     internal override func resetPipelineStates() {
@@ -177,7 +259,7 @@ public class FastSHSplatRenderer: SplatRenderer, @unchecked Sendable {
             invalidateRender()
             throw error
         }
-        guard shPaletteBuffer != nil, shDegree > 0, shCoefficientsPerEntry > 0 else { return false }
+        guard shPaletteBuffer != nil, shDegree > 0, shBandsPerEntry > 0 else { return false }
 
         if fastSHPipelineState == nil || fastSHEditingPipelineState == nil {
             setupFastSHPipeline(library: library)
@@ -292,10 +374,6 @@ public class FastSHSplatRenderer: SplatRenderer, @unchecked Sendable {
 
     private func rebuildFastSHBuffers(from splats: [SplatScenePoint]) throws {
         lastFastSHAppliedColorRevision = nil
-        // Extract unique SH coefficient sets and build palette
-        var uniqueSHSets: [[SIMD3<Float>]] = []
-        var shSetToIndex: [[SIMD3<Float>]: UInt32] = [:]
-        var paletteMap: [Int: UInt32] = [:]
         var degree = 0
         
         // Layers may mix DC-only and higher-degree points. Use a uniform
@@ -306,31 +384,20 @@ public class FastSHSplatRenderer: SplatRenderer, @unchecked Sendable {
             }
         }
         
-        // Build palette of unique SH coefficient sets
-        for (index, splat) in splats.enumerated() {
-            if case let .sphericalHarmonic(coeffs) = splat.color, !coeffs.isEmpty {
-                let rendererCoeffs = Self.rendererSupportedSHCoefficients(coeffs, degree: degree)
-                if let paletteIndex = shSetToIndex[rendererCoeffs] {
-                    paletteMap[index] = paletteIndex
-                } else if uniqueSHSets.count < fastSHConfig.maxPaletteSize {
-                    let newIndex = UInt32(uniqueSHSets.count)
-                    uniqueSHSets.append(rendererCoeffs)
-                    shSetToIndex[rendererCoeffs] = newIndex
-                    paletteMap[index] = newIndex
-                }
-                // Unmapped points retain their base color when the palette is full.
-            }
-        }
-        
+        // Build palette of unique sets of SH bands above DC
+        let bandsPerEntry = SphericalHarmonicsEvaluator.coefficientCountForDegree(degree) - 1
+        let palette = SHBandPalette(points: splats, bandCount: bandsPerEntry, maxEntries: fastSHConfig.maxPaletteSize)
+        let entryCount = palette.firstPointOfEntry.count
+
         // Create SH palette buffer if we have SH data
         // Uses half-precision (Float16) storage — 50% less memory and bandwidth vs float32.
         // Keep the existing half-precision storage policy.
         let paletteBuffer: MTLBuffer?
-        let coeffsPerEntry = uniqueSHSets.isEmpty ? 0 : SphericalHarmonicsEvaluator.coefficientCountForDegree(degree)
-        if !uniqueSHSets.isEmpty {
-            let paletteSizeBytes = uniqueSHSets.count * coeffsPerEntry * MemoryLayout<SIMD3<Float16>>.stride
+        let coeffsPerEntry = entryCount == 0 ? 0 : bandsPerEntry
+        if entryCount > 0 {
+            let paletteSizeBytes = entryCount * coeffsPerEntry * MemoryLayout<SIMD3<Float16>>.stride
 
-            print("Fast SH: Creating half-precision palette buffer - \(uniqueSHSets.count) sets × \(coeffsPerEntry) coeffs = \(paletteSizeBytes) bytes")
+            print("Fast SH: Creating half-precision palette buffer - \(entryCount) sets × \(coeffsPerEntry) coeffs = \(paletteSizeBytes) bytes")
 
             guard let buffer = device.makeBuffer(length: paletteSizeBytes, options: .storageModeShared) else {
                 throw SplatRendererError.failedToCreateBuffer(length: paletteSizeBytes)
@@ -339,12 +406,10 @@ public class FastSHSplatRenderer: SplatRenderer, @unchecked Sendable {
             paletteBuffer = buffer
 
             // Fill palette buffer with half-precision coefficients
-            let contents = buffer.contents().bindMemory(to: SIMD3<Float16>.self, capacity: uniqueSHSets.count * coeffsPerEntry)
-            for (setIndex, coeffSet) in uniqueSHSets.enumerated() {
-                let offset = setIndex * coeffsPerEntry
-                for coeffIndex in 0..<coeffsPerEntry {
-                    let f = coeffSet[coeffIndex]
-                    contents[offset + coeffIndex] = SIMD3<Float16>(Float16(f.x), Float16(f.y), Float16(f.z))
+            let contents = buffer.contents().bindMemory(to: SIMD3<Float16>.self, capacity: entryCount * coeffsPerEntry)
+            for (entry, point) in palette.firstPointOfEntry.enumerated() {
+                if case let .sphericalHarmonic(coeffs) = splats[Int(point)].color {
+                    Self.writeRendererSupportedSHBands(coeffs, count: coeffsPerEntry, to: contents + entry * coeffsPerEntry)
                 }
             }
         } else {
@@ -356,24 +421,24 @@ public class FastSHSplatRenderer: SplatRenderer, @unchecked Sendable {
         
         for (index, splat) in splats.enumerated() {
             let baseSplat = Splat(splat)
-            let shIndex = paletteMap[index] ?? UInt32.max
-            let shDeg = (paletteMap[index] != nil) ? UInt16(degree) : 0
+            let shIndex = palette.entryOfPoint[index]
+            let shDeg = shIndex != SHBandPalette.noEntry ? UInt16(degree) : 0
 
             let splatSH = SplatSH(splat: baseSplat,
                                    rotation: splat.rotation.normalized,
                                    shIndex: shIndex,
-                                   shDegree: shDeg)
+                                   shDegree: shDeg,
+                                   shDC: Self.storedDC(splat.color))
             splatSHBuffer.append(splatSH)
         }
         // Publish and acknowledge only a completely built palette and splat buffer.
         shPaletteBuffer = paletteBuffer
-        shPaletteMap = paletteMap
         shDegree = degree
-        shCoefficients = uniqueSHSets
-        shCoefficientsPerEntry = coeffsPerEntry
+        shPaletteEntryCount = entryCount
+        shBandsPerEntry = coeffsPerEntry
         shaderParameters = FastSHShaderParameters(
             coeffsPerEntry: UInt32(coeffsPerEntry),
-            paletteSize: UInt32(uniqueSHSets.count),
+            paletteSize: UInt32(entryCount),
             degree: UInt32(degree),
             skipSHEvaluation: 0
         )
@@ -663,12 +728,13 @@ extension FastSHSplatRenderer {
             )
 
             let baseSplat = Splat(sample.point)
-            let shIndex = shPaletteMap[index] ?? UInt32.max
-            let shDeg = shPaletteMap[index] != nil ? UInt16(shDegree) : 0
+            // SH stays as loaded: animation tints a splat rather than rewriting its coefficients.
+            let loaded = index < splatSHBuffer.count ? splatSHBuffer.values[index] : nil
             var splatSH = SplatSH(splat: baseSplat,
                                   rotation: sample.point.rotation.normalized,
-                                  shIndex: shIndex,
-                                  shDegree: shDeg)
+                                  shIndex: loaded?.shPaletteIndex ?? SHBandPalette.noEntry,
+                                  shDegree: loaded?.shDegree ?? 0,
+                                  shDC: loaded?.shDC ?? PackedHalf3(x: 0, y: 0, z: 0))
             splatSH.tintColor = SIMD4<Float>(sample.tint.x, sample.tint.y, sample.tint.z, 1)
             animatedSplatSHBuffer.append(splatSH)
         }

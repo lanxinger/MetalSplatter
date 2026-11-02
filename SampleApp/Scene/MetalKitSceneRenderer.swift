@@ -380,7 +380,7 @@ class MetalKitSceneRenderer: NSObject, MTKViewDelegate {
             if let fastRenderer = splat as? FastSHSplatRenderer {
                 // Analyze model and update settings
                 let splatCount = fastRenderer.splatCount
-                let uniqueShSets = fastRenderer.shCoefficients.count
+                let uniqueShSets = fastRenderer.shPaletteEntryCount
                 let shDegree = fastRenderer.shDegree
 
                 await MainActor.run {
