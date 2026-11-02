@@ -453,6 +453,81 @@ final class FastSHRendererRegressionTests: XCTestCase {
         assertColor(updated, x: 43, y: 32, expected: expected, context: "unchanged SH neighbor after partial color update")
     }
 
+    /// A SOG file's splats differ in DC and share their higher bands, so DC mustn't count against
+    /// the palette, or SH stops after the first 65,536 or so splats.
+    func testDistinctDCTermsShareOnePaletteEntryAndKeepSHPast64K() async throws {
+        let gpu = try GPU()
+        var bands = Array(repeating: SIMD3<Float>.zero, count: 16)
+        bands[3] = SIMD3(0.6, -0.4, 0.2)
+        bands[12] = SIMD3(-0.3, 0.5, 0.1)
+        let points = farAwayPoints(count: 70_000) { index, coefficients in
+            coefficients = bands
+            coefficients[0] = SIMD3(Float(index) * 1e-5, 0, 0)
+        }
+        try await gpu.load(points)
+        XCTAssertEqual(gpu.renderer.shPaletteEntryCount, 1)
+        let image = try await gpu.render(camera(eye: outgoing * 5))
+        let last = points[points.count - 1].color.asSphericalHarmonic
+        assertColor(image, x: 32, y: 32, expected: evaluate(last, direction: -outgoing), context: "last splat")
+    }
+
+    /// A PLY's splats each have bands of their own, and those all fit.
+    func testDistinctBandsKeepSHPast64K() async throws {
+        let gpu = try GPU()
+        let points = farAwayPoints(count: 70_000) { index, coefficients in
+            coefficients[3] = SIMD3(0.6, -0.4, Float(index) * 1e-5)
+        }
+        try await gpu.load(points)
+        XCTAssertEqual(gpu.renderer.shPaletteEntryCount, 70_000)
+        let image = try await gpu.render(camera(eye: outgoing * 5))
+        let last = points[points.count - 1].color.asSphericalHarmonic
+        assertColor(image, x: 32, y: 32, expected: evaluate(last, direction: -outgoing), context: "last splat")
+    }
+
+    func testPaletteCapLeavesLaterSplatsOnTheirBaseColor() async throws {
+        let gpu = try GPU()
+        gpu.renderer.fastSHConfig.maxPaletteSize = 2
+        let points = farAwayPoints(count: 3) { index, coefficients in
+            coefficients[3] = SIMD3(repeating: Float(index + 1) * 0.3)
+        }
+        try await gpu.load(points)
+        XCTAssertEqual(gpu.renderer.shPaletteEntryCount, 2)
+        let image = try await gpu.render(camera(eye: outgoing * 5))
+        assertColor(image, x: 32, y: 32, expected: SIMD3(repeating: 0.5), context: "past the cap")
+    }
+
+    func testBandPaletteMapsSharedBandsAndSkipsConstantColors() {
+        var first = Array(repeating: SIMD3<Float>.zero, count: 16)
+        first[0] = SIMD3(1, 2, 3)
+        first[5] = SIMD3(0.25, 0, 0)
+        var sameBands = first
+        sameBands[0] = SIMD3(4, 5, 6)
+        var otherBands = first
+        otherBands[5].x = 0.5
+        let scene = [
+            point(first), point(sameBands), point(otherBands),
+            SplatScenePoint(position: .zero, color: .linearFloat(SIMD3(repeating: 0.5)), opacity: .linearFloat(1),
+                            scale: .linearFloat(SIMD3(repeating: 1)), rotation: simd_quatf(angle: 0, axis: SIMD3(0, 1, 0))),
+        ]
+        let palette = FastSHSplatRenderer.SHBandPalette(points: scene, bandCount: 15, maxEntries: .max)
+        XCTAssertEqual(palette.firstPointOfEntry, [0, 2])
+        XCTAssertEqual(palette.entryOfPoint, [0, 0, 1, FastSHSplatRenderer.SHBandPalette.noEntry])
+    }
+
+    /// Off-camera splats, then a last one at the origin that fills the view.
+    private func farAwayPoints(count: Int, coefficients configure: (Int, inout [SIMD3<Float>]) -> Void) -> [SplatScenePoint] {
+        (0..<count).map { index in
+            var coefficients = Array(repeating: SIMD3<Float>.zero, count: 16)
+            configure(index, &coefficients)
+            var value = point(coefficients)
+            if index < count - 1 {
+                value.position = SIMD3(1000, 1000, 1000)
+                value.scale = .linearFloat(SIMD3(repeating: 0.001))
+            }
+            return value
+        }
+    }
+
     func testEmptyAndFullyHiddenScenesHonorClearAndLoadOnReusedTarget() async throws {
         let gpu = try GPU()
         let viewport = camera(eye: outgoing * 5)

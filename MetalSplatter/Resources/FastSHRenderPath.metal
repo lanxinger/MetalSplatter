@@ -7,7 +7,7 @@ float4 evaluateSH(float3 dir, device const float3* sh_coeffs, uint degree);
 // Specialized version using function constants (float precision)
 float4 evaluateSHSpecialized(float3 dir, device const float3* sh_coeffs);
 // Half-precision versions — read half3 palette, compute in half
-half4 evaluateSHHalf(float3 dir, device const half3* sh_coeffs, uint degree);
+half4 evaluateSHHalf(float3 dir, half3 sh_dc, device const half3* sh_bands, uint degree);
 half4 evaluateSHSpecializedHalf(float3 dir, device const half3* sh_coeffs);
 // Coefficients follow the Graphdeco/gsplat ordering documented in spherical_harmonics_evaluate.metal.
 
@@ -38,7 +38,7 @@ typedef struct {
     packed_half3 covB;
     uint shPaletteIndex;         // Index into SH palette (for SOGS)
     ushort shDegree;             // SH degree (0-3)
-    ushort padding;
+    packed_half3 shDC;           // DC coefficient, which the palette doesn't hold
 } SplatSH;
 
 // SH is expressed in the scene frame, independently of the covariance quaternion.
@@ -81,12 +81,12 @@ Splat evaluateSplatWithSH(SplatSH splatSH,
                  (splatSH.shPaletteIndex < params.paletteSize);
 
     if (hasSH) {
-        device const half3* coeffs = shPalette + params.coeffsPerEntry * splatSH.shPaletteIndex;
+        device const half3* bands = shPalette + params.coeffsPerEntry * splatSH.shPaletteIndex;
 
         float3 direction = sphericalHarmonicsDirection(float3(splatSH.position),
                                                         appearanceViewMatrix,
                                                         uniforms.isOrthographic != 0);
-        half4 shColor = evaluateSHHalf(direction, coeffs, params.degree);
+        half4 shColor = evaluateSHHalf(direction, half3(splatSH.shDC), bands, params.degree);
         // Match SplatRenderer.Splat's existing image-RGB to linear conversion.
         // Keep its gamma, clamp and RGBA8 policy unchanged in this compatibility fix.
         half3 linearColor = half3(pow(float3(shColor.rgb), float3(2.2f)));

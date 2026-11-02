@@ -118,40 +118,41 @@ half4 evaluateSHSpecializedHalf(float3 dir, device const half3* sh_coeffs) {
     return half4(result, 1.0h);
 }
 
-// Half-precision SH evaluation with runtime degree parameter (legacy half path)
-half4 evaluateSHHalf(float3 dir, device const half3* sh_coeffs, uint degree) {
+// Half-precision SH evaluation with runtime degree parameter (the fast SH render path).
+// DC comes per splat and sh_bands holds the bands above it, so sh_bands[0] is coefficient 1.
+half4 evaluateSHHalf(float3 dir, half3 sh_dc, device const half3* sh_bands, uint degree) {
     half3 d = half3(normalize(dir));
 
-    half3 result = half3(0.5h) + SH_C0_H * sh_coeffs[0];
+    half3 result = half3(0.5h) + SH_C0_H * sh_dc;
 
     if (degree >= 1) {
-        result -= SH_C1_H * d.y * sh_coeffs[1];
-        result += SH_C1_H * d.z * sh_coeffs[2];
-        result -= SH_C1_H * d.x * sh_coeffs[3];
+        result -= SH_C1_H * d.y * sh_bands[0];
+        result += SH_C1_H * d.z * sh_bands[1];
+        result -= SH_C1_H * d.x * sh_bands[2];
     }
 
     if (degree >= 2) {
         half xx = d.x * d.x, yy = d.y * d.y, zz = d.z * d.z;
         half xy = d.x * d.y, yz = d.y * d.z, xz = d.x * d.z;
 
-        result += SH_C2_H[0] * xy * sh_coeffs[4];
-        result += SH_C2_H[1] * yz * sh_coeffs[5];
-        result += SH_C2_H[2] * (2.0h * zz - xx - yy) * sh_coeffs[6];
-        result += SH_C2_H[3] * xz * sh_coeffs[7];
-        result += SH_C2_H[4] * (xx - yy) * sh_coeffs[8];
+        result += SH_C2_H[0] * xy * sh_bands[3];
+        result += SH_C2_H[1] * yz * sh_bands[4];
+        result += SH_C2_H[2] * (2.0h * zz - xx - yy) * sh_bands[5];
+        result += SH_C2_H[3] * xz * sh_bands[6];
+        result += SH_C2_H[4] * (xx - yy) * sh_bands[7];
     }
 
     if (degree >= 3) {
         half xx = d.x * d.x, yy = d.y * d.y, zz = d.z * d.z;
         half xy = d.x * d.y;
 
-        result += SH_C3_H[0] * d.y * (3.0h * xx - yy) * sh_coeffs[9];
-        result += SH_C3_H[1] * xy * d.z * sh_coeffs[10];
-        result += SH_C3_H[2] * d.y * (4.0h * zz - xx - yy) * sh_coeffs[11];
-        result += SH_C3_H[3] * d.z * (2.0h * zz - 3.0h * xx - 3.0h * yy) * sh_coeffs[12];
-        result += SH_C3_H[4] * d.x * (4.0h * zz - xx - yy) * sh_coeffs[13];
-        result += SH_C3_H[5] * d.z * (xx - yy) * sh_coeffs[14];
-        result += SH_C3_H[6] * d.x * (xx - 3.0h * yy) * sh_coeffs[15];
+        result += SH_C3_H[0] * d.y * (3.0h * xx - yy) * sh_bands[8];
+        result += SH_C3_H[1] * xy * d.z * sh_bands[9];
+        result += SH_C3_H[2] * d.y * (4.0h * zz - xx - yy) * sh_bands[10];
+        result += SH_C3_H[3] * d.z * (2.0h * zz - 3.0h * xx - 3.0h * yy) * sh_bands[11];
+        result += SH_C3_H[4] * d.x * (4.0h * zz - xx - yy) * sh_bands[12];
+        result += SH_C3_H[5] * d.z * (xx - yy) * sh_bands[13];
+        result += SH_C3_H[6] * d.x * (xx - 3.0h * yy) * sh_bands[14];
     }
 
     result = clamp(result, 0.0h, 1.0h);
