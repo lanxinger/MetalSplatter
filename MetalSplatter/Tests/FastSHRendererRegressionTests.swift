@@ -393,6 +393,83 @@ final class FastSHRendererRegressionTests: XCTestCase {
         }
     }
 
+    func testRebuildForgetsDeletedSplatsInStepWithItsCounts() async throws {
+        for fastSH in [true, false] {
+            let gpu = try GPU()
+            gpu.renderer.fastSHConfig.enabled = fastSH
+            let values = twoColumns()
+            try await gpu.load(values)
+            let viewport = camera(eye: SIMD3(0, 0, 5), orthographic: true)
+            let kept = (0..<values.count).map { UInt8($0 % 2) }
+            try gpu.renderer.setDeletedSplats(keeping: kept)
+            try gpu.renderer.replaceSceneLayers([SplatSceneLayer(points: values)])
+            XCTAssertEqual(gpu.renderer.renderableSplatCountForCurrentEditState, values.count)
+            var image = try await gpu.render(viewport)
+            XCTAssertGreaterThan(image[32 * 65 + 21].w, 0.8)
+            // The same mask again is a change now, and takes effect.
+            try gpu.renderer.setDeletedSplats(keeping: kept)
+            XCTAssertEqual(gpu.renderer.renderableSplatCountForCurrentEditState, values.count / 2)
+            image = try await gpu.render(viewport)
+            XCTAssertLessThan(image[32 * 65 + 21].w, 0.01)
+            XCTAssertGreaterThan(image[32 * 65 + 43].w, 0.8)
+        }
+    }
+
+    func testSelectedSplatsTintWithoutRebuildingOrDisturbingACut() async throws {
+        for fastSH in [true, false] {
+            let gpu = try GPU()
+            gpu.renderer.fastSHConfig.enabled = fastSH
+            let values = twoColumns(opacity: 0.1)
+            try await gpu.load(values)
+            let viewport = camera(eye: SIMD3(0, 0, 5), orthographic: true)
+            let left = 32 * 65 + 21, right = 32 * 65 + 43
+            let plain = try await gpu.render(viewport)
+            let none = [UInt8](repeating: 0, count: values.count)
+            let rightColumn = (0..<values.count).map { UInt8($0 % 2) }
+
+            // A crop's tint: part way to the colour, opacity as it was.
+            try gpu.renderer.setSelectedSplats(rightColumn, tint: SIMD4(1, 0, 1, 0.55))
+            var image = try await gpu.render(viewport)
+            XCTAssertEqual(image[left].x, plain[left].x, accuracy: 0.005)
+            XCTAssertGreaterThan(image[right].x, plain[right].x + 0.01)
+            XCTAssertEqual(image[right].w, plain[right].w, accuracy: 0.01)
+
+            // A floater's: all the way, and easy to see however faint it was.
+            try gpu.renderer.setSelectedSplats(rightColumn, tint: SIMD4(1, 0, 1, 1), minimumOpacity: 0.6)
+            image = try await gpu.render(viewport)
+            XCTAssertGreaterThan(image[right].w, plain[right].w + 0.1)
+            XCTAssertEqual(image[right].y, 0, accuracy: 0.001)
+
+            // A cut on the other column stays through all of it, with its count true.
+            try gpu.renderer.setDeletedSplats(keeping: rightColumn)
+            image = try await gpu.render(viewport)
+            XCTAssertLessThan(image[left].w, 0.01)
+            XCTAssertGreaterThan(image[right].w, plain[right].w + 0.1)
+            XCTAssertEqual(gpu.renderer.renderableSplatCountForCurrentEditState, values.count / 2)
+
+            // Clearing both gives the picture back exactly.
+            try gpu.renderer.setSelectedSplats(none, tint: SIMD4(1, 0, 1, 1))
+            try gpu.renderer.setDeletedSplats(keeping: [UInt8](repeating: 1, count: values.count))
+            try await gpu.sort()
+            image = try await gpu.render(viewport)
+            XCTAssertEqual(image[left].w, plain[left].w, accuracy: 0.001)
+            XCTAssertEqual(image[right].w, plain[right].w, accuracy: 0.001)
+            XCTAssertEqual(image[right].x, plain[right].x, accuracy: 0.001)
+            XCTAssertThrowsError(try gpu.renderer.setSelectedSplats([1], tint: .zero))
+        }
+    }
+
+    private func twoColumns(opacity: Float = 1) -> [SplatScenePoint] {
+        (0..<400).map { i in
+            var value = point(Array(repeating: SIMD3<Float>.zero, count: 4))
+            // Only the first of each column is in the picture, so a faint one stays faint.
+            value.position = SIMD3(i % 2 == 0 ? -0.7 : 0.7, i < 2 ? 0 : 50 + Float(i), Float(i) * 0.0001)
+            value.scale = .linearFloat(SIMD3(0.15, 0.15, 0.03))
+            value.opacity = .linearFloat(opacity)
+            return value
+        }
+    }
+
     func testNonzeroViewportAndLoadActionPreserveExistingBackground() async throws {
         let gpu = try GPU()
         var coefficients = Array(repeating: SIMD3<Float>.zero, count: 4)

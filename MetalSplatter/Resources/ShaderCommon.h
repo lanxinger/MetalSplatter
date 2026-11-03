@@ -52,7 +52,7 @@ typedef struct
     uint editingEnabled;
     uint colorGradeEnabled;
     float colorGradeOpacityScale;
-    uint padding4;
+    float selectionMinimumOpacity; // Selected splats draw at least this opaque
     float3x3 colorGradeMatrix;
     float3 colorGradeOffset;
 } Uniforms;
