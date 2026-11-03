@@ -306,6 +306,7 @@ static FragmentIn splatVertexInternal(Splat splat,
         out.color = half4(half3(uniforms.selectionTintColor.xyz), half(uniforms.selectionTintColor.w));
     } else if (applySelectionTint && uniforms.editingEnabled != 0u && isSelected) {
         out.color.rgb = mix(out.color.rgb, half3(uniforms.selectionTintColor.xyz), half(uniforms.selectionTintColor.w));
+        out.color.a = max(out.color.a, half(uniforms.selectionMinimumOpacity));
     }
 
     if ((uniforms.debugFlags & DebugFlagLodTint) != 0) {

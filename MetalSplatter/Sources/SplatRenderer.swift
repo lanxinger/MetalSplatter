@@ -354,7 +354,7 @@ public class SplatRenderer: @unchecked Sendable {
         var editingEnabled: UInt32
         var colorGradeEnabled: UInt32
         var colorGradeOpacityScale: Float
-        var padding4: UInt32
+        var selectionMinimumOpacity: Float
         var colorGradeMatrix: matrix_float3x3
         var colorGradeOffset: SIMD3<Float>
     }
@@ -903,6 +903,7 @@ public class SplatRenderer: @unchecked Sendable {
     internal var editTransformPaletteBuffer: MTLBuffer?
     internal var selectionTintColor = SIMD4<Float>(0.15, 0.55, 1.0, 0.45)
     internal var selectionOutlineEnabled = true
+    internal var selectionMinimumOpacity: Float = 0
     internal var editingEnabled = false
     private var nonZeroEditStateCount = 0
     private var selectedEditStateCount = 0
@@ -2250,6 +2251,37 @@ public class SplatRenderer: @unchecked Sendable {
         try updateEditStates(at: indices, values: values)
     }
 
+    /// Marks every splat whose byte in `selected` isn't 0 as selected, and every other as not, by index
+    /// in the renderer's order. Selected splats draw mixed towards `tint`'s colour by its alpha, after
+    /// any colour grade, and at least `minimumOpacity` opaque. Nothing is rebuilt or sorted again.
+    ///
+    /// For a caller that works out what to select by itself, such as a preview of a crop. Anything else
+    /// about the splats' edit state stays as it was.
+    public func setSelectedSplats(_ selected: [UInt8], tint: SIMD4<Float>, minimumOpacity: Float = 0) throws {
+        guard selected.count == splatCount else {
+            throw SplatEditorError.rendererPointCountMismatch(renderer: splatCount, editor: selected.count)
+        }
+        try ensureEditingResources(pointCount: splatCount)
+        guard let editStateBuffer else { return }
+        selectionOutlineEnabled = false
+        selectionTintColor = tint
+        selectionMinimumOpacity = minimumOpacity
+        let states = editStateBuffer.contents().bindMemory(to: EditStateStorage.self, capacity: max(splatCount, 1))
+        let selectedState = EditableSplatState.selected.rawValue
+        var indices: [Int] = []
+        var values: [UInt32] = []
+        for index in 0..<splatCount {
+            let oldValue = UInt32(states[index])
+            let newValue = selected[index] != 0 ? oldValue | selectedState : oldValue & ~selectedState
+            if newValue != oldValue {
+                indices.append(index)
+                values.append(newValue)
+            }
+        }
+        try updateEditStates(at: indices, values: values)
+        invalidateRender()
+    }
+
     internal func updateTransformIndices(at indices: [Int], values: [UInt32]) throws {
         guard indices.count == values.count else { return }
         try ensureEditingResources(pointCount: splatCount)
@@ -2337,6 +2369,11 @@ public class SplatRenderer: @unchecked Sendable {
         resetEditingTracking()
         if hadEditingResourcesAllocated {
             try ensureEditingResources(pointCount: points.count)
+            // The tracking just reset says nothing is edited, so the states have to agree, or a
+            // splat stays deleted without the renderer hiding it, and no later change is noticed.
+            if let editStateBuffer {
+                memset(editStateBuffer.contents(), 0, stateLength(for: points.count))
+            }
         }
         try initializeIdentitySortedIndices()
     }
@@ -2918,6 +2955,7 @@ public class SplatRenderer: @unchecked Sendable {
                           covarianceBlur: covarianceBlur,
                           lodThresholds: lodThresholds,
                           selectionTintColor: selectionTintColor,
+                          selectionMinimumOpacity: selectionMinimumOpacity,
                           editingEnabled: editingEnabled,
                           colorGrade: colorGrade,
                           totalSplatCount: UInt32(self.splatCount))
@@ -2931,6 +2969,7 @@ public class SplatRenderer: @unchecked Sendable {
                              covarianceBlur: Float,
                              lodThresholds: SIMD3<Float>,
                              selectionTintColor: SIMD4<Float> = SIMD4<Float>(0.15, 0.55, 1.0, 0.45),
+                             selectionMinimumOpacity: Float = 0,
                              editingEnabled: Bool = false,
                              colorGrade: ColorGrade? = nil,
                              totalSplatCount: UInt32? = nil) -> Uniforms {
@@ -2961,7 +3000,7 @@ public class SplatRenderer: @unchecked Sendable {
             editingEnabled: editingEnabled ? 1 : 0,
             colorGradeEnabled: colorGrade != nil ? 1 : 0,
             colorGradeOpacityScale: colorGrade?.opacityScale ?? 1,
-            padding4: 0,
+            selectionMinimumOpacity: selectionMinimumOpacity,
             colorGradeMatrix: colorGrade?.matrix ?? matrix_identity_float3x3,
             colorGradeOffset: colorGrade?.offset ?? .zero
         )
