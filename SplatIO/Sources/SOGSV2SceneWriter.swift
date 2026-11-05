@@ -378,20 +378,55 @@ public final class SOGSV2SceneWriter: SplatSceneWriter {
 
         private static func kMeans(sorted: [Float]) -> [Float] {
             let count = sorted.count
-            var runningSum = [Double](repeating: 0, count: count + 1)
+            var sums = [Double](repeating: 0, count: count + 1)
+            var squares = [Double](repeating: 0, count: count + 1)
             for index in 0..<count {
-                runningSum[index + 1] = runningSum[index] + Double(sorted[index])
+                let sample = Double(sorted[index])
+                sums[index + 1] = sums[index] + sample
+                squares[index + 1] = squares[index] + sample * sample
             }
-            func firstIndex(notBelow value: Float) -> Int {
-                var low = 0, high = count
+            func mean(_ run: Range<Int>) -> Double {
+                (sums[run.upperBound] - sums[run.lowerBound]) / Double(run.count)
+            }
+            func squaredError(_ run: Range<Int>) -> Double {
+                guard sorted[run.lowerBound] != sorted[run.upperBound - 1] else { return 0 }
+                let sum = sums[run.upperBound] - sums[run.lowerBound]
+                return squares[run.upperBound] - squares[run.lowerBound] - sum * sum / Double(run.count)
+            }
+            func firstIndex(notBelow value: Double, in run: Range<Int>) -> Int {
+                var low = run.lowerBound, high = run.upperBound
                 while low < high {
                     let middle = (low + high) / 2
-                    if sorted[middle] < value { low = middle + 1 } else { high = middle }
+                    if Double(sorted[middle]) < value { low = middle + 1 } else { high = middle }
                 }
                 return low
             }
 
-            var centres = (0..<entryCount).map { sorted[(2 * $0 + 1) * count / (2 * entryCount)] }
+            // Start from one run of all the samples and keep splitting the run with the largest
+            // squared error. Unlike seeds taken at quantiles, this gives a crowd of equal or nearly
+            // equal values few entries, however many splats share them, and outliers their own.
+            var runs = [0..<count]
+            var errors = [squaredError(0..<count)]
+            while runs.count < entryCount {
+                guard let worst = errors.indices.max(by: { errors[$0] < errors[$1] }), errors[worst] > 0 else { break }
+                let run = runs[worst]
+                var split = firstIndex(notBelow: mean(run), in: run)
+                for _ in 0..<8 {
+                    split = min(max(split, run.lowerBound + 1), run.upperBound - 1)
+                    let midpoint = (mean(run.lowerBound..<split) + mean(split..<run.upperBound)) / 2
+                    let next = firstIndex(notBelow: midpoint, in: run)
+                    if next == split { break }
+                    split = next
+                }
+                split = min(max(split, run.lowerBound + 1), run.upperBound - 1)
+                runs[worst] = run.lowerBound..<split
+                errors[worst] = squaredError(runs[worst])
+                runs.append(split..<run.upperBound)
+                errors.append(squaredError(split..<run.upperBound))
+            }
+
+            var centres = runs.map { Float(mean($0)) }.sorted()
+            centres += Array(repeating: centres[centres.count - 1], count: entryCount - centres.count)
             for _ in 0..<iterations {
                 // Boundaries halfway between neighbouring centres split the sorted samples into
                 // runs, and each centre moves to the mean of its run.
@@ -399,9 +434,9 @@ public final class SOGSV2SceneWriter: SplatSceneWriter {
                 for entry in 0..<entryCount {
                     let end = entry == entryCount - 1
                         ? count
-                        : firstIndex(notBelow: (centres[entry] + centres[entry + 1]) / 2)
+                        : firstIndex(notBelow: (Double(centres[entry]) + Double(centres[entry + 1])) / 2, in: 0..<count)
                     if end > start {
-                        centres[entry] = Float((runningSum[end] - runningSum[start]) / Double(end - start))
+                        centres[entry] = Float(mean(start..<end))
                         start = end
                     }
                 }

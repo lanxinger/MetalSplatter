@@ -889,6 +889,38 @@ final class SplatIOTests: XCTestCase {
         XCTAssertLessThan(smallest, -0.49)
     }
 
+    /// The largest error of `baseColors` after a round trip, in display values.
+    private func largestDisplayError(_ baseColors: [SIMD3<Float>]) throws -> Float {
+        let shC0: Float = 0.28209479177387814
+        let actual = try roundTripBaseColors(splats(count: baseColors.count) { baseColors[$0] })
+        XCTAssertEqual(actual.count, baseColors.count)
+        return zip(actual, baseColors).map { simd_reduce_max(simd_abs($0 - $1)) * shC0 }.max() ?? .infinity
+    }
+
+    func testSOGV2WriterGivesRepeatedBaseColorsOneEntry() throws {
+        // Most splats share one colour. Its copies must not use up the entries the gradient needs.
+        let gradient = (1...1_000).map { SIMD3<Float>(repeating: Float($0) / 1_000) }
+        let colors = Array(repeating: SIMD3<Float>.zero, count: 99_000) + gradient
+        XCTAssertLessThanOrEqual(try largestDisplayError(colors), 1 / 255)
+    }
+
+    func testSOGV2WriterGivesNearlyRepeatedBaseColorsFewEntries() throws {
+        // As above, except that the crowd's values all differ, so removing duplicates can't help.
+        let crowd = (0..<99_000).map { SIMD3<Float>(repeating: Float($0) * 1e-9) }
+        let gradient = (1...1_000).map { SIMD3<Float>(repeating: Float($0) / 1_000) }
+        XCTAssertLessThanOrEqual(try largestDisplayError(crowd + gradient), 1 / 255)
+    }
+
+    func testSOGV2WriterKeepsTheRestOfThePaletteBesideOutliers() throws {
+        // A few wild values must keep their own entries without coarsening every other colour.
+        let shC0: Float = 0.28209479177387814
+        let ordinary = (0..<20_000).map { index -> SIMD3<Float> in
+            SIMD3<Float>(repeating: (Float(index) / 19_999 - 0.5) / shC0)
+        }
+        let outliers = [Float(-1_000_000), -1_000, 1_000, 1_000_000].map { SIMD3<Float>(repeating: $0) }
+        XCTAssertLessThanOrEqual(try largestDisplayError(ordinary + outliers), 1 / 255)
+    }
+
     func testSOGV2WriterKeepsBaseColorsExactlyWhenRewritingItsOwnFile() throws {
         // A file baked again, as an edit of an edit is, must not lose colour each time.
         let count = 2_000
