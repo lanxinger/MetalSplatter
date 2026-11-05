@@ -330,6 +330,7 @@ void splatMeshShader(
     half2 scaledAxis2 = half2(axis2) * scaleFactor;
 
     half4 splatColor = unpackSplatColor(splat.packedColor);
+    splatColor.rgb = colorForBlending(splatColor.rgb);
     splatColor.a = min(splatColor.a * half(opacityScale), half(1.0));
     uint debugFlags = uniforms.debugFlags;
     float projW = projectedCenter.w;
@@ -525,6 +526,7 @@ void splatMeshShaderPrecomputed(
     float4 projectedCenter = pre.clipPosition;
 
     half4 splatColor = unpackSplatColor(splatArray[actualSplatIndex].packedColor);
+    splatColor.rgb = colorForBlending(splatColor.rgb);
     splatColor.a = min(splatColor.a * half(pre.opacityScale), half(1.0));
     uint debugFlags = uniforms.debugFlags;
     float projW = projectedCenter.w;

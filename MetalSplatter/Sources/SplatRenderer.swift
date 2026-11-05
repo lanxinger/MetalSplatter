@@ -426,6 +426,9 @@ public class SplatRenderer: @unchecked Sendable {
     }
 
     public let device: MTLDevice
+    /// Decides the space splats blend in. A non-sRGB format such as `.bgra8Unorm` blends display-encoded colours
+    /// directly, which matches how 3DGS trainers composite, so a trained model looks as it did in training. An sRGB
+    /// format blends in linear light, which brightens wherever splats mix.
     public let colorFormat: MTLPixelFormat
     public let depthFormat: MTLPixelFormat
     public let sampleCount: Int
@@ -916,7 +919,7 @@ public class SplatRenderer: @unchecked Sendable {
     /// can change on every frame.
     ///
     /// It looks the same as the grade written into the scene's points: `matrix * color + offset` on
-    /// the colour a scene file stores, clamped to 0...1, and opacity times `opacityScale`, clamped to 1.
+    /// the colour a scene file stores, floored at 0, and opacity times `opacityScale`, clamped to 1.
     public struct ColorGrade: Equatable, Sendable {
         public var matrix: simd_float3x3
         public var offset: SIMD3<Float>
@@ -1437,9 +1440,7 @@ public class SplatRenderer: @unchecked Sendable {
         
         do {
             // Set function constants for 2DGS mode
-            let functionConstants = MTLFunctionConstantValues()
-            var use2DGSValue = use2DGSMode
-            functionConstants.setConstantValue(&use2DGSValue, type: .bool, index: 12)
+            let functionConstants = splatFunctionConstants()
 
             // Try to load mesh shader functions with function constants
             guard let objectFunction = try? library.makeFunction(name: "splatObjectShader", constantValues: functionConstants),
@@ -1720,9 +1721,7 @@ public class SplatRenderer: @unchecked Sendable {
         pipelineDescriptor.label = editing ? "SingleStageEditingPipeline" : "SingleStagePipeline"
 
         // Set function constants for 2DGS mode
-        let functionConstants = MTLFunctionConstantValues()
-        var use2DGSValue = use2DGSMode
-        functionConstants.setConstantValue(&use2DGSValue, type: .bool, index: 12)
+        let functionConstants = splatFunctionConstants()
 
         pipelineDescriptor.vertexFunction = try library.makeFunction(
             name: editing ? "singleStageSplatVertexShaderEditing" : "singleStageSplatVertexShader",
@@ -1771,9 +1770,7 @@ public class SplatRenderer: @unchecked Sendable {
         let pipelineDescriptor = MTLRenderPipelineDescriptor()
         pipelineDescriptor.label = "SelectionOutlinePipeline"
 
-        let functionConstants = MTLFunctionConstantValues()
-        var use2DGSValue = use2DGSMode
-        functionConstants.setConstantValue(&use2DGSValue, type: .bool, index: 12)
+        let functionConstants = splatFunctionConstants()
 
         pipelineDescriptor.vertexFunction = try library.makeFunction(name: "selectedOutlineVertexShader", constantValues: functionConstants)
         pipelineDescriptor.fragmentFunction = try library.makeRequiredFunction(name: "selectedOutlineFragmentShader")
@@ -1825,9 +1822,7 @@ public class SplatRenderer: @unchecked Sendable {
         pipelineDescriptor.label = editing ? "DitheredTransparencyEditingPipeline" : "DitheredTransparencyPipeline"
 
         // Set function constants for 2DGS mode
-        let functionConstants = MTLFunctionConstantValues()
-        var use2DGSValue = use2DGSMode
-        functionConstants.setConstantValue(&use2DGSValue, type: .bool, index: 12)
+        let functionConstants = splatFunctionConstants()
 
         pipelineDescriptor.vertexFunction = try library.makeFunction(
             name: editing ? "singleStageSplatVertexShaderEditing" : "singleStageSplatVertexShader",
@@ -1885,9 +1880,7 @@ public class SplatRenderer: @unchecked Sendable {
         pipelineDescriptor.label = editing ? "DrawSplatEditingPipeline" : "DrawSplatPipeline"
 
         // Set function constants for 2DGS mode
-        let functionConstants = MTLFunctionConstantValues()
-        var use2DGSValue = use2DGSMode
-        functionConstants.setConstantValue(&use2DGSValue, type: .bool, index: 12)
+        let functionConstants = splatFunctionConstants()
 
         pipelineDescriptor.vertexFunction = try library.makeFunction(
             name: editing ? "multiStageSplatVertexShaderEditing" : "multiStageSplatVertexShader",
@@ -2254,6 +2247,7 @@ public class SplatRenderer: @unchecked Sendable {
     /// Marks every splat whose byte in `selected` isn't 0 as selected, and every other as not, by index
     /// in the renderer's order. Selected splats draw mixed towards `tint`'s colour by its alpha, after
     /// any colour grade, and at least `minimumOpacity` opaque. Nothing is rebuilt or sorted again.
+    /// Give `tint` in the values the target blends: display values, or linear on an sRGB target.
     ///
     /// For a caller that works out what to select by itself, such as a preview of a crop. Anything else
     /// about the splats' edit state stays as it was.
@@ -2517,7 +2511,7 @@ public class SplatRenderer: @unchecked Sendable {
     /// Thread-safe: Updates are staged and applied at the start of the next render
     /// to avoid CPU/GPU data races on shared buffers. Call order is preserved.
     ///
-    /// - Parameter colors: Array of new colors (RGBA), must match current splat count
+    /// - Parameter colors: Array of new colors (RGBA, display-encoded), must match current splat count
     public func updateColorsOnly(_ colors: [SIMD4<Float>]) {
         let count = splatCount
         guard colors.count == count else {
@@ -2959,6 +2953,16 @@ public class SplatRenderer: @unchecked Sendable {
                           editingEnabled: editingEnabled,
                           colorGrade: colorGrade,
                           totalSplatCount: UInt32(self.splatCount))
+    }
+
+    /// The function constants every splat vertex function takes (ShaderCommon.h).
+    internal func splatFunctionConstants() -> MTLFunctionConstantValues {
+        let values = MTLFunctionConstantValues()
+        var use2DGSValue = use2DGSMode
+        values.setConstantValue(&use2DGSValue, type: .bool, index: 12)
+        var linearColorBlending = colorFormat.isSRGB
+        values.setConstantValue(&linearColorBlending, type: .bool, index: 13)
+        return values
     }
 
     static func makeUniforms(for viewport: ViewportDescriptor,
@@ -4532,7 +4536,7 @@ public class SplatRenderer: @unchecked Sendable {
 extension SplatRenderer.Splat {
     init(_ splat: SplatScenePoint) {
         self.init(position: splat.position,
-                  color: .init(splat.color.asLinearFloat.sRGBToLinear, splat.opacity.asLinearFloat),
+                  color: .init(splat.color.asLinearFloat, splat.opacity.asLinearFloat),
                   scale: splat.scale.asLinearFloat,
                   rotation: splat.rotation.normalized)
     }
@@ -4592,9 +4596,14 @@ private extension SIMD3 where Scalar: BinaryFloatingPoint, Scalar.RawSignificand
     }
 }
 
-private extension SIMD3<Float> {
-    var sRGBToLinear: SIMD3<Float> {
-        SIMD3(x: pow(x, 2.2), y: pow(y, 2.2), z: pow(z, 2.2))
+private extension MTLPixelFormat {
+    var isSRGB: Bool {
+        switch self {
+        case .r8Unorm_srgb, .rg8Unorm_srgb, .rgba8Unorm_srgb, .bgra8Unorm_srgb, .bgr10_xr_srgb, .bgra10_xr_srgb:
+            return true
+        default:
+            return false
+        }
     }
 }
 

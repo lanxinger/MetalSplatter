@@ -27,6 +27,16 @@ FragmentIn splatVertex(Splat splat,
                        const device ushort *transformIndices,
                        const device float4x4 *transformPalette);
 
+// With `color` (display-encoded, and not limited to 1) in place of the splat's packed colour.
+FragmentIn splatVertex(Splat splat,
+                       half4 color,
+                       Uniforms uniforms,
+                       uint relativeVertexIndex,
+                       uint splatID,
+                       uint editState,
+                       const device ushort *transformIndices,
+                       const device float4x4 *transformPalette);
+
 FragmentIn selectedOutlineVertex(Splat splat,
                                  Uniforms uniforms,
                                  uint relativeVertexIndex,

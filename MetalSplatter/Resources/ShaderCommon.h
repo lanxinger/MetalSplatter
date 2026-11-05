@@ -113,6 +113,18 @@ typedef struct
 // Using index 12 to avoid conflict with SH (0-3)
 constant bool use2DGS [[function_constant(12)]];
 
+// The space splats blend in, set per pipeline from the renderer's colour target. Stored colours are
+// display-encoded. 3DGS trainers composite those values directly, and a trained model is only right
+// under that: on a non-sRGB target they blend as they are. On an sRGB target they go to linear with
+// the gamma 2.2 this renderer has always used, and the hardware encodes them again on store. Only
+// there is colour limited to 1: a trained value of 2 would turn into 4.6 times the light.
+// After Splatelier's Vendor/MetalSplatter patches 1-4 (Apache-2.0).
+constant bool kLinearColorBlending [[function_constant(13)]];
+
+inline half3 colorForBlending(half3 encoded) {
+    return kLinearColorBlending ? half3(pow(saturate(float3(encoded)), float3(2.2f))) : encoded;
+}
+
 typedef struct
 {
     float4 position [[position]];

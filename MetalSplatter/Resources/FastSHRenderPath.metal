@@ -32,7 +32,7 @@ struct FastSHParams {
 typedef struct {
     packed_float3 position;
     uint packedBaseColor;        // Base color (DC term) + opacity, RGBA8 unorm
-    float4 tintColor;            // Animation tint/alpha multiplier in linear space
+    float4 tintColor;            // Animation tint/alpha multiplier, display-encoded
     float4 rotation;             // Quaternion (x,y,z,w)
     packed_half3 covA;
     packed_half3 covB;
@@ -56,51 +56,35 @@ inline float3 sphericalHarmonicsDirection(float3 position,
     return normalize(transpose(rotation) * viewDirection);
 }
 
-Splat evaluateSplatWithSH(SplatSH splatSH,
-                         Uniforms uniforms,
-                         float4x4 appearanceViewMatrix,
-                         device const half3* shPalette,
-                         constant FastSHParams& params) {
-    Splat splat;
-    splat.position = splatSH.position;
-    splat.covA = splatSH.covA;
-    splat.covB = splatSH.covB;
-
-    // Explicitly disabled SH uses the original base color, not a cached SH result.
-    if (params.skipSHEvaluation != 0) {
-        half4 baseColor = unpackSplatColor(splatSH.packedBaseColor);
-        half4 tintColor = half4(splatSH.tintColor);
-        splat.packedColor = pack_half_to_unorm4x8(half4(baseColor.rgb * tintColor.rgb, baseColor.a * tintColor.a));
-        return splat;
-    }
+// The colour a splat draws with, display-encoded. SH colour isn't packed into RGBA8 or limited to 1:
+// the trainer floors it at 0 and nothing more, so a faint splat may carry a value above 1, and clamping
+// those dims a trained model's bright areas.
+half4 fastSHSplatColor(SplatSH splatSH,
+                       Uniforms uniforms,
+                       float4x4 appearanceViewMatrix,
+                       device const half3* shPalette,
+                       constant FastSHParams& params) {
+    half4 baseColor = unpackSplatColor(splatSH.packedBaseColor);
+    half4 tintColor = half4(splatSH.tintColor);
 
     const uint invalidIndex = 0xffffffffu;
-    bool hasSH = (splatSH.shDegree > 0) &&
+    // Explicitly disabled SH uses the original base color, not a cached SH result.
+    bool hasSH = (params.skipSHEvaluation == 0) &&
+                 (splatSH.shDegree > 0) &&
                  (params.coeffsPerEntry > 0) &&
                  (splatSH.shPaletteIndex != invalidIndex) &&
                  (splatSH.shPaletteIndex < params.paletteSize);
-
-    if (hasSH) {
-        device const half3* bands = shPalette + params.coeffsPerEntry * splatSH.shPaletteIndex;
-
-        float3 direction = sphericalHarmonicsDirection(float3(splatSH.position),
-                                                        appearanceViewMatrix,
-                                                        uniforms.isOrthographic != 0);
-        half4 shColor = evaluateSHHalf(direction, half3(splatSH.shDC), bands, params.degree);
-        // Match SplatRenderer.Splat's existing image-RGB to linear conversion.
-        // Keep its gamma, clamp and RGBA8 policy unchanged in this compatibility fix.
-        half3 linearColor = half3(pow(float3(shColor.rgb), float3(2.2f)));
-        // Preserve original alpha from base color, combine with SH-evaluated RGB
-        half baseAlpha = unpackSplatColor(splatSH.packedBaseColor).a;
-        half4 tintColor = half4(splatSH.tintColor);
-        splat.packedColor = pack_half_to_unorm4x8(half4(linearColor * tintColor.rgb, baseAlpha * tintColor.a));
-    } else {
-        half4 baseColor = unpackSplatColor(splatSH.packedBaseColor);
-        half4 tintColor = half4(splatSH.tintColor);
-        splat.packedColor = pack_half_to_unorm4x8(half4(baseColor.rgb * tintColor.rgb, baseColor.a * tintColor.a));
+    if (!hasSH) {
+        return baseColor * tintColor;
     }
 
-    return splat;
+    device const half3* bands = shPalette + params.coeffsPerEntry * splatSH.shPaletteIndex;
+    float3 direction = sphericalHarmonicsDirection(float3(splatSH.position),
+                                                    appearanceViewMatrix,
+                                                    uniforms.isOrthographic != 0);
+    half4 shColor = evaluateSHHalf(direction, half3(splatSH.shDC), bands, params.degree);
+    // Preserve original alpha from base color, combine with SH-evaluated RGB
+    return half4(shColor.rgb * tintColor.rgb, baseColor.a * tintColor.a);
 }
 
 // Fast SH vertex shader evaluating view-dependent colors per splat
@@ -151,10 +135,16 @@ inline FragmentIn fastSHSplatVertex(uint vertexID,
             appearanceViewMatrix = appearanceViewMatrix * transformPalette[transformIndex];
         }
     }
-    Splat splat = evaluateSplatWithSH(splatSH, uniforms, appearanceViewMatrix, shPalette, params);
+    Splat splat;
+    splat.position = splatSH.position;
+    splat.packedColor = 0;
+    splat.covA = splatSH.covA;
+    splat.covB = splatSH.covB;
+    half4 color = fastSHSplatColor(splatSH, uniforms, appearanceViewMatrix, shPalette, params);
     uint editState = editStates != nullptr ? editStates[actualSplatID] : 0u;
 
     return splatVertex(splat,
+                       color,
                        uniforms,
                        vertexID % 4,
                        actualSplatID,
