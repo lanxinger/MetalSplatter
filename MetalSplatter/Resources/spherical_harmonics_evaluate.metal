@@ -155,7 +155,8 @@ half4 evaluateSHHalf(float3 dir, half3 sh_dc, device const half3* sh_bands, uint
         result += SH_C3_H[6] * d.x * (xx - 3.0h * yy) * sh_bands[14];
     }
 
-    result = clamp(result, 0.0h, 1.0h);
+    // Floored only, as the trainer does. See fastSHSplatColor.
+    result = max(result, 0.0h);
     return half4(result, 1.0h);
 }
 

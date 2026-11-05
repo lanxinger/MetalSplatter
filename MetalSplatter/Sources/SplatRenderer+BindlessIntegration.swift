@@ -58,9 +58,7 @@ extension SplatRenderer {
     @available(iOS 18.0, macOS 15.0, visionOS 2.0, *)
     private func createBindlessPipelineState() throws -> MTLRenderPipelineState {
         // Set function constants (required for shaders including ShaderCommon.h with use2DGS)
-        let functionConstants = MTLFunctionConstantValues()
-        var use2DGSValue = use2DGSMode
-        functionConstants.setConstantValue(&use2DGSValue, type: .bool, index: 12)
+        let functionConstants = splatFunctionConstants()
 
         guard let vertexFunction = try? library.makeFunction(name: "metal4_splatVertex", constantValues: functionConstants),
               let fragmentFunction = try? library.makeFunction(name: "metal4_splatFragment", constantValues: functionConstants) else {
@@ -101,9 +99,7 @@ extension SplatRenderer {
         //   constant UniformsArray &uniformsArray [[id(1)]];
 
         // Use function constants for consistency with pipeline creation
-        let functionConstants = MTLFunctionConstantValues()
-        var use2DGSValue = use2DGSMode
-        functionConstants.setConstantValue(&use2DGSValue, type: .bool, index: 12)
+        let functionConstants = splatFunctionConstants()
 
         guard let vertexFunction = try? library.makeFunction(name: "metal4_splatVertex", constantValues: functionConstants) else {
             throw SplatRendererError.failedToLoadShaderFunction(name: "metal4_splatVertex")
@@ -128,9 +124,7 @@ extension SplatRenderer {
         }
 
         // Use function constants for consistency with pipeline creation
-        let functionConstants = MTLFunctionConstantValues()
-        var use2DGSValue = use2DGSMode
-        functionConstants.setConstantValue(&use2DGSValue, type: .bool, index: 12)
+        let functionConstants = splatFunctionConstants()
 
         guard let vertexFunction = try? library.makeFunction(name: "metal4_splatVertex", constantValues: functionConstants) else {
             return

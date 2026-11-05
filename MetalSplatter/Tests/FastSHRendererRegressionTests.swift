@@ -193,7 +193,7 @@ final class FastSHRendererRegressionTests: XCTestCase {
         }
     }
 
-    func testNonGrayDCMatchesExistingGamma22ColorContract() async throws {
+    func testNonGrayDCKeepsItsColor() async throws {
         let gpu = try GPU()
         let color = SIMD3<Float>(0.18, 0.65, 0.8)
         let dc = (color - SIMD3(repeating: 0.5)) / 0.2820947918
@@ -202,7 +202,7 @@ final class FastSHRendererRegressionTests: XCTestCase {
             coefficients[0] = dc
             try await gpu.load([point(coefficients)])
             assertColor(try await gpu.render(camera(eye: outgoing * 5)), x: 32, y: 32,
-                        expected: color, context: "non-gray DC with \(count) coefficients", accuracy: 0.0006)
+                        expected: color, context: "non-gray DC with \(count) coefficients", accuracy: 0.0025)
         }
     }
 
@@ -352,17 +352,98 @@ final class FastSHRendererRegressionTests: XCTestCase {
         }
     }
 
-    func testColorGradeScalesOpacityAndClampsColor() async throws {
+    func testColorGradeScalesOpacityAndFloorsColor() async throws {
         let gpu = try GPU()
         var value = point([SIMD3(0.5, 0.5, 0.5)])
         value.opacity = .linearFloat(0.8)
         try await gpu.load([value])
         let viewport = camera(eye: SIMD3(0, 0, 5), orthographic: true)
         let plain = try await gpu.render(viewport)[32 * 65 + 32].w
-        gpu.renderer.colorGrade = SplatRenderer.ColorGrade(offset: SIMD3(repeating: 5), opacityScale: 0.5)
+        gpu.renderer.colorGrade = SplatRenderer.ColorGrade(offset: SIMD3(repeating: -5), opacityScale: 0.5)
         let graded = try await gpu.render(viewport)
         XCTAssertEqual(graded[32 * 65 + 32].w, plain * 0.5, accuracy: 0.01)
-        assertColor(graded, x: 32, y: 32, expected: SIMD3(repeating: 1), context: "clamped", accuracy: 0.01)
+        assertColor(graded, x: 32, y: 32, expected: .zero, context: "floored", accuracy: 0.01)
+    }
+
+    // Splats blend in the space the target implies, on every draw path. A faint splat over nothing shows it:
+    // colour times alpha, in display values or in light.
+    func testBlendSpaceFollowsTheColorTarget() async throws {
+        let color: Float = 0.8, opacity: Float = 0.5
+        let linear = pow(color, 2.2) * opacity
+        let targets: [(MTLPixelFormat, Float)] = [
+            (.bgra8Unorm, color * opacity),
+            (.bgra8Unorm_srgb, 1.055 * pow(linear, 1 / 2.4) - 0.055),
+        ]
+        for (format, expected) in targets {
+            for path in DrawPath.allCases {
+                let gpu = try GPU(colorFormat: format)
+                path.configure(gpu.renderer)
+                var value = point(path.coefficients(color: SIMD3(repeating: color)))
+                value.opacity = .linearFloat(opacity)
+                try await gpu.load([value])
+                let pixel = try await gpu.render(camera(eye: SIMD3(0, 0, 5), orthographic: true))[32 * 65 + 32]
+                XCTAssertEqual(pixel.x, expected, accuracy: 2 / 255, "\(path) on \(format.rawValue)")
+                XCTAssertEqual(pixel.w, opacity, accuracy: 2 / 255, "\(path) on \(format.rawValue)")
+            }
+        }
+    }
+
+    // Colours aren't stored through a 2.2 power any more, which rounded display levels below 15 to 0 and left
+    // gaps above them (15...24 all read 13).
+    func testDarkSolidColorsKeepTheirLevels() async throws {
+        for path in DrawPath.allCases {
+            for level in [5, 10, 14, 15, 20, 24, 25, 40] {
+                let color = Float(level) / 255
+                let unorm = try GPU(colorFormat: .bgra8Unorm)
+                path.configure(unorm.renderer)
+                try await unorm.load([point(path.coefficients(color: SIMD3(repeating: color)))])
+                let viewport = camera(eye: SIMD3(0, 0, 5), orthographic: true)
+                let plain = try await unorm.render(viewport)[32 * 65 + 32].x
+                XCTAssertEqual(plain * 255, Float(level), accuracy: 1, "\(path), level \(level)")
+                guard level >= 10 else { continue }
+                // Still a curve on an sRGB target, between gamma 2.2 and the sRGB encoding, but no longer 0.
+                let srgb = try GPU(colorFormat: .bgra8Unorm_srgb)
+                path.configure(srgb.renderer)
+                try await srgb.load([point(path.coefficients(color: SIMD3(repeating: color)))])
+                let encoded = try await srgb.render(viewport)[32 * 65 + 32].x
+                XCTAssertGreaterThan(encoded, 0, "\(path) on sRGB, level \(level)")
+            }
+        }
+    }
+
+    // The trainer floors a splat's colour at 0 and no higher: a faint splat may carry a value above 1.
+    func testFastSHColorStaysAboveOneAndIsFlooredAtZero() async throws {
+        let viewport = camera(eye: SIMD3(0, 0, 5), orthographic: true)
+        var bright = point(DrawPath.fastSH.coefficients(color: SIMD3(2, 1.5, -0.5)))
+        bright.opacity = .linearFloat(0.25)
+
+        for format in [MTLPixelFormat.rgba16Float, .bgra8Unorm] {
+            let gpu = try GPU(colorFormat: format)
+            try await gpu.load([bright])
+            let pixel = try await gpu.render(viewport)[32 * 65 + 32]
+            XCTAssertEqual(pixel.x, 0.5, accuracy: 2 / 255, "format \(format.rawValue)")
+            XCTAssertEqual(pixel.y, 0.375, accuracy: 2 / 255, "format \(format.rawValue)")
+            XCTAssertEqual(pixel.z, 0, accuracy: 1 / 255, "format \(format.rawValue)")
+            // The smallest grade mustn't clamp what the plain picture keeps.
+            gpu.renderer.colorGrade = SplatRenderer.ColorGrade()
+            let graded = try await gpu.render(viewport)[32 * 65 + 32]
+            XCTAssertEqual(graded.x, pixel.x, accuracy: 2 / 255, "graded, format \(format.rawValue)")
+        }
+
+        // An sRGB target blends light, and a value above 1 would overshoot there, so it stops at 1.
+        let srgb = try GPU(colorFormat: .bgra8Unorm_srgb)
+        try await srgb.load([bright])
+        let limited = try await srgb.render(viewport)[32 * 65 + 32]
+        XCTAssertEqual(limited.x, 1.055 * pow(0.25, 1 / 2.4) - 0.055, accuracy: 2 / 255)
+
+        // The DC-only paths store RGBA8, so they stay within 0...1.
+        let dcOnly = try GPU()
+        DrawPath.vertex.configure(dcOnly.renderer)
+        var clamped = point(DrawPath.vertex.coefficients(color: SIMD3(2, 1.5, -0.5)))
+        clamped.opacity = .linearFloat(0.25)
+        try await dcOnly.load([clamped])
+        let pixel = try await dcOnly.render(viewport)[32 * 65 + 32]
+        XCTAssertEqual(pixel.x, 0.25, accuracy: 2 / 255)
     }
 
     func testDeletingSplatsByIndexHidesAndRestoresThem() async throws {
@@ -487,19 +568,19 @@ final class FastSHRendererRegressionTests: XCTestCase {
         assertColor(image, x: 27, y: 29, expected: evaluate(coefficients, direction: -outgoing), context: "offset viewport center")
     }
 
-    func testColorOnlyUpdateReplacesSHWithoutApplyingGammaTwice() async throws {
+    func testColorOnlyUpdateReplacesSHWithItsOwnColor() async throws {
         let gpu = try GPU()
         var coefficients = Array(repeating: SIMD3<Float>.zero, count: 16)
         coefficients[6] = SIMD3(0.6, -0.4, 0.2)
         try await gpu.load([point(coefficients)])
         let viewport = camera(eye: outgoing * 5)
         _ = try await gpu.render(viewport)
-        let linear = SIMD3<Float>(0.15, 0.35, 0.65)
-        gpu.renderer.updateColorsOnly([SIMD4(linear, 1)])
+        let color = SIMD3<Float>(0.15, 0.35, 0.65)
+        gpu.renderer.updateColorsOnly([SIMD4(color, 1)])
         for _ in 0..<2 {
             let actual = unpremultiplied(try await gpu.render(viewport), x: 32, y: 32)
             for channel in 0..<3 {
-                XCTAssertEqual(actual[channel], (linear[channel] * 255).rounded() / 255, accuracy: 0.0006)
+                XCTAssertEqual(actual[channel], (color[channel] * 255).rounded() / 255, accuracy: 0.0006)
             }
         }
     }
@@ -744,12 +825,10 @@ final class FastSHRendererRegressionTests: XCTestCase {
         XCTAssertGreaterThan(image[y * 65 + x].w, 0.1, context, file: file, line: line)
         let actual = unpremultiplied(image, x: x, y: y)
         for channel in 0..<3 {
-            let c = min(1, max(0, expected[channel]))
-            // Preserve the renderer's existing gamma-2.2 contract. This is
-            // deliberately not the IEC piecewise sRGB EOTF.
-            let linear = pow(c, 2.2)
-            let packed = (linear * 255).rounded() / 255
-            XCTAssertEqual(actual[channel], packed, accuracy: accuracy, "\(context), RGB \(channel)", file: file, line: line)
+            // On this float target colours blend display-encoded, as they're stored. SH colour is floored at 0 and
+            // has no upper limit.
+            XCTAssertEqual(actual[channel], max(0, expected[channel]), accuracy: accuracy,
+                           "\(context), RGB \(channel)", file: file, line: line)
         }
     }
 
@@ -772,22 +851,40 @@ final class FastSHRendererRegressionTests: XCTestCase {
 }
 
 @MainActor
+/// The ways a splat reaches the screen.
+private enum DrawPath: CaseIterable {
+    case fastSH, vertex, mesh
+
+    func configure(_ renderer: FastSHSplatRenderer) {
+        renderer.fastSHConfig.enabled = self == .fastSH
+        renderer.meshShaderEnabled = self == .mesh
+    }
+
+    /// SH coefficients giving `color` head on: with empty higher bands for fast SH, DC alone otherwise.
+    func coefficients(color: SIMD3<Float>) -> [SIMD3<Float>] {
+        let dc = (color - SIMD3(repeating: 0.5)) / 0.2820947918
+        return self == .fastSH ? [dc] + Array(repeating: .zero, count: 3) : [dc]
+    }
+}
+
 private final class GPU {
     let renderer: FastSHSplatRenderer
+    private let colorFormat: MTLPixelFormat
     private let device: MTLDevice
     private let queue: MTLCommandQueue
     private let completedSorts = SortCounter()
     private var reusableTexture: MTLTexture?
 
-    init(injectColorAfterDrain: Bool = false) throws {
+    init(injectColorAfterDrain: Bool = false, colorFormat: MTLPixelFormat = .rgba16Float) throws {
         guard let device = MTLCreateSystemDefaultDevice() else { throw XCTSkip("Metal device unavailable") }
         self.device = device
+        self.colorFormat = colorFormat
         queue = try XCTUnwrap(device.makeCommandQueue())
         if injectColorAfterDrain {
             renderer = try InterleavedColorRenderer(device: device, colorFormat: .rgba16Float, depthFormat: .invalid,
                                                     sampleCount: 1, maxViewCount: 1, maxSimultaneousRenders: 1)
         } else {
-            renderer = try FastSHSplatRenderer(device: device, colorFormat: .rgba16Float, depthFormat: .invalid,
+            renderer = try FastSHSplatRenderer(device: device, colorFormat: colorFormat, depthFormat: .invalid,
                                               sampleCount: 1, maxViewCount: 1, maxSimultaneousRenders: 1)
         }
         renderer.frustumCullingEnabled = false
@@ -812,7 +909,7 @@ private final class GPU {
     }
 
     func encodeRender(_ viewport: SplatRenderer.ViewportDescriptor) throws -> MTLCommandBuffer {
-        let descriptor = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rgba16Float, width: 65, height: 65, mipmapped: false)
+        let descriptor = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: colorFormat, width: 65, height: 65, mipmapped: false)
         descriptor.usage = [.renderTarget, .shaderRead]
         descriptor.storageMode = .shared
         let texture = try XCTUnwrap(device.makeTexture(descriptor: descriptor))
@@ -834,7 +931,7 @@ private final class GPU {
     func render(_ viewport: SplatRenderer.ViewportDescriptor, loadAction: MTLLoadAction = .clear,
                 initialClear: MTLClearColor = MTLClearColorMake(0, 0, 0, 0),
                 preclear: Bool = true, reuseTexture: Bool = false, frameCount: Int = 3) async throws -> [SIMD4<Float>] {
-        let descriptor = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rgba16Float, width: 65, height: 65, mipmapped: false)
+        let descriptor = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: colorFormat, width: 65, height: 65, mipmapped: false)
         descriptor.usage = [.renderTarget, .shaderRead]; descriptor.storageMode = .shared
         let texture = try XCTUnwrap(reuseTexture ? (reusableTexture ?? device.makeTexture(descriptor: descriptor)) : device.makeTexture(descriptor: descriptor))
         if reuseTexture { reusableTexture = texture }
@@ -857,6 +954,15 @@ private final class GPU {
             }
             XCTAssertEqual(command.status, .completed, "\(String(describing: command.error))")
             if command.status != .completed { throw RegressionError.commandFailed }
+        }
+        if colorFormat != .rgba16Float {
+            // The stored values: display-encoded on both 8-bit formats, BGRA.
+            var bytes = [UInt8](repeating: 0, count: 65 * 65 * 4)
+            bytes.withUnsafeMutableBytes { texture.getBytes($0.baseAddress!, bytesPerRow: 65 * 4,
+                from: MTLRegionMake2D(0, 0, 65, 65), mipmapLevel: 0) }
+            return stride(from: 0, to: bytes.count, by: 4).map {
+                SIMD4(Float(bytes[$0 + 2]), Float(bytes[$0 + 1]), Float(bytes[$0]), Float(bytes[$0 + 3])) / 255
+            }
         }
         var values = [Float16](repeating: 0, count: 65 * 65 * 4)
         values.withUnsafeMutableBytes { texture.getBytes($0.baseAddress!, bytesPerRow: 65 * 8,

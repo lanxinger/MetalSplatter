@@ -169,6 +169,7 @@ vertex FragmentIn metal4_simd_group_splatVertex(
     out.position = screenPos;
     out.relativePosition = half2(0);  // Not using for this path
     out.color = unpackSplatColor(splat.packedColor);
+    out.color.rgb = colorForBlending(out.color.rgb);
     out.lodBand = 0;
     out.debugFlags = 0;
 

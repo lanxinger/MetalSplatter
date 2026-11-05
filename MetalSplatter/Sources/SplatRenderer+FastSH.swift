@@ -32,7 +32,7 @@ extension SplatRenderer {
     struct SplatSH {
         var position: MTLPackedFloat3
         var baseColor: UInt32              // Base color (DC term) + opacity, RGBA8 unorm
-        var tintColor: SIMD4<Float>        // Animation tint/alpha multiplier in linear space
+        var tintColor: SIMD4<Float>        // Animation tint/alpha multiplier, display-encoded
         var rotation: simd_float4          // Quaternion (x,y,z,w)
         var covA: PackedHalf3
         var covB: PackedHalf3
@@ -326,9 +326,7 @@ public class FastSHSplatRenderer: SplatRenderer, @unchecked Sendable {
     private func setupFastSHPipeline(library: MTLLibrary) {
         do {
             // Set function constants (required for shaders including ShaderCommon.h)
-            let functionConstants = MTLFunctionConstantValues()
-            var use2DGSValue = use2DGSMode
-            functionConstants.setConstantValue(&use2DGSValue, type: .bool, index: 12)
+            let functionConstants = splatFunctionConstants()
 
             // Buffer-based fast SH pipeline
             let vertexFunction = try library.makeFunction(name: "fastSHSplatVertexShader", constantValues: functionConstants)
@@ -735,7 +733,9 @@ extension FastSHSplatRenderer {
                                   shIndex: loaded?.shPaletteIndex ?? SHBandPalette.noEntry,
                                   shDegree: loaded?.shDegree ?? 0,
                                   shDC: loaded?.shDC ?? PackedHalf3(x: 0, y: 0, z: 0))
-            splatSH.tintColor = SIMD4<Float>(sample.tint.x, sample.tint.y, sample.tint.z, 1)
+            // A tint scales light, and this one multiplies the display-encoded colour.
+            let tint = SIMD3<Float>(pow(sample.tint.x, 1 / 2.2), pow(sample.tint.y, 1 / 2.2), pow(sample.tint.z, 1 / 2.2))
+            splatSH.tintColor = SIMD4<Float>(tint.x, tint.y, tint.z, 1)
             animatedSplatSHBuffer.append(splatSH)
         }
 
