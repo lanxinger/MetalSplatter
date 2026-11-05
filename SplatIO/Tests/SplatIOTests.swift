@@ -821,6 +821,84 @@ final class SplatIOTests: XCTestCase {
         XCTAssertEqual(memoryOutput.data.count, points.count * 32)
     }
 
+    /// Splats whose base colours are `baseColor(index)`, with a higher-band SH so that they read as SH.
+    private func splats(count: Int, baseColor: (Int) -> SIMD3<Float>) -> [SplatScenePoint] {
+        (0..<count).map { index in
+            SplatScenePoint(
+                position: SIMD3<Float>(Float(index) * 0.01, 0, 1),
+                color: .sphericalHarmonic([
+                    baseColor(index),
+                    SIMD3<Float>(0.1, 0.2, 0.3),
+                    SIMD3<Float>(0.01, 0.02, 0.03),
+                    SIMD3<Float>(0.04, 0.05, 0.06)
+                ]),
+                opacity: .linearFloat(0.5),
+                scale: .exponent(SIMD3<Float>(-3, -3, -3)),
+                rotation: simd_quatf(angle: 0, axis: SIMD3<Float>(0, 0, 1))
+            )
+        }
+    }
+
+    private func roundTripBaseColors(_ points: [SplatScenePoint]) throws -> [SIMD3<Float>] {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+            .appendingPathExtension("sog")
+        defer { try? FileManager.default.removeItem(at: url) }
+        try SOGSV2SceneWriter().writeScene(points, to: url)
+        return try SplatSOGSSceneReaderV2(url).readScene().map { $0.color.asSphericalHarmonic[0] }
+    }
+
+    func testSOGV2WriterKeepsBaseColorsOutsideZeroToOne() throws {
+        // Display values of -0.4 to 1.6, which trained models need. A table fixed to 0...1 clamps them.
+        let shC0: Float = 0.28209479177387814
+        let expected = (0..<20).map { index -> SIMD3<Float> in
+            let display = -0.4 + Float(index) * 0.105
+            return SIMD3<Float>(repeating: (display - 0.5) / shC0)
+        }
+        let actual = try roundTripBaseColors(splats(count: expected.count) { expected[$0] })
+        XCTAssertEqual(actual.count, expected.count)
+        for (actual, expected) in zip(actual, expected) {
+            XCTAssertTrue((actual - expected).isWithin(tolerance: 1e-5), "actual=\(actual) expected=\(expected)")
+        }
+    }
+
+    func testSOGV2WriterFitsManyBaseColorsToTheirOwnRange() throws {
+        // More distinct values than the table holds, spread over display values of -0.5 to 1.5.
+        let shC0: Float = 0.28209479177387814
+        let count = 2_000
+        let expected = (0..<count).map { index -> SIMD3<Float> in
+            func channel(_ multiplier: Int) -> Float {
+                let display = -0.5 + 2 * Float((index * multiplier) % count) / Float(count - 1)
+                return (display - 0.5) / shC0
+            }
+            return SIMD3<Float>(channel(1), channel(7), channel(13))
+        }
+        let actual = try roundTripBaseColors(splats(count: count) { expected[$0] })
+        XCTAssertEqual(actual.count, count)
+
+        // 256 entries over a range of 2 are 2/255 apart, so no value is much more than 1/255 off.
+        let displayTolerance: Float = 2 / 255
+        var largest: Float = -.infinity, smallest: Float = .infinity
+        for (actual, expected) in zip(actual, expected) {
+            let error = simd_reduce_max(simd_abs(actual - expected)) * shC0
+            XCTAssertLessThanOrEqual(error, displayTolerance, "actual=\(actual) expected=\(expected)")
+            largest = max(largest, simd_reduce_max(actual) * shC0 + 0.5)
+            smallest = min(smallest, simd_reduce_min(actual) * shC0 + 0.5)
+        }
+        XCTAssertGreaterThan(largest, 1.49)
+        XCTAssertLessThan(smallest, -0.49)
+    }
+
+    func testSOGV2WriterKeepsBaseColorsExactlyWhenRewritingItsOwnFile() throws {
+        // A file baked again, as an edit of an edit is, must not lose colour each time.
+        let count = 2_000
+        let first = try roundTripBaseColors(splats(count: count) { index in
+            SIMD3<Float>(Float(index), Float(index * 3), Float(index * 5)) / Float(count) - 0.5
+        })
+        let second = try roundTripBaseColors(splats(count: count) { first[$0] })
+        XCTAssertEqual(first, second)
+    }
+
     func testSOGV2WriterRoundTripsSphericalHarmonicsWithPaletteReuse() throws {
         let sh0Tolerance: Float = (2.0 / (255.0 * 0.28209479177387814)) + 1e-6
         let shNTolerance: Float = (1.0 / 128.0) + 1e-6

@@ -120,7 +120,8 @@ public final class SOGSV2SceneWriter: SplatSceneWriter {
         let meansTextures = buildMeansTextures(from: quantizedPoints, dimensions: baseDimensions)
         let scalesTexture = buildScalesTexture(from: points, dimensions: baseDimensions)
         let quatsTexture = buildQuatsTexture(from: points, dimensions: baseDimensions)
-        let sh0Texture = buildSH0Texture(from: points, quantizedPoints: quantizedPoints, dimensions: baseDimensions)
+        let sh0Codebook = SH0Codebook(fitting: quantizedPoints)
+        let sh0Texture = buildSH0Texture(from: points, quantizedPoints: quantizedPoints, codebook: sh0Codebook, dimensions: baseDimensions)
         let shNTextures = try buildSHNTextures(from: quantizedPoints, dimensions: baseDimensions)
 
         let document = Document(
@@ -129,7 +130,7 @@ public final class SOGSV2SceneWriter: SplatSceneWriter {
             means: SOGSMeansInfoV2(mins: meansTextures.mins, maxs: meansTextures.maxs, files: ["means_l.webp", "means_u.webp"]),
             scales: SOGSScalesInfoV2(codebook: Self.scaleCodebook, mins: nil, maxs: nil, files: ["scales.webp"]),
             quats: SOGSQuatsInfoV2(files: ["quats.webp"]),
-            sh0: SOGSH0InfoV2(codebook: Self.sh0Codebook, mins: nil, maxs: nil, files: ["sh0.webp"]),
+            sh0: SOGSH0InfoV2(codebook: sh0Codebook.values, mins: nil, maxs: nil, files: ["sh0.webp"]),
             shN: shNTextures?.metadata
         )
 
@@ -229,14 +230,14 @@ public final class SOGSV2SceneWriter: SplatSceneWriter {
         return data
     }
 
-    private func buildSH0Texture(from points: [SplatScenePoint], quantizedPoints: [QuantizedPoint], dimensions: TextureDimensions) -> Data {
+    private func buildSH0Texture(from points: [SplatScenePoint], quantizedPoints: [QuantizedPoint], codebook: SH0Codebook, dimensions: TextureDimensions) -> Data {
         var data = Data(repeating: 0, count: dimensions.byteCount)
         for index in points.indices {
             let sh0 = quantizedPoints[index].shCoefficients[0]
             let baseOffset = index * 4
-            data[baseOffset + 0] = Self.encodeSH0(sh0.x)
-            data[baseOffset + 1] = Self.encodeSH0(sh0.y)
-            data[baseOffset + 2] = Self.encodeSH0(sh0.z)
+            data[baseOffset + 0] = codebook.label(of: sh0.x)
+            data[baseOffset + 1] = codebook.label(of: sh0.y)
+            data[baseOffset + 2] = codebook.label(of: sh0.z)
             data[baseOffset + 3] = Self.encodeOpacity(points[index].opacity.asLinearFloat)
         }
         return data
@@ -341,11 +342,89 @@ public final class SOGSV2SceneWriter: SplatSceneWriter {
         }
     }
 
-    private static let shC0: Float = 0.28209479177387814
+    /// The 256 base colours (SH band 0) a file can hold, fitted to its own splats. A trained model
+    /// keeps base colours outside 0...1, which its higher SH bands and blending rely on, so a table
+    /// fixed to 0...1 would clamp them and change the image. A model with at most 256 distinct
+    /// values, such as one read from a SOG file, keeps them exactly; any other gets a 1D k-means.
+    private struct SH0Codebook {
+        private static let entryCount = 256
+        private static let iterations = 10
+
+        let values: [Float]
+
+        init(fitting points: [QuantizedPoint]) {
+            var samples: [Float] = []
+            samples.reserveCapacity(points.count * 3)
+            for point in points {
+                let sh0 = point.shCoefficients[0]
+                samples.append(sh0.x.isFinite ? sh0.x : 0)
+                samples.append(sh0.y.isFinite ? sh0.y : 0)
+                samples.append(sh0.z.isFinite ? sh0.z : 0)
+            }
+            samples.sort()
+
+            var distinct: [Float] = []
+            for sample in samples where distinct.last != sample {
+                distinct.append(sample)
+                if distinct.count > Self.entryCount { break }
+            }
+            if distinct.count <= Self.entryCount {
+                let padding = distinct.last ?? 0
+                values = distinct + Array(repeating: padding, count: Self.entryCount - distinct.count)
+            } else {
+                values = Self.kMeans(sorted: samples)
+            }
+        }
+
+        private static func kMeans(sorted: [Float]) -> [Float] {
+            let count = sorted.count
+            var runningSum = [Double](repeating: 0, count: count + 1)
+            for index in 0..<count {
+                runningSum[index + 1] = runningSum[index] + Double(sorted[index])
+            }
+            func firstIndex(notBelow value: Float) -> Int {
+                var low = 0, high = count
+                while low < high {
+                    let middle = (low + high) / 2
+                    if sorted[middle] < value { low = middle + 1 } else { high = middle }
+                }
+                return low
+            }
+
+            var centres = (0..<entryCount).map { sorted[(2 * $0 + 1) * count / (2 * entryCount)] }
+            for _ in 0..<iterations {
+                // Boundaries halfway between neighbouring centres split the sorted samples into
+                // runs, and each centre moves to the mean of its run.
+                var start = 0
+                for entry in 0..<entryCount {
+                    let end = entry == entryCount - 1
+                        ? count
+                        : firstIndex(notBelow: (centres[entry] + centres[entry + 1]) / 2)
+                    if end > start {
+                        centres[entry] = Float((runningSum[end] - runningSum[start]) / Double(end - start))
+                        start = end
+                    }
+                }
+                centres.sort()
+            }
+            return centres
+        }
+
+        func label(of value: Float) -> UInt8 {
+            let target = value.isFinite ? value : 0
+            var low = 0, high = values.count - 1
+            while low < high {
+                let middle = (low + high) / 2
+                if values[middle] < target { low = middle + 1 } else { high = middle }
+            }
+            if low > 0, abs(values[low - 1] - target) <= abs(values[low] - target) { low -= 1 }
+            return UInt8(low)
+        }
+    }
+
     private static let sqrtHalfTimesTwo = Float(sqrt(2.0))
 
     private static let scaleCodebook: [Float] = (0..<256).map { Float($0) / 16.0 - 10.0 }
-    private static let sh0Codebook: [Float] = (0..<256).map { (Float($0) / 255.0 - 0.5) / shC0 }
     private static let shNCodebook: [Float] = (0..<256).map { (Float($0) - 128.0) / 128.0 }
 
     private static func makeBaseTextureDimensions(pointCount: Int) -> TextureDimensions {
@@ -393,10 +472,6 @@ public final class SOGSV2SceneWriter: SplatSceneWriter {
 
     private static func encodeScale(_ value: Float) -> UInt8 {
         clipToUInt8(((value + 10.0) * 16.0).rounded())
-    }
-
-    private static func encodeSH0(_ value: Float) -> UInt8 {
-        clipToUInt8((0.5 + shC0 * value) * 255.0)
     }
 
     private static func encodeSHN(_ value: Float) -> UInt8 {
