@@ -86,7 +86,7 @@ public struct SplatScenePoint: Sendable {
 
         // Inverse sigmoid
         static func logit(_ value: Float) -> Float {
-            log(value / (1 - value))
+            value >= 1 ? .infinity : value <= 0 ? -.infinity : log(value / (1 - value))
         }
 
         public var asLogitFloat: Float {

@@ -299,7 +299,7 @@ static FragmentIn splatVertexInternal(Splat splat,
     }
     // Locked and selection tints below are in the blend space too.
     out.color.rgb = colorForBlending(out.color.rgb);
-    out.color.a = min(out.color.a * half(opacityScale), half(1.0));
+    out.color.a = min(out.color.a * half(opacityScale), half(1.5625));
     if ((editState & (1u << 2)) != 0u) {
         constexpr half4 lockedTint = half4(1.0h, 0.72h, 0.22h, 0.65h);
         out.color.rgb = mix(out.color.rgb, lockedTint.rgb, lockedTint.a);
@@ -336,7 +336,7 @@ FragmentIn splatVertex(Splat splat,
                        const device ushort *transformIndices,
                        const device float4x4 *transformPalette) {
     return splatVertexInternal(splat,
-                               unpackSplatColor(splat.packedColor),
+                               unpackSplat(splat),
                                uniforms,
                                relativeVertexIndex,
                                splatID,
@@ -379,7 +379,7 @@ FragmentIn selectedOutlineVertex(Splat splat,
                                  const device ushort *transformIndices,
                                  const device float4x4 *transformPalette) {
     return splatVertexInternal(splat,
-                               unpackSplatColor(splat.packedColor),
+                               unpackSplat(splat),
                                uniforms,
                                relativeVertexIndex,
                                splatID,

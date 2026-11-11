@@ -160,6 +160,7 @@ kernel void decompressChunk(
     uint outputIdx = outputOffset + gid;
     outputSplats[outputIdx].position = packed_float3(position.x, position.y, position.z);
     outputSplats[outputIdx].packedColor = pack_half_to_unorm4x8(color);
+    outputSplats[outputIdx].linearOpacity = float(color.a);
     outputSplats[outputIdx].covA = packed_half3(covA.x, covA.y, covA.z);
     outputSplats[outputIdx].covB = packed_half3(covB.x, covB.y, covB.z);
 }
@@ -201,6 +202,7 @@ kernel void decompressChunks(
     uint outputIdx = outputOffsets[chunkIdx] + localIdx;
     outputSplats[outputIdx].position = packed_float3(position.x, position.y, position.z);
     outputSplats[outputIdx].packedColor = pack_half_to_unorm4x8(color);
+    outputSplats[outputIdx].linearOpacity = float(color.a);
     outputSplats[outputIdx].covA = packed_half3(covA.x, covA.y, covA.z);
     outputSplats[outputIdx].covB = packed_half3(covB.x, covB.y, covB.z);
 }
@@ -243,6 +245,7 @@ kernel void streamDecompressSplats(
 
     outputSplats[gid].position = packed_float3(position.x, position.y, position.z);
     outputSplats[gid].packedColor = pack_half_to_unorm4x8(color);
+    outputSplats[gid].linearOpacity = float(color.a);
     outputSplats[gid].covA = packed_half3(covA.x, covA.y, covA.z);
     outputSplats[gid].covB = packed_half3(covB.x, covB.y, covB.z);
 }

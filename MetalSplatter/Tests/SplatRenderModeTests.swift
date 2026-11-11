@@ -82,7 +82,7 @@ final class SplatRenderModeTests: XCTestCase {
         XCTAssertEqual(uniforms.isOrthographic, 1)
     }
 
-    func testSPZDegree4CoefficientsFallbackToRenderableDegree3() {
+    func testDegree4CoefficientsRemainRenderableAndCanBeExplicitlyReduced() {
         let coefficients = (0..<25).map { SIMD3<Float>(repeating: Float($0)) }
 
         var bands = [SIMD3<Float16>](repeating: SIMD3(repeating: -1), count: 15)
@@ -90,7 +90,7 @@ final class SplatRenderModeTests: XCTestCase {
             FastSHSplatRenderer.writeRendererSupportedSHBands(coefficients, count: 15, to: $0.baseAddress!)
         }
 
-        XCTAssertEqual(SphericalHarmonicsEvaluator.degreeFromCoefficientCount(coefficients.count), 3)
+        XCTAssertEqual(SphericalHarmonicsEvaluator.degreeFromCoefficientCount(coefficients.count), 4)
         XCTAssertEqual(bands[0].x, 1)
         XCTAssertEqual(bands[14].x, 15)
     }

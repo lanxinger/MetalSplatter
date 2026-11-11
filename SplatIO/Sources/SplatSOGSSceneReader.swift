@@ -78,7 +78,7 @@ public class SplatSOGSSceneReader: SplatSceneReader, @unchecked Sendable {
             let json = try JSONSerialization.jsonObject(with: metaData) as? [String: Any]
             if let version = json?["version"] as? Int {
                 print("SplatSOGSSceneReader: Detected SOGS version \(version)")
-                if version == 2 {
+                if version == 2 || version == 3 {
                     // Delegate to v2 reader
                     print("SplatSOGSSceneReader: Delegating to v2 reader for version 2 format")
                     let v2Reader = try SplatSOGSSceneReaderV2(metaURL)

@@ -173,6 +173,33 @@ final class FastSHRendererRegressionTests: XCTestCase {
         XCTAssertEqual(Array(UnsafeBufferPointer(start: values, count: 2)), [0, 1], "GPU sort: \(useGPU)")
     }
 
+    func testSOGV3OpaqueCorePreservesMassAndFootprint() async throws {
+        let gpu = try GPU()
+        var splat = point([.zero])
+        splat.opacity = .linearFloat(1)
+        try await gpu.load([splat])
+        let normal = try await gpu.render(camera(eye: outgoing * 5))
+        splat.opacity = .linearFloat(1.5625)
+        try await gpu.load([splat])
+        let compensated = try await gpu.render(camera(eye: outgoing * 5))
+        let before = normal.reduce(Float(0)) { $0 + $1.w }
+        let after = compensated.reduce(Float(0)) { $0 + $1.w }
+        XCTAssertEqual(after / before, 1.5625, accuracy: 0.03)
+        XCTAssertTrue(compensated.allSatisfy { $0.w <= 1.001 })
+        XCTAssertEqual(MemoryLayout<SplatRenderer.Splat>.stride, 32)
+    }
+
+    func testFourthSHBandThroughGPU() async throws {
+        let gpu = try GPU()
+        var coefficients = Array(repeating: SIMD3<Float>.zero, count: 25)
+        coefficients[20] = SIMD3<Float>(repeating: 0.4)
+        try await gpu.load([point(coefficients)])
+        let z = -outgoing.z, zz = z * z
+        let value: Float = 0.5 + 0.4 * 0.10578554691520431 * (zz * (35 * zz - 30) + 3)
+        assertColor(try await gpu.render(camera(eye: outgoing * 5)), x: 32, y: 32,
+                    expected: SIMD3(repeating: value), context: "SOG v3 SH4")
+    }
+
     func testAllSHDegreesBasisFunctionsAndRGBChannelsThroughBaseDispatch() async throws {
         let gpu = try GPU()
         let viewport = camera(eye: outgoing * 5)

@@ -70,6 +70,20 @@ struct SHEvaluateParams {
     uint degree;           // SH degree (0-3) - kept for compatibility, but function constants are preferred
 };
 
+// SOG v3's optional fourth band, ordered m=-4...4 (Graphdeco real SH).
+template <typename T>
+inline float3 evaluateBand4(float3 d, device const T* c) {
+    float x=d.x,y=d.y,z=d.z,xx=x*x,yy=y*y,zz=z*z;
+    float b[9] = {
+        2.5033429417967046f*x*y*(xx-yy), -1.7701307697799304f*y*z*(3*xx-yy),
+        0.9461746957575601f*x*y*(7*zz-1), -0.6690465435572892f*y*z*(7*zz-3),
+        0.10578554691520431f*(zz*(35*zz-30)+3), -0.6690465435572892f*x*z*(7*zz-3),
+        0.47308734787878004f*(xx-yy)*(7*zz-1), -1.7701307697799304f*x*z*(xx-3*yy),
+        0.6258357354491761f*(xx*(xx-3*yy)-yy*(3*xx-yy))
+    };
+    float3 result=0; for(uint i=0;i<9;++i)result+=b[i]*float3(c[i]); return result;
+}
+
 // ============================================================================
 // Half-precision SH evaluation using function constants (compile-time branching)
 // Reads half3 coefficients, computes in half precision — halves memory bandwidth.
@@ -114,6 +128,7 @@ half4 evaluateSHSpecializedHalf(float3 dir, device const half3* sh_coeffs) {
         result += SH_C3_H[6] * d.x * (xx - 3.0h * yy) * sh_coeffs[15];
     }
 
+    if (SH_DEGREE >= 4) result += half3(evaluateBand4(float3(d), sh_coeffs + 16));
     result = clamp(result, 0.0h, 1.0h);
     return half4(result, 1.0h);
 }
@@ -155,6 +170,7 @@ half4 evaluateSHHalf(float3 dir, half3 sh_dc, device const half3* sh_bands, uint
         result += SH_C3_H[6] * d.x * (xx - 3.0h * yy) * sh_bands[14];
     }
 
+    if (degree >= 4) result += half3(evaluateBand4(float3(d), sh_bands + 15));
     // Floored only, as the trainer does. See fastSHSplatColor.
     result = max(result, 0.0h);
     return half4(result, 1.0h);
@@ -205,6 +221,7 @@ float4 evaluateSHSpecialized(float3 dir, device const float3* sh_coeffs) {
     }
 
     // Clamp negative values and limit to [0, 1]
+    if (SH_DEGREE >= 4) result += float3(evaluateBand4(float3(d), sh_coeffs + 16));
     result = clamp(result, 0.0f, 1.0f);
     return float4(result, 1.0f);
 }
@@ -254,6 +271,7 @@ float4 evaluateSH(float3 dir, device const float3* sh_coeffs, uint degree) {
     }
 
     // Clamp negative values and limit to [0, 1]
+    if (degree >= 4) result += float3(evaluateBand4(float3(d), sh_coeffs + 16));
     result = clamp(result, 0.0f, 1.0f);
     return float4(result, 1.0f);
 }

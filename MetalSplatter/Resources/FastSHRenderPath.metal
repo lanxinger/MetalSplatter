@@ -39,6 +39,7 @@ typedef struct {
     uint shPaletteIndex;         // Index into SH palette (for SOGS)
     ushort shDegree;             // SH degree (0-3)
     packed_half3 shDC;           // DC coefficient, which the palette doesn't hold
+    float linearOpacity;
 } SplatSH;
 
 // SH is expressed in the scene frame, independently of the covariance quaternion.
@@ -65,6 +66,7 @@ half4 fastSHSplatColor(SplatSH splatSH,
                        device const half3* shPalette,
                        constant FastSHParams& params) {
     half4 baseColor = unpackSplatColor(splatSH.packedBaseColor);
+    baseColor.a = half(splatSH.linearOpacity);
     half4 tintColor = half4(splatSH.tintColor);
 
     const uint invalidIndex = 0xffffffffu;
@@ -138,6 +140,7 @@ inline FragmentIn fastSHSplatVertex(uint vertexID,
     Splat splat;
     splat.position = splatSH.position;
     splat.packedColor = 0;
+    splat.linearOpacity = splatSH.linearOpacity;
     splat.covA = splatSH.covA;
     splat.covB = splatSH.covB;
     half4 color = fastSHSplatColor(splatSH, uniforms, appearanceViewMatrix, shPalette, params);

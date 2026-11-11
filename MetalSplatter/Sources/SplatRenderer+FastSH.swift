@@ -40,10 +40,13 @@ extension SplatRenderer {
         var shDegree: UInt16               // SH degree (0-3)
         var shDC: PackedHalf3              // DC coefficient, which the palette doesn't hold
 
+        var linearOpacity: Float
+
         /// Convert from regular Splat + SH info
         init(splat: Splat, rotation: simd_quatf, shIndex: UInt32 = 0, shDegree: UInt16 = 0, shDC: PackedHalf3 = PackedHalf3(x: 0, y: 0, z: 0)) {
             self.position = splat.position
             self.baseColor = splat.packedColor
+            self.linearOpacity = splat.linearOpacity
             self.tintColor = SIMD4<Float>(1, 1, 1, 1)
             self.rotation = rotation.vector
             self.covA = splat.covA
@@ -478,6 +481,7 @@ public class FastSHSplatRenderer: SplatRenderer, @unchecked Sendable {
         // result rather than applying the import transfer curve a second time.
         for index in 0..<min(splatSHBuffer.count, splatBuffer.count) {
             splatSHBuffer.values[index].baseColor = splatBuffer.values[index].packedColor
+            splatSHBuffer.values[index].linearOpacity = splatBuffer.values[index].linearOpacity
         }
         return true
     }

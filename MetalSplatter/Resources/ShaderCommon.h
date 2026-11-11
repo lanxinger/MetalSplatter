@@ -62,7 +62,7 @@ typedef struct
     Uniforms uniforms[kMaxViewCount];
 } UniformsArray;
 
-// Compact splat struct — 28 bytes per splat.
+// Splat geometry plus true opacity — 32 bytes per splat.
 // Color stored as RGBA8 (4 bytes) instead of half4 (8 bytes) for 12.5% less memory.
 typedef struct
 {
@@ -70,11 +70,18 @@ typedef struct
     uint packedColor;           // 4 bytes — RGBA8 unorm
     packed_half3 covA;          // 6 bytes
     packed_half3 covB;          // 6 bytes
-} Splat;                        // Total: 28 bytes
+    float linearOpacity;        // 4 bytes, true opacity including SOG v3 above one
+} Splat;                        // Total: 32 bytes
 
 // Unpack RGBA8 color from Splat struct
 inline half4 unpackSplatColor(uint packed) {
     return unpack_unorm4x8_to_half(packed);
+}
+
+inline half4 unpackSplat(Splat splat) {
+    half4 color = unpackSplatColor(splat.packedColor);
+    color.a = half(splat.linearOpacity);
+    return color;
 }
 
 inline float covarianceDeterminant(float3 cov2D) {

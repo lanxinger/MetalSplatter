@@ -10,12 +10,14 @@ struct Splat {
     var packedColor: UInt32  // RGBA8 unorm
     var covA: (Float16, Float16, Float16)
     var covB: (Float16, Float16, Float16)
+    var linearOpacity: Float
 
     init() {
         position = (0, 0, 0)
         packedColor = 0xFFFFFFFF  // white, fully opaque
         covA = (0.1, 0, 0.1)
         covB = (0, 0.1, 0)
+        linearOpacity = 1
     }
 
     init(position: (Float, Float, Float),
@@ -26,6 +28,7 @@ struct Splat {
         self.packedColor = packedColor
         self.covA = covA
         self.covB = covB
+        self.linearOpacity = Float(packedColor >> 24) / 255
     }
 }
 

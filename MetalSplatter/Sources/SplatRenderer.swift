@@ -410,6 +410,7 @@ public class SplatRenderer: @unchecked Sendable {
         var packedColor: UInt32  // RGBA8 unorm
         var covA: PackedHalf3
         var covB: PackedHalf3
+        var linearOpacity: Float = 1 // Keeps SOG v3 opacity above one out of UNORM8.
     }
 
     static func packRGBA8(_ r: Float, _ g: Float, _ b: Float, _ a: Float) -> UInt32 {
@@ -2616,6 +2617,7 @@ public class SplatRenderer: @unchecked Sendable {
                     for i in 0..<min(colors.count, bufferCount) {
                         let c = colors[i]
                         values[i].packedColor = SplatRenderer.packRGBA8(c.x, c.y, c.z, c.w)
+                        values[i].linearOpacity = c.w
                         didApplyUpdate = true
                         if i < sourceScenePoints.count {
                             sourceScenePoints[i].color = .linearFloat(SIMD3<Float>(c.x, c.y, c.z))
@@ -2626,6 +2628,7 @@ public class SplatRenderer: @unchecked Sendable {
                     for (i, colorIndex) in range.enumerated() where colorIndex < bufferCount {
                         let c = colors[i]
                         values[colorIndex].packedColor = SplatRenderer.packRGBA8(c.x, c.y, c.z, c.w)
+                        values[colorIndex].linearOpacity = c.w
                         didApplyUpdate = true
                         if colorIndex < sourceScenePoints.count {
                             sourceScenePoints[colorIndex].color = .linearFloat(SIMD3<Float>(c.x, c.y, c.z))
@@ -2635,6 +2638,7 @@ public class SplatRenderer: @unchecked Sendable {
                 case .single(let color, let index):
                     guard index < bufferCount else { continue }
                     values[index].packedColor = SplatRenderer.packRGBA8(color.x, color.y, color.z, color.w)
+                    values[index].linearOpacity = color.w
                     didApplyUpdate = true
                     if index < sourceScenePoints.count {
                         sourceScenePoints[index].color = .linearFloat(SIMD3<Float>(color.x, color.y, color.z))
@@ -4550,7 +4554,8 @@ extension SplatRenderer.Splat {
         self.init(position: MTLPackedFloat3Make(position.x, position.y, position.z),
                   packedColor: SplatRenderer.packRGBA8(color.x, color.y, color.z, color.w),
                   covA: SplatRenderer.PackedHalf3(x: Float16(cov3D[0, 0]), y: Float16(cov3D[0, 1]), z: Float16(cov3D[0, 2])),
-                  covB: SplatRenderer.PackedHalf3(x: Float16(cov3D[1, 1]), y: Float16(cov3D[1, 2]), z: Float16(cov3D[2, 2])))
+                  covB: SplatRenderer.PackedHalf3(x: Float16(cov3D[1, 1]), y: Float16(cov3D[1, 2]), z: Float16(cov3D[2, 2])),
+                  linearOpacity: color.w)
     }
 }
 

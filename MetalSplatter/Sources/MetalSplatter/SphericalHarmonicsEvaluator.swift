@@ -85,7 +85,7 @@ public class SphericalHarmonicsEvaluator {
     /// Creates 4 specialized pipeline states (one per SH degree) using function constants.
     /// Prefers half-precision kernels (50% less palette bandwidth); falls back to float if unavailable.
     private func createSpecializedPipelines(library: MTLLibrary) throws {
-        for degree in 0...3 {
+        for degree in 0...4 {
             // Create function constant values for this degree
             let constants = MTLFunctionConstantValues()
             var degreeValue = UInt32(degree)
@@ -314,7 +314,7 @@ extension SphericalHarmonicsEvaluator {
         case 9: return 2   // DC + bands 1,2
         case 15: return 3  // SPZ format: DC + 14 additional coeffs
         case 16: return 3  // Standard format: DC + bands 1,2,3
-        case 25: return 3  // SPZ degree 4 data; render supported bands 0-3
+        case 25: return 4  // SOG v3 / SPZ degree 4
         default: return 0
         }
     }

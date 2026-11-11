@@ -53,8 +53,14 @@ FragmentIn splatVertex(Splat splat,
 // Inline helper functions
 inline half splatFragmentAlpha(half2 relativePosition, half splatAlpha) {
     half negativeMagnitudeSquared = -dot(relativePosition, relativePosition);
-    // Use fast exponential for significant performance improvement
-    return (negativeMagnitudeSquared < -kBoundsRadiusSquared) ? half(0) : fast::exp(half(0.5) * negativeMagnitudeSquared) * splatAlpha;
+    if (negativeMagnitudeSquared < -kBoundsRadiusSquared) return half(0);
+    if (splatAlpha > half(1)) {
+        // SOG v3: preserve mass with an opaque core and a stretched edge, at 3 sigma.
+        float core = sqrt(0.259551217727f + 0.568622386028f * (min(float(splatAlpha), 1.5625f) - 1)) - 0.509461694073f;
+        float radius = max(0.0f, sqrt(float(-negativeMagnitudeSquared)) - 3 * core) / (1 - core);
+        return half(exp(-0.5f * radius * radius));
+    }
+    return fast::exp(half(0.5) * negativeMagnitudeSquared) * splatAlpha;
 }
 
 inline half3 lodTintForBand(half band) {

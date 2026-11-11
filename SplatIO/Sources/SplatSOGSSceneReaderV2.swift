@@ -93,6 +93,10 @@ public class SplatSOGSSceneReaderV2: SplatSceneReader, @unchecked Sendable {
             traceSOGSV2("Loaded metadata from standalone file")
         }
         
+        if (try JSONSerialization.jsonObject(with: metaData) as? [String: Any])?["version"] as? Int == 3 {
+            return try SOGV3Decoder.decode(metaData, load: loadAndDecodeWebPV2)
+        }
+
         // First try to decode as v2
         let metadata: SOGSMetadataV2
         do {
