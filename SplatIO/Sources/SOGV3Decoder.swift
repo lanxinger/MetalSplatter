@@ -8,7 +8,9 @@ enum SOGV3Decoder {
         struct Means: Decodable { let mins: [Float]; let maxs: [Float]; let files: [String] }
         struct Book: Decodable { let codebook: [Float?]; let files: [String] }
         struct SH: Decodable { let count: Int; let bands: Int; let codebook: [Float?]; let files: [String] }
+        struct Files: Decodable { let files: [String] }
         let version: Int; let count: Int; let means: Means; let scales: Book; let sh0: Book; let shN: SH?
+        let quats: Files?
     }
     static func rotation(_ a: UInt8, _ b: UInt8, _ c: UInt8) -> simd_quatf {
         let p = SIMD3(Float(Int(a) - 128), Float(Int(b) - 128), Float(Int(c) - 128)) / 127
@@ -25,6 +27,7 @@ enum SOGV3Decoder {
               m.means.mins.count == 3, m.means.maxs.count == 3, m.means.files.count == 2,
               m.scales.files.count == 1, m.sh0.files.count == 1,
               m.scales.codebook.count == 256, m.sh0.codebook.count == 256 else { throw Failure.invalidMetadata }
+        guard m.quats == nil || m.quats?.files.count == 1 else { throw Failure.invalidMetadata }
         for k in 0..<3 {
             guard m.means.mins[k].isFinite, m.means.maxs[k].isFinite,
                   m.means.mins[k] <= m.means.maxs[k], abs(m.means.mins[k]) < 88,
@@ -45,7 +48,9 @@ enum SOGV3Decoder {
         }
         let lo = try texture(m.means.files[0], minimum: m.count), hi = try texture(m.means.files[1], minimum: m.count)
         let scales = try texture(m.scales.files[0], minimum: m.count), dc = try texture(m.sh0.files[0], minimum: m.count)
+        let quats = try m.quats.map { try texture($0.files[0], minimum: m.count) }
         for image in [hi, scales, dc] where image.width != lo.width || image.height != lo.height { throw Failure.invalidTextureData }
+        if let quats, quats.width != lo.width || quats.height != lo.height { throw Failure.invalidTextureData }
         let terms = (degree + 1) * (degree + 1) - 1
         var palette: WebPDecoder.DecodedImage?, labels: WebPDecoder.DecodedImage?
         if let sh = m.shN, degree > 0 {
@@ -80,7 +85,8 @@ enum SOGV3Decoder {
             }
             points.append(SplatScenePoint(position: position, color: .sphericalHarmonic(coefficients),
                 opacity: .linearFloat(opacity(dc.pixels[o+3])), scale: .exponent(scale),
-                rotation: rotation(lo.pixels[o+3], hi.pixels[o+3], scales.pixels[o+3])))
+                rotation: rotation(quats?.pixels[o] ?? lo.pixels[o+3],
+                    quats?.pixels[o+1] ?? hi.pixels[o+3], quats?.pixels[o+2] ?? scales.pixels[o+3])))
         }
         return points
     }

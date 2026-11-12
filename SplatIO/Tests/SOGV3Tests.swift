@@ -41,6 +41,20 @@ final class SOGV3Tests: XCTestCase {
         XCTAssertEqual(decoded[2].opacity.asLinearFloat, 1)
         XCTAssertEqual(decoded[2].color.asSphericalHarmonic.count, 16)
     }
+    func testV3QuaternionTextureMatchesLegacyLayout() throws {
+        for degree in [0, 3, 4] {
+            let url = try XCTUnwrap(Bundle.module.url(forResource: "independent-v3-quats-sh\(degree)", withExtension: "sog", subdirectory: "TestData"))
+            let current = try AutodetectSceneReader(url).readScene()
+            let legacy = try AutodetectSceneReader(fixture(degree)).readScene()
+            XCTAssertEqual(current.count, legacy.count)
+            for (a, b) in zip(current, legacy) {
+                XCTAssertEqual(a.position, b.position)
+                XCTAssertEqual(a.rotation.vector, b.rotation.vector)
+                XCTAssertEqual(a.opacity.asLinearFloat, b.opacity.asLinearFloat)
+                XCTAssertEqual(a.color.asSphericalHarmonic, b.color.asSphericalHarmonic)
+            }
+        }
+    }
     func testUnsupportedVersionAndMalformedV3AreRejected() throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
