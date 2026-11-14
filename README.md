@@ -1,6 +1,6 @@
 # MetalSplatter
 
-[![Swift 6.0+](https://img.shields.io/badge/Swift-6.0+-orange.svg)](https://swift.org)
+[![Swift 6.2+](https://img.shields.io/badge/Swift-6.2+-orange.svg)](https://swift.org)
 [![Platforms](https://img.shields.io/badge/Platforms-iOS%2017%2B%20%7C%20macOS%2014%2B%20%7C%20visionOS%201%2B-blue.svg)](https://developer.apple.com)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
@@ -14,11 +14,12 @@ MetalSplatter implements GPU-accelerated rendering of scenes captured via [3D Ga
 
 - **Multi-Platform Rendering**: iOS/iPadOS, macOS, and visionOS with platform-optimized rendering paths
 - **Editable Splat Workflows**: `SplatEditor` with GPU-backed selection, preview transforms, committed transforms, half-space plane cuts, hide/show, lock/unlock, delete/restore, duplicate, separate, undo/redo, and export
-- **Multiple File Formats**: PLY (ASCII/binary), SPLAT, SPZ/SPX, glTF/GLB, and SOGS v1/v2
+- **Multiple File Formats**: PLY (ASCII/binary), SPLAT, SPZ/SPX, glTF/GLB, SOGS v1/v2, and SOG v3 (read)
 - **Advanced Rendering Pipeline**: Single-stage and multi-stage pipelines with tile memory for high-quality depth blending
 - **GPU-Accelerated Sorting**: O(n) counting sort with camera-relative binning for optimal visual quality
 - **Spherical Harmonics**: Full SH support (degrees 0-3) for view-dependent lighting effects
-- **Level of Detail**: Distance-based LOD with configurable thresholds and skip factors
+- **Level of Detail**: Distance-based LOD with configurable distance thresholds
+- **Colour Grade & Index-Based Edits**: Live colour grade, plus delete/select-by-index masks for callers that compute their own edits
 - **Metal 4 Support**: Bindless rendering, tensor operations, and SIMD-group optimizations on supported hardware
 - **Selection Feedback**: Selected splats can be tinted and outlined; locked splats use a separate tint path
 - **AR Integration**: ARKit support on iOS for augmented reality experiences
@@ -240,6 +241,9 @@ swift run SplatConverter input.ply -f glb -o output.glb
 # Convert to SOGS v2
 swift run SplatConverter input.ply -f sog -o output.sog
 
+# Convert to SPZ
+swift run SplatConverter input.ply -f spz -o output.spz
+
 # Reorder by Morton code for better GPU cache coherency
 swift run SplatConverter input.ply -o output.splat --morton-order
 
@@ -249,7 +253,7 @@ swift run SplatConverter input.ply --describe --start 0 --count 10 -v
 
 **Options:**
 - `-o, --output-file`: Output file path
-- `-f, --output-format`: Format (`dotSplat`, `ply`, `ply-binary`, `ply-ascii`, `gltf`, `glb`, `sog`)
+- `-f, --output-format`: Format (`dotSplat`, `ply`, `ply-binary`, `ply-ascii`, `gltf`, `glb`, `sog`, `spz`)
 - `-m, --morton-order`: Reorder splats by Morton code for spatial locality
 - `--describe`: Print splat details
 - `--start`: First splat index (default: 0)
@@ -268,6 +272,7 @@ swift run SplatConverter input.ply --describe --start 0 --count 10 -v
 | GLB | `.glb` | ✓ | ✓ | Binary `KHR_gaussian_splatting` container |
 | SOGS v1 | `.sogs`, `meta.json` | ✓ | - | WebP-based folder layout |
 | SOGS v2 | `.sog` | ✓ | ✓ | Bundled archive format |
+| SOG v3 | `.sog` | ✓ | - | Read-only; see [SOG v3 input](#sog-v3-input) |
 | SOGS ZIP | `.zip` | ✓ | - | Legacy ZIP archive |
 
 Use `AutodetectSceneReader` for automatic format detection based on file extension and content.
@@ -277,10 +282,9 @@ Use `AutodetectSceneReader` for automatic format detection based on file extensi
 ### Rendering Options
 
 ```swift
-// Multi-stage pipeline for high-quality depth blending
-renderer.useMultiStagePipeline = true
-
-// High-quality depth for Vision Pro frame reprojection
+// High-quality depth for Vision Pro frame reprojection. The multi-stage
+// (tile memory) pipeline is selected automatically when this is on and a
+// depth format is set; the simulator always uses the single-stage path.
 renderer.highQualityDepth = true
 
 // Order-independent transparency (no sorting required)
@@ -289,8 +293,28 @@ renderer.useDitheredTransparency = true
 // Metal 3+ mesh shaders
 renderer.meshShaderEnabled = true
 
-// Metal 4 bindless rendering
-renderer.useMetal4Bindless = true
+// Metal 4 bindless rendering (OS 26+, Apple9-family GPU)
+if #available(iOS 26.0, macOS 26.0, visionOS 26.0, *), renderer.isMetal4BindlessAvailable {
+    try renderer.initializeMetal4Bindless()
+}
+```
+
+### Colour Grade & Index-Based Edits
+
+```swift
+// Live colour grade (nil for none); while set, the mesh-shader path isn't used
+renderer.colorGrade = SplatRenderer.ColorGrade(matrix: matrix_identity_float3x3,
+                                                offset: .zero,
+                                                opacityScale: 1)
+
+// Index masks are in the renderer's splat order; keep it equal to the scene's
+renderer.preserveSourceOrderOnAdd = true
+
+// Delete every splat whose byte is 0 (and restore the rest)
+try renderer.setDeletedSplats(keeping: keptMask)          // [UInt8], one per splat
+
+// Tint every splat whose byte is non-zero
+try renderer.setSelectedSplats(selectedMask, tint: SIMD4<Float>(1, 0.5, 0, 0.5))
 ```
 
 ### Sorting & Performance
@@ -333,11 +357,8 @@ renderer.endInteraction()
 // Distance thresholds for LOD levels
 renderer.lodThresholds = SIMD3<Float>(10, 25, 50)
 
-// Skip factors per LOD level (1 = all, 2 = half, etc.)
-renderer.lodSkipFactors = [1, 2, 4, 8]
-
-// Maximum render distance
-renderer.maxRenderDistance = 100.0
+// Skip factors per LOD level ([1, 2, 4, 8]) and the maximum render
+// distance (100) are fixed internal constants, not public properties.
 ```
 
 ### Spherical Harmonics
@@ -381,7 +402,7 @@ renderer.onSortComplete = { duration in
 }
 
 renderer.onRenderStart = { }
-renderer.onRenderComplete = { }
+renderer.onRenderComplete = { duration in }
 ```
 
 ## Platform-Specific Notes
@@ -472,5 +493,5 @@ Regression checks: `swift test --filter 'SOGV3Tests|FastSHRendererRegressionTest
 The v3 fixtures are independently generated by Plinth's
 `ci_scripts/generate_sog_v3_fixtures.py` and `ci_scripts/generate_sog_v3_quats_fixtures.py`
 (both rotation layouts, position/rotation/opacity endpoints,
-large palettes, SH4, and an out-of-range label). Publish this source and pin the
-reviewed revision in app release configuration before store distribution.
+large palettes, SH4, and an out-of-range label). This source is published, and
+Plinth pins revision `08e24e5` in its app release configuration.

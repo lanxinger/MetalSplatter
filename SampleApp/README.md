@@ -17,6 +17,8 @@ The app still contains some shared rendering infrastructure for other Apple plat
 The iOS/iPadOS demo exposes these tools in the editing toolbar:
 
 - Selection: point, rect, brush, lasso, flood, eyedropper/color-match, sphere, box, polygon, and measure
+- Cut: axis-aligned plane cuts that delete one side of the plane
+- Align: center, center+floor, floor, and quarter-turn rotations around X/Y/Z
 - Editing: move, rotate, scale, hide, unhide all, lock, unlock all, delete, restore deleted, duplicate, separate, undo, redo, and export
 - Selection utilities: replace/add/subtract combine modes plus all/none/invert helpers
 
@@ -62,6 +64,7 @@ The sample app can load the same formats supported by `AutodetectSceneReader`:
 | GLB | `.glb` | Binary `KHR_gaussian_splatting` |
 | SOGS v1 | `.sogs`, `meta.json` | Read-only in the library |
 | SOGS v2 | `.sog` | Read/write in the library |
+| SOG v3 | `.sog` | Read-only in the library |
 | SOGS ZIP | `.zip` | Legacy read-only archive |
 
 The export action in the editing UI writes the currently visible edited scene using the library’s scene writers.
